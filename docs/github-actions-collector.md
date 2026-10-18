@@ -1,14 +1,13 @@
 # GitHub Actions 采集
 
-48query 的生产采集使用 GitHub Actions Secrets，不把 Pocket48 凭证写入仓库、D1 或采集日志。
+48query 的生产采集使用 GitHub Actions。Pocket48 凭证由 SparkHub API 加密保存，采集任务通过独立读取令牌临时获取，不把凭证写入仓库、D1 或采集日志。
 
 ## 配置
 
-在运行采集的仓库中创建 `production` environment。`POCKET48_TOKEN`、`POCKET48_DEVICE_ID` 必须放在仓库级 Actions Secrets，供 SparkHub 后台轮换；不要在 environment 内创建同名值覆盖它们。`INGEST_KEY` 也可放在仓库级。需配置以下 Secrets：
+在运行采集的仓库中创建 `production` environment。`COLLECTOR_CREDENTIAL_READ_TOKEN` 必须放在仓库级 Actions Secret，值与 SparkHub Worker 的同名 Secret 一致。`INGEST_KEY` 也可放在仓库级。旧的 `POCKET48_TOKEN` 和 `POCKET48_DEVICE_ID` 在切换完成前可以保留，但新的工作流不会读取它们。需配置以下 Secrets：
 
 ```text
-POCKET48_TOKEN
-POCKET48_DEVICE_ID
+COLLECTOR_CREDENTIAL_READ_TOKEN
 INGEST_KEY
 ```
 
@@ -19,6 +18,7 @@ INGEST_API_URL
 COLLECTOR_MAX_PAGES       # 可选，默认 10
 COLLECTOR_MAX_MEMBERS     # 可选，默认 0（全部成员）
 POCKET48_MIN_INTERVAL_MS  # 可选，默认 5000
+COLLECTOR_CREDENTIALS_URL # 可选，默认 https://api.bhwa233.com/api/collector/credentials
 ```
 
 `POCKET48_PA` 不需要配置。采集器会在每次 Pocket48 请求前通过项目内 WASM 动态生成签名。`accid`、`pwd` 和完整 `cred.json` 只用于本地登录或其他长连接场景，不能上传到仓库或 GitHub Secrets。
@@ -29,25 +29,14 @@ workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运
 
 ## 凭证轮换
 
-SparkHub 后台可以负责轮换，但明文凭证只能在后端短暂存在，不能由浏览器接收或写入 D1。推荐使用专用 GitHub App，而不是个人 PAT：
+SparkHub 后台负责轮换，明文凭证只在后端验证和采集任务内存中短暂存在，不会返回浏览器或写入 D1：
 
 1. 管理员在 SparkHub 后台完成管理员认证。
 2. 后端请求 Pocket48 发送短信验证码，手机号和验证码不写日志。
 3. 后端用验证码完成登录，拿到 token 和设备号。
 4. 后端立即请求 Pocket48 IM 用户信息，验证凭证的认证访问。
-5. 验证成功后，通过 GitHub REST API 的仓库公钥加密值，更新 `POCKET48_TOKEN` 和 `POCKET48_DEVICE_ID`。
-6. 后端只记录操作者、时间、版本和验证结果，不保存 token，也不向前端返回 token。
-
-GitHub App 只安装到采集仓库，并只授予 Repository Secrets 的 Read and write 权限。轮换接口应固定允许更新的 secret 名称，不能接受任意名称；验证码需要短时效、尝试次数和频率限制。验证失败时不得覆盖当前有效 Secret。
-
-GitHub Secrets 更新使用以下 GitHub REST API 组合：
-
-```text
-GET /repos/{owner}/{repo}/actions/secrets/public-key
-PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}
-```
-
-`PUT` 请求中的 `encrypted_value` 必须使用返回的仓库公钥和 sealed-box 算法生成。GitHub App 的安装访问令牌只在 SparkHub 后端请求期间使用，不进入前端、D1 或 GitHub Actions 的环境变量。
+5. 验证成功后，SparkHub 将凭证使用 AES-GCM 加密保存到 D1。
+6. 采集任务启动时请求 `COLLECTOR_CREDENTIALS_URL`，凭证只存在于当前进程内存中。
 
 ## 失败行为
 
@@ -63,4 +52,4 @@ workflow 不会打印环境变量、请求头或完整上游响应，也不会�
 - 生产 API 部署使用 `wrangler.d1.jsonc`（`pnpm deploy:api:db`）；无 D1 配置只用于独立 API 验证。
 - 初次部署将 `COLLECTOR_MAX_MEMBERS=1`、`COLLECTOR_MAX_PAGES=1`，完成真实单成员验证后再调整全量。当前没有真实采集批次时，页面标注演示数据。
 - 手动点击 **Run workflow** 时，首次验证请将 `max_pages`、`max_members` 两个输入都改成 `1`；表单输入优先于仓库变量。
-- 数据库、`production` environment、`INGEST_KEY` 和上述普通变量已完成首次部署配置。仍需在 SparkHub 配好 GitHub App，并通过短信轮换写入两个 Pocket48 Secrets，才能运行真实采集。当前成员、消息、录播页面仍使用演示数据；首页已连接概览 API，但没有真实批次时展示演示内容。
+- 数据库、`production` environment、`INGEST_KEY`、`COLLECTOR_CREDENTIAL_READ_TOKEN` 和上述普通变量需要在首次部署时配置。完成 SparkHub 凭证轮换后即可运行真实采集；当前成员、消息、录播页面仍使用演示数据时，首页会继续展示演示内容。

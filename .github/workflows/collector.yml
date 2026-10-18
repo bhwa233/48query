@@ -35,8 +35,8 @@ jobs:
       COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || vars.COLLECTOR_MAX_PAGES || '10' }}
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
       POCKET48_MIN_INTERVAL_MS: ${{ vars.POCKET48_MIN_INTERVAL_MS || '5000' }}
-      POCKET48_TOKEN: ${{ secrets.POCKET48_TOKEN }}
-      POCKET48_DEVICE_ID: ${{ secrets.POCKET48_DEVICE_ID }}
+      COLLECTOR_CREDENTIALS_URL: ${{ vars.COLLECTOR_CREDENTIALS_URL || 'https://api.bhwa233.com/api/collector/credentials' }}
+      COLLECTOR_CREDENTIAL_READ_TOKEN: ${{ secrets.COLLECTOR_CREDENTIAL_READ_TOKEN }}
       INGEST_API_URL: ${{ vars.INGEST_API_URL }}
       INGEST_KEY: ${{ secrets.INGEST_KEY }}
     steps:
@@ -45,8 +45,8 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          [[ -n "${POCKET48_TOKEN}" ]] || missing+=(POCKET48_TOKEN)
-          [[ -n "${POCKET48_DEVICE_ID}" ]] || missing+=(POCKET48_DEVICE_ID)
+          [[ -n "${COLLECTOR_CREDENTIALS_URL}" ]] || missing+=(COLLECTOR_CREDENTIALS_URL)
+          [[ -n "${COLLECTOR_CREDENTIAL_READ_TOKEN}" ]] || missing+=(COLLECTOR_CREDENTIAL_READ_TOKEN)
           [[ -n "${INGEST_API_URL}" ]] || missing+=(INGEST_API_URL)
           [[ -n "${INGEST_KEY}" ]] || missing+=(INGEST_KEY)
           if (( ${#missing[@]} > 0 )); then
