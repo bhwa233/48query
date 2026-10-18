@@ -8,6 +8,27 @@
       "when": 1792297956141,
       "tag": "0000_create_notes",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792304714693,
+      "tag": "0001_sleepy_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792305377998,
+      "tag": "0002_acoustic_viper",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792306762997,
+      "tag": "0004_violet_swordsman",
+      "breakpoints": true
     }
   ]
 }

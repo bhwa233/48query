@@ -13,6 +13,8 @@ coverage/
 !.env.local.example
 .dev.vars*
 !.dev.vars.example
+apps/collector/cred.json
+apps/collector/device-id
 .DS_Store
 next-env.d.ts
 playwright-report/

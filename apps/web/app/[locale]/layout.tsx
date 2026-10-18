@@ -40,6 +40,9 @@ export default async function LocaleLayout({
   if (!isLocale(rawLocale)) notFound();
   const locale: Locale = rawLocale;
   const content = messages[locale];
+  const navLabels = locale === "zh"
+    ? { members: "成员", messages: "消息", recordings: "录播" }
+    : { members: "Members", messages: "Messages", recordings: "Recordings" };
 
   return (
     <html lang={locale === "zh" ? "zh-CN" : "en"} suppressHydrationWarning>
@@ -62,21 +65,9 @@ export default async function LocaleLayout({
                 className="flex items-center gap-2"
                 aria-label={content.navigation}
               >
-                <Button
-                  asChild
-                  variant="ghost"
-                  size="sm"
-                  className="hidden sm:inline-flex"
-                >
-                  <a href={`/${locale}#example`}>{content.exampleLink}</a>
-                </Button>
-                {siteConfig.contentEnabled ? (
-                  <Button asChild variant="ghost" size="sm">
-                    <a href={`/${locale}/articles`}>
-                      {content.content.navigation}
-                    </a>
-                  </Button>
-                ) : null}
+                <Button asChild variant="ghost" size="sm"><a href={`/${locale}/members`}>{navLabels.members}</a></Button>
+                <Button asChild variant="ghost" size="sm"><a href={`/${locale}/messages`}>{navLabels.messages}</a></Button>
+                <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex"><a href={`/${locale}/recordings`}>{navLabels.recordings}</a></Button>
                 <Button asChild variant="ghost" size="sm">
                   <LocaleSwitch locale={locale} />
                 </Button>

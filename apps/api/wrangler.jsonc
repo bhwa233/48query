@@ -1,13 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "starter-api",
+  "name": "48query-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "compatibility_flags": [
     "nodejs_compat"
   ],
   "vars": {
-    "CORS_ORIGINS": "http://localhost:3000"
+    "CORS_ORIGINS": "https://48query-web.404174262.workers.dev"
   },
   "observability": {
     "enabled": true

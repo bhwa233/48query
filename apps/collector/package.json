@@ -1,0 +1,20 @@
+{
+  "name": "@starter/collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/cli.ts --dry-run",
+    "run": "tsx src/cli.ts",
+    "login": "node src/login.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint -c ../../.oxlintrc.json src --type-aware --ignore-pattern '**/*.mjs'"
+  },
+  "devDependencies": {
+    "@starter/config-ts": "workspace:*",
+    "@types/node": "24.19.2",
+    "oxlint": "1.88.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

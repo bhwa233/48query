@@ -1,13 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "starter-api",
+  "name": "48query-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "compatibility_flags": [
     "nodejs_compat"
   ],
   "vars": {
-    "CORS_ORIGINS": "http://localhost:3000"
+    "CORS_ORIGINS": "https://48query-web.404174262.workers.dev"
   },
   "observability": {
     "enabled": true
@@ -15,8 +15,8 @@
   "d1_databases": [
     {
       "binding": "APP_DB",
-      "database_name": "starter-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_name": "48query-db",
+      "database_id": "715563ed-4624-450d-99d3-a4e0242c90ab",
       "migrations_dir": "migrations"
     }
   ]

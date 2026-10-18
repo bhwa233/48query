@@ -196,6 +196,24 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  apps/collector:
+    devDependencies:
+      '@starter/config-ts':
+        specifier: workspace:*
+        version: link:../../packages/config-ts
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      oxlint:
+        specifier: 1.88.0
+        version: 1.88.0(oxlint-tsgolint@7.0.2004)
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   apps/api:
     dependencies:
       '@hono/zod-openapi':

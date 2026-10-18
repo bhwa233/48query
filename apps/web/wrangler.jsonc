@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "starter-web",
+  "name": "48query-web",
   "main": "vinext/server/app-router-entry",
   "compatibility_date": "2026-07-01",
   "compatibility_flags": [
@@ -11,7 +11,7 @@
     "binding": "ASSETS"
   },
   "vars": {
-    "NEXT_PUBLIC_SITE_URL": "http://localhost:3000",
-    "NEXT_PUBLIC_API_BASE_URL": ""
+    "NEXT_PUBLIC_SITE_URL": "https://48query-web.404174262.workers.dev",
+    "NEXT_PUBLIC_API_BASE_URL": "https://48query-api.404174262.workers.dev"
   }
 }

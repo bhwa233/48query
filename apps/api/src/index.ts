@@ -14,6 +14,7 @@ import {
 import type { AppEnv } from "./env";
 import notes from "./notes";
 import { parseCorsOrigins } from "@starter/shared/config";
+import query from "./query";
 
 const app = new OpenAPIHono<AppEnv>({
   defaultHook: (result, c) => {
@@ -125,9 +126,10 @@ app.openapi(
   (c) => c.json({ ok: true as const, data: c.req.valid("json") }, 200),
 );
 app.route("/api/notes", notes);
+app.route("/api/query", query);
 app.doc("/openapi.json", {
   openapi: "3.0.0",
-  info: { title: "Starter API", version: "0.1.0" },
+  info: { title: "48query API", version: "0.1.0" },
 });
 app.get("/docs", apiReference({ url: "/openapi.json" }));
 export default app;

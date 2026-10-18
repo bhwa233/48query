@@ -119,7 +119,13 @@ test("deployment guard rejects placeholders and overrides and accepts customized
       ["api", "apps/api/wrangler.jsonc"],
       ["api:db", "apps/api/wrangler.d1.jsonc"],
     ]) {
-      await copyFile(join(root, path), join(directory, path));
+      // Production configs are customized after initialization; rejection must
+      // use an explicit placeholder fixture rather than the deployed project.
+      await writeFile(join(directory, path), JSON.stringify({
+        name: "starter-placeholder",
+        vars: { CORS_ORIGINS: "http://localhost:3000", NEXT_PUBLIC_SITE_URL: "http://localhost:3000" },
+        ...(profile === "api:db" ? { d1_databases: [{ database_id: "00000000-0000-0000-0000-000000000000" }] } : {}),
+      }));
       const result = run(profile);
       assert.equal(result.status, 1);
       assert.match(result.stderr, /Replace the starter Worker name/);

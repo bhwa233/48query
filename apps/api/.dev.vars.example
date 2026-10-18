@@ -1,2 +1,4 @@
 # No secrets required. Allowed browser origins, separated by commas.
 CORS_ORIGINS=http://localhost:3000
+# Required for collector writes. Keep this value out of git.
+INGEST_KEY=replace-with-a-local-ingest-key

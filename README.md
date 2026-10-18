@@ -2,16 +2,17 @@
 
 基于 [cloudflare-web-starter](https://github.com/bhwa233/cloudflare-web-starter) 创建的独立项目。前端可以独立开发、构建和部署；API 与 D1 按需启用。
 
-当前保留模板示例，尚未添加业务功能。`template.json` 保留来源记录；`docs/verification.md` 记录来源模板的验证结果，不代表本项目的业务验收。
+当前项目包含 48query 统计站的 Web、查询 API、D1 数据模型和每日 Pocket48 采集器。`template.json` 保留来源记录；`docs/verification.md` 记录来源模板的验证结果，不代表本项目的业务验收。
 
 ## 技术栈
 
 - Web：Vinext、React 19、App Router、Tailwind 4、Radix/shadcn 风格 UI、next-intl、next-themes。
 - API：Hono、Zod、OpenAPI、Scalar，部署到 Cloudflare Workers。
-- 可选数据库：Cloudflare D1 + Drizzle，独立 notes 示例和迁移记录。
+- 数据层：Cloudflare D1 + Drizzle，包含统计查询、采集批次和同步游标。
+- 采集：独立 Node collector，支持 Pocket48 分页采集、WASM 动态签名和 GitHub Actions 每日跑批。
 - 工程：pnpm workspace、严格 TypeScript、Oxlint、GitHub Actions CI。
 
-此版本使用独立验证的依赖基线：Vinext 1.2.1、React 19.3.1、Node 24 LTS、Wrangler 4.151.1。升级时验证开发、构建和 Worker 预览，依赖与补丁说明见 [依赖维护](docs/dependencies.md)。模板不包含 SparkHub 业务模块、生产资源、账号、密钥、登录或后台。
+此版本使用独立验证的依赖基线：Vinext 1.2.1、React 19.3.1、Node 24 LTS、Wrangler 4.151.1。升级时验证开发、构建和 Worker 预览，依赖与补丁说明见 [依赖维护](docs/dependencies.md)。项目不包含生产资源和账号；Pocket48 凭证只通过本地配置或 GitHub Secrets 注入，轮换接口约定见 [GitHub Actions 采集](docs/github-actions-collector.md)。
 
 ## 开始使用
 
@@ -73,6 +74,9 @@ D1 profile 使用 `apps/api/wrangler.d1.jsonc`；占位 database ID 只用于本
 | `pnpm audit:check`                    | 依赖审计及安全补丁实际行为检查              |
 | `pnpm test:smoke`                     | 独立 Web、API、临时 D1 与构建后 Worker 回归 |
 | `pnpm test:e2e`                       | 语言、主题、真实 API 表单与移动端浏览器检查 |
+| `pnpm collector:dev`                  | 运行 demo 采集器 dry-run                    |
+| `pnpm collector:run`                  | 按环境变量运行采集器                         |
+| `pnpm --filter @starter/collector login` | 本地登录并保存 Pocket48 凭证                |
 | `pnpm --filter @starter/api build:db` | D1 API 打包预检                             |
 | `pnpm --filter @starter/web preview`  | 构建后的本地 Worker 预览                    |
 
@@ -93,11 +97,13 @@ apps/web/                 独立 Web 应用
   src/i18n/               en/zh 文案与 locale routing
 apps/api/                 可选 Hono Worker
   src/notes/              可删除的 D1 示例
+  src/query/              统计查询、采集入库和同步状态
   migrations/             Drizzle SQL 与元数据
   wrangler.jsonc          无数据库 profile
   wrangler.d1.jsonc       可选 D1 profile
 packages/shared/          传输契约、路径、API schema
 packages/config-ts/       两端 TypeScript 基础配置
+apps/collector/           Pocket48 采集器和每日批次编排
 scripts/                  RSC 边界、部署配置和构建兼容处理
 docs/                     架构、初始化和验证说明
 ```

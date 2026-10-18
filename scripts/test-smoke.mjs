@@ -156,6 +156,7 @@ try {
   await close(api);
 
   const dbArgs = [...baseArgs, "--config", "wrangler.d1.jsonc"];
+  dbArgs.push("--var", "INGEST_KEY:test-ingest-key");
   let database = launch(dbArgs, { cwd: apiDirectory });
   await database.ready(`${origin}/api/health`);
   assert.equal(
@@ -201,6 +202,47 @@ try {
   assert.equal(notes.response.headers.get("cache-control"), "no-store");
   assert.ok(notes.json().data.some((note) => note.id === created.id));
   await request(origin, "/api/notes", 400, post({ title: "" }));
+  await request(origin, "/api/query/ingest/unit", 401, post({}));
+  const ingestUnit = {
+    batchId: "smoke-batch",
+    statDate: "2026-10-17",
+    startedAt: "2026-10-18T00:00:00.000Z",
+    member: { id: "smoke-member", name: "Smoke Member", pinyin: "smokemember", groupName: "SNH48", team: "Team SII", roomId: "smoke-room" },
+    messages: [
+      { id: "smoke-message", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "TEXT", text: "smoke ingest" },
+      { id: "smoke-message-2", memberId: "smoke-member", occurredAt: "2026-10-17T12:30:00.000Z", type: "TEXT", text: "smoke ingest two" },
+    ],
+    recordings: [
+      { id: "smoke-recording", memberId: "smoke-member", title: "Smoke recording", occurredAt: "2026-10-17T13:00:00.000Z", durationSeconds: 60, danmakuCount: 3, danmakuStatus: "parsed" },
+      { id: "smoke-recording-2", memberId: "smoke-member", title: "Smoke recording two", occurredAt: "2026-10-17T14:00:00.000Z", durationSeconds: 90, danmakuCount: 2, danmakuStatus: "pending" },
+    ],
+    messageCursor: null,
+    recordingCursor: null,
+    totalMembers: 1,
+    membersCovered: 1,
+    errorCount: 0,
+  };
+  const ingestOptions = { ...post(ingestUnit), headers: { ...post(ingestUnit).headers, "X-Ingest-Key": "test-ingest-key" } };
+  const ingest = await request(origin, "/api/query/ingest/unit", 200, ingestOptions);
+  assert.equal(ingest.json().data.messagesWritten, 2);
+  await request(origin, "/api/query/ingest/batches/smoke-batch/complete", 200, { ...post({ completedAt: "2026-10-18T00:01:00.000Z", membersCovered: 1, totalMembers: 1, errorCount: 0 }), headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-ingest-key" } });
+  const syncState = await request(origin, "/api/query/ingest/state/smoke-member", 200, { headers: { "X-Ingest-Key": "test-ingest-key" } });
+  assert.equal(syncState.json().data.memberId, "smoke-member");
+  const overview = await request(origin, "/api/query/overview?date=2026-10-17");
+  assert.deepEqual(overview.json().data.totals, { messages: 2, activeMembers: 1, recordings: 2, danmaku: 5 });
+  assert.equal(overview.json().coverage.status, "complete");
+  const members = (await request(origin, "/api/query/members")).json().data;
+  assert.equal(members[0].id, "smoke-member");
+  assert.deepEqual({ messages: members[0].messages, recordings: members[0].recordings }, { messages: 2, recordings: 2 });
+  const memberDetail = (await request(origin, "/api/query/members/smoke-member")).json().data;
+  assert.deepEqual({ messages: memberDetail.messages, recordings: memberDetail.recordings }, { messages: 2, recordings: 2 });
+  const messageResults = (await request(origin, "/api/query/messages?q=smoke&limit=5")).json().data;
+  assert.deepEqual(messageResults.map((item) => item.id).sort(), ["smoke-message", "smoke-message-2"]);
+  const recordingResults = (await request(origin, "/api/query/recordings")).json().data;
+  assert.deepEqual(recordingResults.map((item) => item.id).sort(), ["smoke-recording", "smoke-recording-2"]);
+  await request(origin, "/api/query/members/missing", 404);
+  await request(origin, "/api/query/overview?date=invalid", 400);
+  assert.ok((await request(origin, "/openapi.json")).json().paths["/api/query/overview"]);
   console.log(
     "PASS D1 API: uninitialized database, local migration, creation/readback, validation, no-store",
   );
