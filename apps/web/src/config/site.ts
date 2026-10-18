@@ -1,5 +1,5 @@
 export const siteConfig = {
-  name: "SparkHub Starter",
+  name: "48query",
   defaultTheme: "system" as const,
   contentEnabled: true,
 };

@@ -1,6 +1,8 @@
-# SparkHub Starter
+# 48query
 
-从 SparkHub 提取的独立模板，适用于内容站、小工具和完整 Web 产品。前端可以独立开发、构建和部署；API 与 D1 按需启用。
+基于 [cloudflare-web-starter](https://github.com/bhwa233/cloudflare-web-starter) 创建的独立项目。前端可以独立开发、构建和部署；API 与 D1 按需启用。
+
+当前保留模板示例，尚未添加业务功能。`template.json` 保留来源记录；`docs/verification.md` 记录来源模板的验证结果，不代表本项目的业务验收。
 
 ## 技术栈
 
@@ -129,4 +131,4 @@ docs/                     架构、初始化和验证说明
 
 新项目从某个模板版本创建后独立演进。模板更新通过版本记录和有选择的迁移应用，暂不提供初始化 CLI 或强制同步机制。详见 [架构与裁剪](docs/architecture.md) 和 [创建新项目](docs/new-project.md)。
 
-首个版本为 `v0.1.0`，变更记录见 [CHANGELOG](CHANGELOG.md)。Renovate 配置已提供，接入远程仓库的 Renovate App 后才会创建依赖更新 PR；不自动合并或发布。
+来源模板基线为 `v0.1.0`，模板变更记录见 [CHANGELOG](CHANGELOG.md)。本项目从独立初始提交开始维护，不继承模板标签。Renovate 配置已提供，接入远程仓库的 Renovate App 后才会创建依赖更新 PR；不自动合并或发布。
