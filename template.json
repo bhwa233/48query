@@ -1,0 +1,20 @@
+{
+  "name": "sparkhub-starter",
+  "version": "0.1.0",
+  "source": {
+    "repository": "SparkHub",
+    "commit": "7572a7afa933d128c185cccbf3a58a307d6e6ce3"
+  },
+  "derived": [
+    "apps/web/src/components/ui",
+    "apps/web/src/components/app-page-shell.tsx",
+    "packages/config-ts",
+    "packages/web-utils/index.ts",
+    "apps/api/src/shared/bindings.ts"
+  ],
+  "profiles": [
+    "web",
+    "api",
+    "api:d1"
+  ]
+}

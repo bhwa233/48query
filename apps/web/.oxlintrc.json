@@ -1,0 +1,17 @@
+{
+  "extends": [
+    "../../.oxlintrc.json"
+  ],
+  "plugins": [
+    "typescript",
+    "react",
+    "nextjs"
+  ],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "error",
+    "react/jsx-no-target-blank": "error",
+    "react/no-unknown-property": "error",
+    "nextjs/no-img-element": "error"
+  }
+}

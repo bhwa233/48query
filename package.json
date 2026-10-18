@@ -1,0 +1,50 @@
+{
+  "name": "sparkhub-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.14.0",
+  "engines": {
+    "node": "^24.22.0"
+  },
+  "scripts": {
+    "dev": "pnpm dev:web",
+    "dev:web": "pnpm --filter @starter/web dev",
+    "dev:api": "pnpm --filter @starter/api dev",
+    "dev:api:db": "pnpm --filter @starter/api dev:db",
+    "dev:all": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api\"",
+    "dev:all:db": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api:db\"",
+    "build": "pnpm build:web && pnpm build:api && pnpm build:api:db",
+    "build:web": "pnpm --filter @starter/web build",
+    "build:api": "pnpm --filter @starter/api build",
+    "lint": "pnpm -r --if-present lint && pnpm lint:tools",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "check": "pnpm env:check && pnpm lint && pnpm typecheck && pnpm typecheck:tools && pnpm i18n:check && pnpm rsc:check && pnpm test:config && pnpm build",
+    "check:web": "pnpm --filter @starter/web check",
+    "i18n:check": "pnpm --filter @starter/web i18n:check",
+    "rsc:check": "pnpm --filter @starter/web rsc:check",
+    "db:migrate:local": "pnpm --filter @starter/api db:migrate:local",
+    "db:generate": "pnpm --filter @starter/api db:generate",
+    "verify:deploy-config": "node scripts/verify-deploy-config.mjs",
+    "deploy:web": "pnpm verify:deploy-config web && pnpm build:web && pnpm --filter @starter/web deploy",
+    "deploy:api": "pnpm verify:deploy-config api && pnpm --filter @starter/api deploy",
+    "deploy:api:db": "pnpm verify:deploy-config api:db && pnpm --filter @starter/api deploy:db",
+    "build:api:db": "pnpm --filter @starter/api build:db",
+    "env:check": "node scripts/check-env.mjs",
+    "test:config": "node --test tests/config.test.mjs",
+    "test:smoke": "node scripts/test-smoke.mjs",
+    "test:e2e": "node scripts/test-e2e.mjs",
+    "audit:check": "node scripts/audit-dependencies.mjs",
+    "typecheck:tools": "tsc --project tsconfig.json --noEmit",
+    "lint:tools": "oxlint -c .oxlintrc.json scripts tests playwright.config.ts"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.6",
+    "oxlint": "1.88.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "typescript": "7.0.2",
+    "jsonc-parser": "3.3.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2"
+  }
+}

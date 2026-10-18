@@ -1,0 +1,10 @@
+{
+  "extends": "@starter/config-ts/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "ESNext"
+  },
+  "include": [
+    "*.ts"
+  ]
+}

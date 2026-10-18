@@ -1,0 +1,34 @@
+{
+  "name": "@starter/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "dev:db": "wrangler dev --config wrangler.d1.jsonc --port 8787",
+    "lint": "oxlint -c ../../.oxlintrc.json . --type-aware",
+    "typecheck": "pnpm cf-typegen:check && tsc --noEmit",
+    "cf-typegen": "wrangler types --config wrangler.d1.jsonc --env-interface CloudflareBindings && node ../../scripts/normalize-worker-types.mjs",
+    "cf-typegen:check": "wrangler types --config wrangler.d1.jsonc --env-interface CloudflareBindings --check",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "build:db": "wrangler deploy --config wrangler.d1.jsonc --dry-run --outdir dist-d1",
+    "db:migrate:local": "wrangler d1 migrations apply APP_DB --config wrangler.d1.jsonc --local",
+    "db:generate": "drizzle-kit generate",
+    "deploy": "wrangler deploy",
+    "deploy:db": "wrangler deploy --config wrangler.d1.jsonc"
+  },
+  "dependencies": {
+    "hono": "4.13.13",
+    "@hono/zod-openapi": "1.6.3",
+    "@scalar/hono-api-reference": "0.12.13",
+    "zod": "4.6.7",
+    "drizzle-orm": "0.45.4",
+    "@starter/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@starter/config-ts": "workspace:*",
+    "@types/node": "24.19.2",
+    "wrangler": "4.151.1",
+    "drizzle-kit": "0.31.11"
+  }
+}

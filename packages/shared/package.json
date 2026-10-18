@@ -1,0 +1,22 @@
+{
+  "name": "@starter/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./schemas": "./schemas.ts",
+    "./config": "./config.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint -c ../../.oxlintrc.json . --type-aware"
+  },
+  "dependencies": {
+    "zod": "4.6.7",
+    "@hono/zod-openapi": "1.6.3"
+  },
+  "devDependencies": {
+    "@starter/config-ts": "workspace:*"
+  }
+}

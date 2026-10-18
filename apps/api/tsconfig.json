@@ -1,0 +1,14 @@
+{
+  "extends": "@starter/config-ts/api.json",
+  "compilerOptions": {
+    "types": [
+      "./worker-configuration.d.ts",
+      "node"
+    ]
+  },
+  "include": [
+    "src/**/*.ts",
+    "drizzle.config.ts",
+    "worker-configuration.d.ts"
+  ]
+}

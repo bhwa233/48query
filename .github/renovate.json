@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":pinAllExceptPeerDependencies"],
+  "timezone": "Asia/Shanghai",
+  "schedule": ["before 9am on monday"],
+  "automerge": false,
+  "rangeStrategy": "pin",
+  "packageRules": [
+    {
+      "groupName": "Vinext React and Vite",
+      "matchPackageNames": [
+        "vinext",
+        "next",
+        "next-intl",
+        "react",
+        "react-dom",
+        "react-server-dom-webpack",
+        "@types/react",
+        "@types/react-dom",
+        "vite",
+        "@vitejs/plugin-rsc",
+        "@vitejs/plugin-react"
+      ]
+    },
+    {
+      "groupName": "Cloudflare tools",
+      "matchPackageNames": ["wrangler", "@cloudflare/vite-plugin"]
+    },
+    {
+      "groupName": "Hono and Zod",
+      "matchPackageNames": [
+        "hono",
+        "zod",
+        "@hono/zod-openapi",
+        "@scalar/hono-api-reference"
+      ]
+    },
+    {
+      "groupName": "Oxlint",
+      "matchPackageNames": ["oxlint", "oxlint-tsgolint"]
+    },
+    {
+      "groupName": "Drizzle",
+      "matchPackageNames": ["drizzle-orm", "drizzle-kit"]
+    },
+    { "matchPackageNames": ["pnpm"], "allowedVersions": "<13" },
+    {
+      "matchPackageNames": ["node", "@types/node"],
+      "allowedVersions": ">=24 <25"
+    }
+  ]
+}
