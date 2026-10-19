@@ -32,7 +32,7 @@ jobs:
             if (typeof value === 'object') return Object.fromEntries(Object.keys(value).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(key)).slice(0, 30).map(key => [key, shape(value[key], depth + 1)]));
             return typeof value;
           };
-          for (const [version, build] of [['7.1.35', '25101021'], ['7.0.4', '23011601'], ['7.0.41', '24011601']]) {
+          for (const [version, build] of [['7.1.35', '25101021']]) {
             const result = await fetch('https://pocketapi.48.cn/im/api/v1/im/server/jump', {
               method: 'POST',
               headers: {
@@ -42,10 +42,10 @@ jobs:
                 token: data.token,
                 pa: await createPocket48Pa(),
               },
-              body: JSON.stringify({ starId: 1, targetType: 1 }),
+              body: JSON.stringify({ starId: 1, targetType: 1, tabId: 0 }),
               signal: AbortSignal.timeout(20000),
             });
             const body = await result.json();
-            console.log('[DEBUG-pocket48-room]', JSON.stringify({ version, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, shape: shape(body) }));
+            console.log('[DEBUG-pocket48-room]', JSON.stringify({ version, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, shape: shape(body) }));
           }
           JS
