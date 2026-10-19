@@ -46,6 +46,7 @@ export class Pocket48Source implements CollectorSource {
   private readonly interval: number;
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
+  private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string }>>();
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
@@ -75,8 +76,8 @@ export class Pocket48Source implements CollectorSource {
     const requestHeaders: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/json;charset=utf-8",
-      appInfo: JSON.stringify({ vendor: "apple", appVersion: "7.0.4", appBuild: "23011601", osVersion: "16.3.1", osType: "ios", deviceName: "iPhone XR", os: "ios", ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}) }),
-      "User-Agent": "PocketFans201807/6.0.16 (iPhone; iOS 13.5.1; Scale/2.00)",
+      appInfo: JSON.stringify({ vendor: "apple", appVersion: "7.1.35", appBuild: "25101021", osVersion: "16.3.0", osType: "ios", deviceName: "iPhone 14 Pro", os: "ios", ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}) }),
+      "User-Agent": "PocketFans201807/7.1.35 (iPhone; iOS 16.3; Scale/3.00)",
     };
     requestHeaders["token"] = this.options["token"];
     if (pa) requestHeaders["pa"] = pa;
@@ -94,8 +95,25 @@ export class Pocket48Source implements CollectorSource {
   }
 
   async listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
-    if (!member.channelId || !member.serverId) return { items: [], nextCursor: null };
-    const content = await this.post("/im/api/v1/team/message/list/homeowner", { channelId: Number(member.channelId), serverId: Number(member.serverId), nextTime: Number(cursor ?? 0), limit: 50 });
+    // Like 48tools, resolve by member ID; the public directory's channel/server
+    // IDs may be stale or missing. Cache only for this source's current batch.
+    let room = this.rooms.get(member.id);
+    if (!room) {
+      room = this.post("/im/api/v1/im/server/jump", { starId: Number(member.id), targetType: 1 }).then(content => {
+        const channelId = asString(content.channelId);
+        const serverId = asString(content.serverId);
+        if (!channelId || !serverId) throw new Error(`Pocket48 returned no current room for member ${member.id}.`);
+        return { channelId, serverId };
+      });
+      this.rooms.set(member.id, room);
+    }
+    const currentRoom = await room;
+    member.channelId = currentRoom.channelId;
+    member.serverId = currentRoom.serverId;
+    member.status = "active";
+    // Each ingest unit accepts at most 25 messages. Preserve the upstream cursor
+    // and request that page size rather than dropping half of a larger page.
+    const content = await this.post("/im/api/v1/team/message/list/homeowner", { channelId: Number(currentRoom.channelId), serverId: Number(currentRoom.serverId), nextTime: Number(cursor ?? 0), limit: 25 });
     const values = Array.isArray(content.message) ? content.message : [];
     const items = values.flatMap((value): CollectorMessage[] => {
       const item = asObject(value);
