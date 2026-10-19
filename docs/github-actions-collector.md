@@ -53,6 +53,8 @@ workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运
 
 workflow 不会打印环境变量、请求头或完整上游响应，也不会上传包含凭证的 artifact。Pocket48 token 失效时应在日志中根据错误类型判断，然后从 SparkHub 后台执行轮换。
 
+入库按 JSON 实际 UTF-8 字节数拆分，每个请求不超过 16 KiB，消息和录播各不超过 25 条。整页最后一个请求成功后才推进游标；中途失败保留原游标，重试通过 ID 更新已写入记录，避免漏采或重复记录。
+
 采集启动命令是 `pnpm --filter @starter/collector run run`（或仓库根目录 `pnpm collector:run`）。第一个 `run` 是 pnpm 子命令，第二个是包内脚本名；省略第二个只会列出脚本并返回成功，不会采集。验收需检查日志包含 `batch_finished`，且 `membersCovered > 0`、`errorCount = 0`，不能只看工作流绿色状态。
 
 ## 生产入口

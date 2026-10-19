@@ -24,7 +24,41 @@ export class HttpIngestStore implements CollectorStore {
   }
 
   async ingestUnit(unit: IngestUnit) {
-    await this.request(`/api/query/ingest/unit`, { method: "POST", body: JSON.stringify(unit) });
+    // The existing API caps both JSON bodies (16 KiB) and page arrays (25).
+    // Partition this transport payload here; source pagination stays intact.
+    const fits = (part: IngestUnit) => part.messages.length <= 25 && part.recordings.length <= 25 && Buffer.byteLength(JSON.stringify(part), "utf8") <= 16_384;
+    if (fits(unit)) {
+      await this.request(`/api/query/ingest/unit`, { method: "POST", body: JSON.stringify(unit) });
+      return;
+    }
+    const state = await this.getSyncState(unit.member.id);
+    const checkpoint = {
+      messageCursor: state.messageCursor,
+      recordingCursor: state.recordingCursor,
+      membersCovered: Math.max(0, unit.membersCovered - 1),
+    };
+    const parts = [unit];
+    for (let index = 0; index < parts.length;) {
+      const part = parts[index]!;
+      if (fits(part) && fits({ ...part, ...checkpoint })) {
+        index += 1;
+        continue;
+      }
+      if (part.messages.length + part.recordings.length <= 1) throw new Error("One collector item exceeds the ingestion request limit; cursors were not advanced.");
+      if (part.messages.length >= part.recordings.length) {
+        const middle = Math.ceil(part.messages.length / 2);
+        parts.splice(index, 1, { ...part, messages: part.messages.slice(0, middle), recordings: [] }, { ...part, messages: part.messages.slice(middle) });
+      } else {
+        const middle = Math.ceil(part.recordings.length / 2);
+        parts.splice(index, 1, { ...part, messages: [], recordings: part.recordings.slice(0, middle) }, { ...part, recordings: part.recordings.slice(middle) });
+      }
+    }
+    for (const [index, current] of parts.entries()) {
+      // Earlier chunks retain the previous page's cursors. If any write fails,
+      // retry the page: ingestion upserts IDs, so already-written items are safe.
+      const part = index === parts.length - 1 ? current : { ...current, ...checkpoint };
+      await this.request(`/api/query/ingest/unit`, { method: "POST", body: JSON.stringify(part) });
+    }
   }
 
   async completeBatch(input: { batchId: string; completedAt: string; membersCovered: number; totalMembers: number; errorCount: number; errorMessage?: string | null }) {

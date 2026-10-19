@@ -255,6 +255,12 @@ try {
   await request(origin, "/api/query/members/missing", 404);
   await request(origin, "/api/query/overview?date=invalid", 400);
   assert.ok((await request(origin, "/openapi.json")).json().paths["/api/query/overview"]);
+  const largePage = launch(
+    ["--filter", "@starter/collector", "exec", "tsx", "../../tests/collector/ingest.ts"],
+    { env: { INGEST_API_URL: origin, INGEST_KEY: "test-ingest-key" } },
+  );
+  console.log(await largePage.complete());
+  servers.delete(largePage);
   console.log(
     "PASS D1 API: uninitialized database, local migration, creation/readback, validation, no-store",
   );
