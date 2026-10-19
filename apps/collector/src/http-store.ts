@@ -1,5 +1,5 @@
-import type { CollectorStore, IngestUnit, SyncState } from "./types";
-import type { ImageAttachment } from "@starter/shared";
+import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
+import type { ImageAttachment, VideoAttachment } from "@starter/shared";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
@@ -28,6 +28,16 @@ export class HttpIngestStore implements CollectorStore {
   async getImage(id: string) { return this.request<ImageAttachment | null>(`/api/query/ingest/images/${encodeURIComponent(id)}`); }
   async saveImage(image: ImageAttachment) { await this.request(`/api/query/ingest/images/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify(image) }); }
   async pendingImages(limit: number) { return this.request<ImageAttachment[]>(`/api/query/ingest/images?limit=${limit}`); }
+  async getVideo(id: string) { return this.request<VideoAttachment | null>(`/api/query/ingest/videos/${encodeURIComponent(id)}`); }
+  async saveVideo(video: VideoAttachment) { await this.request(`/api/query/ingest/videos/${encodeURIComponent(video.id)}`, { method: "POST", body: JSON.stringify(video) }); }
+  async pendingVideos(limit: number) { return this.request<VideoAttachment[]>(`/api/query/ingest/videos?limit=${limit}`); }
+  async verifiedRoomMedia(roomId: string, assets: { id: string; occurredAt: string }[]) {
+    return this.request<CollectorMessage[]>("/api/query/ingest/verified-media", { method: "POST", body: JSON.stringify({ scope: "room", roomId, assets }) });
+  }
+
+  async verifiedPostImages(memberId: string, imageIds: string[]) {
+    return this.request<CollectorMessage[]>("/api/query/ingest/verified-media", { method: "POST", body: JSON.stringify({ scope: "posts", memberId, imageIds }) });
+  }
 
   async ingestUnit(unit: IngestUnit) {
     if (unit.recordings.length) throw new Error("Recording ingestion is disabled.");

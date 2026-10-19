@@ -14,6 +14,7 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   let roomLookups = 0;
   let messageRequests = 0;
   let denyLookup = false;
+  let emptyEssence = false;
   const source = new Pocket48Source({
     token: "synthetic-token",
     pa: "synthetic-pa",
@@ -32,7 +33,7 @@ test("resolves stale directory rooms once per member and preserves upstream fail
       if (body.channelId !== 22 || body.serverId !== 33) {
         return Response.json({ status: 500, success: false, message: "频道不存在" });
       }
-      if (String(url).endsWith("/essence/message/list")) return Response.json({ status: 200, content: { essenceMessageList: [{ msgIdServer: "essence-id", msgTime: 1792368000000, msgType: "TEXT", bodys: "member text", extInfo: { user: { userId: "1" } } }] } });
+      if (String(url).endsWith("/essence/message/list")) return Response.json({ status: 200, content: emptyEssence ? {} : { essenceMessageList: [{ msgIdServer: "essence-id", msgTime: 1792368000000, msgType: "TEXT", bodys: "member text", extInfo: { user: { userId: "1" } } }] } });
       return Response.json({ status: 200, content: { message: [], nextTime: body.nextTime } });
     },
   });
@@ -49,6 +50,8 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   const essence = await source.listContent(member, "essence", null);
   assert.equal(essence.items[0]?.text, "member text");
   assert.equal(essence.nextCursor, null);
+  emptyEssence = true;
+  assert.deepEqual((await source.listContent(member, "essence", null)).items, []);
 });
 
 // Reference formats place old TEXT content in extInfo, and use integers too
@@ -69,6 +72,8 @@ test("preserves member authorship, large IDs, legacy text and public question/an
   assert.equal(reply.answer, "member answer");
   // Live 2026 responses wrap posts twice and use createAt/previewImg. The
   // previous parser silently skipped the entire member timeline.
+  assert.deepEqual(contentList({ nextId: "0" }), []);
+  assert.throws(() => contentList({ nextId: "123" }), /unknown content list shape/);
   const posts = contentList({ postsInfo: [{ type: "POST", data: { postsInfo: { postId: "large-post-id", userId: "1", createAt: "1792368000000", title: "Title", postContent: "Full member post", previewImg: [{ imgUrl: "https://source.48.cn/test.jpg", imgWidth: 640, imgHeight: 480 }] } } }] });
   const post = normalizeMessage(posts[0], owner, "posts", directory);
   assert.equal(post?.id, "post:large-post-id");
@@ -145,14 +150,19 @@ test("verifies album authors from original room messages, including visiting mem
       : path.endsWith("/message/list/all") ? { message: [
         original("owner", "1", at), original("visitor", "2", at + 1000),
         original("fan", "999", at + 2000), original("stale", "1", at - 1000),
+        { msgIdServer: "video", msgTime: at + 4000, msgType: "VIDEO", bodys: { url: "https://source.48.cn/video.mp4" }, extInfo: { user: { userId: "2" } } },
+        { msgIdServer: "nearby-text", msgTime: at - 2000, msgType: "TEXT", bodys: "verified nearby text", extInfo: { user: { userId: "1" } } },
       ].filter(row => row.msgTime < body.nextTime), nextTime: 0 }
       : null;
     return Response.json(content ? { status: 200, content } : { members: [{ id: "1", name: "Owner" }, { id: "2", name: "Visitor" }] });
   } });
   const members = await source.listMembers();
   const page = await source.listContent(members[0]!, "album", null);
-  assert.deepEqual(page.items.map(row => [row.memberId, row.roomOwnerId]), [["1", "1"], ["2", "1"]]);
-  assert.ok(page.items.every(row => row.sourceFlags === 3 && row.id.startsWith("room:22:")));
+  const catalog = page.items.filter(row => row.sourceFlags === 3);
+  assert.deepEqual(catalog.map(row => [row.memberId, row.roomOwnerId]), [["1", "1"], ["2", "1"], ["2", "1"]]);
+  assert.ok(page.items.every(row => row.id.startsWith("room:22:") && row.memberId !== "999"));
+  assert.equal(catalog.find(row => row.kind === "video")?.videos?.[0]?.status, "pending");
+  assert.equal(page.items.find(row => row.type === "TEXT")?.sourceFlags, 1, "Nearby room text must not masquerade as an album entry");
   assert.equal(page.unverified, 2, "Fan impersonation and wrong-time image reuse must remain unverified");
 });
 
@@ -187,4 +197,41 @@ test("bounds short-video downloads before uploading original MP4 bytes", async (
   redirect = true;
   await assert.rejects(gallery.uploadVideo({ ...video, galleryUrl: null }), /source host/);
   assert.equal(uploads, 1, "Untrusted redirects must not result in uploads");
+});
+
+// Live followed member 37 was missing from the community directory, while
+// system account 63 was incorrectly selected as a member. Only an explicit
+// official member flag and matching ID can promote a missing account.
+test("recovers followed members missing from the directory without admitting nonmembers", async () => {
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (!init?.body) return Response.json({ members: [{ id: "1", name: "Owner" }, { id: "63", name: "System" }] });
+    if (path.endsWith("/friends/id")) return Response.json({ status: 200, content: { data: ["1", "37", "63", "999"] } });
+    const { userId } = JSON.parse(String(init.body));
+    return Response.json({ status: 200, content: { baseUserInfo: { userId, nickname: "Profile account", isStar: userId === "37" } } });
+  } });
+  assert.deepEqual((await source.listMembers()).map(member => member.id).sort(), ["1", "37"]);
+});
+
+// A real gallery outage can hold a page for minutes. If the process is lost
+// during that upload, content must already exist, with no advanced checkpoint.
+test("persists media-page text before uploading without advancing its checkpoint", async () => {
+  const store = new DryRunStore();
+  const member = { id: "owner", name: "Owner", groupName: "SNH48" };
+  const image = { id: "image", sourceUrl: "https://source.48.cn/image.jpg", galleryUrl: null, thumbnailUrl: null, width: null, height: null, status: "pending" as const };
+  const source = { listMembers: async () => [member], listMessages: async () => ({ items: [{ id: "post", memberId: member.id, occurredAt: "2026-10-19T00:00:00.000Z", type: "POST_INFO", kind: "post" as const, text: "member text", images: [image] }], nextCursor: "history" }) };
+  let observed = false;
+  const result = await runBatch(source, store, { maxPagesPerMember: 1, maxHistoryPagesPerMember: 0, archiveImage: async () => {
+    const saved = store.units.find(unit => unit.messages[0]?.id === "post");
+    assert.ok(saved);
+    assert.equal(saved?.messages[0]?.text, "member text");
+    assert.equal(saved.sync, undefined);
+    assert.ok(!store.units.some(unit => unit.sync));
+    observed = true;
+    throw new Error("Gallery unavailable");
+  } });
+  assert.ok(observed);
+  assert.equal(result.imageFailures, 1);
+  assert.equal(result.messagesWritten, 1);
+  assert.equal(store.units.find(unit => unit.sync)?.sync?.historyCursor, "history");
 });

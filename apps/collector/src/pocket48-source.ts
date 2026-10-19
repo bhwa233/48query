@@ -5,6 +5,9 @@ import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postO
 type Pocket48Options = {
   token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
   apiBaseUrl?: string; directoryUrl?: string; minIntervalMs?: number; memberScope?: "followed" | "all";
+  requestedMemberId?: string;
+  readVerifiedPostImages?: (memberId: string, imageIds: string[]) => Promise<CollectorMessage[]>;
+  readVerifiedMedia?: (roomId: string, assets: { id: string; occurredAt: string }[]) => Promise<CollectorMessage[]>;
   sources?: CollectionSource[]; fetchImpl?: typeof fetch;
 };
 const DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
@@ -21,7 +24,7 @@ export class Pocket48Source implements CollectorSource {
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
   private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string; roomId: string | null }>>();
-  private readonly verifiedImages = new Map<string, CollectorMessage>();
+  private readonly verifiedMedia = new Map<string, CollectorMessage>();
   private readonly directory = new Map<string, CollectorMember>();
 
   constructor(private readonly options: Pocket48Options) {
@@ -93,16 +96,32 @@ export class Pocket48Source implements CollectorSource {
       const item = object(entry);
       const id = string(item.id);
       const name = string(item.ownerName ?? item.name ?? item.nickname);
-      if (!id || !name) continue;
+      // The community room directory also lists Pocket48's system account.
+      // Its official user profile reports isStar=false, userRole=999.
+      if (!id || !name || id === "63") continue;
       this.directory.set(id, { id, name, pinyin: string(item.pinyin), groupName: string(item.groupName) ?? "未知", team: string(item.team ?? item.periodName),
         roomId: string(item.roomId), channelId: string(item.channelId), serverId: string(item.serverId), status: "active" });
     }
-    const members = [...this.directory.values()];
-    if (this.options.memberScope === "all") return members;
+    if (this.options.requestedMemberId && !this.directory.has(this.options.requestedMemberId)) await this.resolveDirectoryMember(this.options.requestedMemberId);
+    if (this.options.memberScope === "all") return [...this.directory.values()];
     const followed = object(await this.post("/user/api/v1/friendships/friends/id", {}));
     if (!Array.isArray(followed.data)) throw new Error("Pocket48 returned no followed-member list.");
-    const ids = new Set(followed.data.map(value => string(value)));
-    return members.filter(member => ids.has(member.id));
+    const ids = new Set(followed.data.map(value => string(value)).filter((id): id is string => Boolean(id)));
+    for (const id of ids) if (id !== "63" && !this.directory.has(id)) await this.resolveDirectoryMember(id);
+    const members = [...this.directory.values()].filter(member => ids.has(member.id));
+    console.log(JSON.stringify({ event: "member_scope", followed: ids.size, selected: members.length, nonmemberOrUnknown: ids.size - members.length }));
+    return members;
+  }
+
+  private async resolveDirectoryMember(id: string) {
+    const home = object(await this.post("/user/api/v1/user/info/home", { userId: id }));
+    const user = object(home.baseUserInfo);
+    // Missing community-directory entries are not necessarily nonmembers.
+    // Require the official account's ID and explicit member flag to add one.
+    if (string(user.userId) !== id || user.isStar !== true) return;
+    const name = string(user.starName) ?? string(user.realNickName) ?? string(user.nickname);
+    if (!name) throw new Error("A verified member profile has no display name.");
+    this.directory.set(id, { id, name, groupName: string(user.groupName) ?? "未知", team: string(user.teamName), status: "active" });
   }
 
   private async resolveRoom(member: CollectorMember) {
@@ -184,16 +203,29 @@ export class Pocket48Source implements CollectorSource {
         content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId: room.roomId, nextTime: Number(cursor ?? 0) });
       }
     }
-    const values = contentList(content);
+    // Live empty essence lists omit their optional list field entirely. This
+    // endpoint is finite (no pagination cursor); other unknown shapes still fail.
+    const values = source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    const originalsFound = new Map<string, CollectorMessage>();
     if (source === "album") {
       const room = await this.resolveRoom(member);
+      const assets = values.flatMap(value => {
+        const raw = object(value);
+        const url = string(object(parsePocketJson(raw.bodys)).url);
+        const occurredAt = timestamp(raw.createTime);
+        return url && occurredAt ? [{ id: createHash("sha256").update(url).digest("hex"), occurredAt }] : [];
+      });
+      // Reuse originals already verified in a previous batch, with the same
+      // room/URL/time requirements. Only missing originals need upstream reads.
+      for (const message of await this.options.readVerifiedMedia?.(room.channelId, assets) ?? []) {
+        for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
+      }
       const checkedTimes = new Set<string>();
       for (const value of values) {
         const raw = object(value);
-        if (string(raw.sourceType)?.toUpperCase() === "VIDEO") continue;
-        const url = imageUrl(object(parsePocketJson(raw.bodys)).url);
+        const url = string(object(parsePocketJson(raw.bodys)).url);
         const at = timestamp(raw.createTime);
-        const known = url ? this.verifiedImages.get(url) : undefined;
+        const known = url ? this.verifiedMedia.get(url) : undefined;
         if (!url || !at || (known?.occurredAt === at && known.roomId === room.channelId) || checkedTimes.has(at)) continue;
         checkedTimes.add(at);
         // Reuse the room parser and its sender-ID checks. Latest room pages can
@@ -204,8 +236,20 @@ export class Pocket48Source implements CollectorSource {
         });
         for (const original of contentList(originals)) {
           const message = normalizeMessage(original, member, "room", this.directory);
-          if (message) for (const image of message.images ?? []) this.verifiedImages.set(image.sourceUrl, message);
+          if (message) {
+            originalsFound.set(message.id, message);
+            for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
+          }
         }
+      }
+    }
+    if (source === "post_images") {
+      const ids = values.flatMap(value => {
+        const url = imageUrl(object(value).imgUrl);
+        return url ? [createHash("sha256").update(url).digest("hex")] : [];
+      });
+      for (const message of await this.options.readVerifiedPostImages?.(member.id, ids) ?? []) {
+        for (const image of message.images ?? []) this.verifiedMedia.set(image.sourceUrl, message);
       }
     }
     let unverified = 0;
@@ -214,19 +258,25 @@ export class Pocket48Source implements CollectorSource {
       let message = normalizeMessage(value, member, source, this.directory);
       if (!message && (source === "album" || source === "post_images")) {
         const body = object(parsePocketJson(raw.bodys));
-        const url = imageUrl(body.url ?? raw.imgUrl);
-        const verified = url ? this.verifiedImages.get(url) : undefined;
+        const url = source === "album" ? string(body.url) : imageUrl(raw.imgUrl);
+        const verified = url ? this.verifiedMedia.get(url) : undefined;
         // Catalogs omit sender IDs. Album attribution requires the original's
         // exact room, image URL and timestamp plus a verified sender ID. Display
         // names can carry group prefixes or change, so they are not identity.
         if (verified && (source === "album" ? verified.roomId === member.channelId && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
-          message = { ...verified, images: verified.images?.map(image => ({ ...image })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
-        } else if (string(raw.sourceType)?.toUpperCase() !== "VIDEO") unverified += 1;
+          message = { ...verified, images: verified.images?.map(image => ({ ...image })), videos: verified.videos?.map(video => ({ ...video })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
+        } else unverified += 1;
       }
-      if (message) for (const image of message.images ?? []) this.verifiedImages.set(image.sourceUrl, message);
+      if (message) for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
       return message ? [message] : [];
     });
-    console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: items.length, images: items.reduce((count, item) => count + (item.images?.length ?? 0), 0), ownerMessages: items.filter(item => item.memberId === member.id).length }));
+    // These are genuine room records discovered while resolving a catalog item,
+    // including nearby text/replies. Preserve their original IDs and source bit;
+    // discovering an older message must not move the room pagination checkpoint.
+    const retained = new Map(items.map(message => [message.id, message]));
+    for (const message of originalsFound.values()) if (!retained.has(message.id)) retained.set(message.id, message);
+    const result = [...retained.values()];
+    console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: result.length, images: result.reduce((count, item) => count + (item.images?.length ?? 0), 0), videos: result.reduce((count, item) => count + (item.videos?.length ?? 0), 0), ownerMessages: result.filter(item => item.memberId === member.id).length }));
     const root = object(content);
     const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
     if (values.length > 0 && rawCursor !== null && rawCursor === cursor) throw new Error("Pocket48 repeated a non-empty page cursor; refusing to mark history complete.");
@@ -241,6 +291,6 @@ export class Pocket48Source implements CollectorSource {
       return assetId && occurredAt ? [{ id: source === "album" ? createHash("sha256").update(assetId).digest("hex") : assetId, occurredAt }] : [];
     });
     if (values.length > 0 && boundary.length !== values.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
-    return { items, unverified, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
+    return { items: result, unverified, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
   }
 }

@@ -1,9 +1,12 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
+import { drizzle } from "drizzle-orm/d1";
 import type { AppEnv } from "../env";
-import { ErrorSchema, ImageAttachmentSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema } from "@starter/shared/schemas";
+import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema } from "@starter/shared/schemas";
 import { imageProjection, imageStatement, readImage } from "./images";
+import { videoProjection, videoStatement, readVideo } from "./videos";
+import { readMessages } from "./messages";
 
 const BatchCompleteSchema = z.object({ completedAt: z.string().max(80), membersCovered: z.number().int().nonnegative(), totalMembers: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative(), errorMessage: z.string().max(2000).nullable().optional() });
 const unavailable = { description: "Collector ingestion is not configured or authorized.", content: { "application/json": { schema: ErrorSchema } } };
@@ -55,6 +58,10 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
       statements.push(imageStatement(db, image, now));
       statements.push(db.prepare("INSERT INTO query_message_images (message_id, image_id, position) VALUES (?, ?, ?) ON CONFLICT(message_id, image_id) DO NOTHING").bind(message.id, image.id, position));
     }
+    for (const [position, video] of message.videos.entries()) {
+      statements.push(videoStatement(db, video, now));
+      statements.push(db.prepare("INSERT INTO query_message_videos (message_id, video_id, position) VALUES (?, ?, ?) ON CONFLICT(message_id, video_id) DO NOTHING").bind(message.id, video.id, position));
+    }
   }
   if (input.sync) statements.push(db.prepare("INSERT INTO query_source_sync (member_id, source, state_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(member_id, source) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at").bind(input.member.id, input.sync.source, JSON.stringify(input.sync), now));
   await db.batch(statements);
@@ -72,6 +79,31 @@ app.openapi(createRoute({ method: "get", path: "/state/{memberId}", request: { p
   return c.json({ ok: true as const, data: { memberId, messageCursor: row?.message_cursor ?? null, recordingCursor: row?.recording_cursor ?? null, updatedAt: row?.updated_at ?? "", lastError: row?.last_error ?? null, sources: (sources?.results ?? []).map(item => SourceSyncSchema.parse(JSON.parse((item as { state_json: string }).state_json))) } }, 200);
 });
 
+const VerifiedMediaInput = z.discriminatedUnion("scope", [
+  z.object({ scope: z.literal("room"), roomId: z.string().min(1).max(200), assets: z.array(z.object({ id: z.string().min(1).max(100), occurredAt: z.string().datetime() })).max(50) }),
+  z.object({ scope: z.literal("posts"), memberId: z.string().min(1).max(100), imageIds: z.array(z.string().min(1).max(100)).max(50) }),
+]);
+app.openapi(createRoute({ method: "post", path: "/verified-media", request: { body: { required: true, content: { "application/json": { schema: VerifiedMediaInput } } } }, responses: { 200: { description: "Previously verified originals; room assets require exact room/time, post images require the verified author.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(QueryMessageSchema) }) } } }, 401: unavailable } }), async c => {
+  const db = database(c);
+  const input = c.req.valid("json");
+  const found = new Map<string, Record<string, unknown>>();
+  const count = input.scope === "room" ? input.assets.length : input.imageIds.length;
+  // Three parameters per room asset: stay below D1's 100-parameter limit.
+  for (let offset = 0; offset < count; offset += 20) {
+    const roomAssets = input.scope === "room" ? input.assets.slice(offset, offset + 20) : [];
+    const postIds = input.scope === "posts" ? input.imageIds.slice(offset, offset + 20) : [];
+    const condition = input.scope === "room"
+      ? `q.room_id = ? AND (q.source_flags & 1) != 0 AND q.kind IN ('image', 'video') AND (${roomAssets.map(() => `(q.occurred_at = ? AND (EXISTS (SELECT 1 FROM query_message_images i WHERE i.message_id = q.id AND i.image_id = ?) OR EXISTS (SELECT 1 FROM query_message_videos v WHERE v.message_id = q.id AND v.video_id = ?)))`).join(" OR ")})`
+      : `q.member_id = ? AND (q.source_flags & 104) != 0 AND q.kind = 'post' AND EXISTS (SELECT 1 FROM query_message_images i WHERE i.message_id = q.id AND i.image_id IN (${postIds.map(() => "?").join(", ")}))`;
+    const bindings = input.scope === "room" ? [input.roomId, ...roomAssets.flatMap(asset => [asset.occurredAt, asset.id, asset.id])] : [input.memberId, ...postIds];
+    const rows = await db.prepare(`SELECT q.*, m.name AS member_name, owner.name AS room_owner_name FROM query_messages q
+      JOIN query_members m ON m.id = q.member_id LEFT JOIN query_members owner ON owner.id = q.room_owner_id
+      WHERE q.sender_id = q.member_id AND q.parse_status = 'parsed' AND ${condition}`).bind(...bindings).all();
+    for (const row of rows.results) found.set(String(row.id), row);
+  }
+  return c.json({ ok: true as const, data: await readMessages(drizzle(db), [...found.values()]) }, 200);
+});
+
 const ImageResult = z.object({ ok: z.literal(true), data: ImageAttachmentSchema.nullable() });
 const imageParams = z.object({ id: z.string().min(1).max(100) });
 app.openapi(createRoute({ method: "get", path: "/images", request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }) }, responses: { 200: { description: "Pending or failed image uploads.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(ImageAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
@@ -87,6 +119,22 @@ app.openapi(createRoute({ method: "post", path: "/images/{id}", request: { param
   if (image.id !== c.req.valid("param").id || (image.status === "uploaded" && !image.galleryUrl)) return c.json({ ok: false as const, error: { code: "invalid_image", message: "A completed image must have a gallery URL and matching ID." } }, 400);
   await imageStatement(database(c), image, new Date().toISOString()).run();
   return c.json({ ok: true as const, data: image }, 200);
+});
+
+const VideoResult = z.object({ ok: z.literal(true), data: VideoAttachmentSchema.nullable() });
+app.openapi(createRoute({ method: "get", path: "/videos", request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }) }, responses: { 200: { description: "Pending or failed video uploads; oversized videos are not retried.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(VideoAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
+  const rows = await database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE gallery_url IS NULL AND status IN ('pending', 'failed') ORDER BY updated_at, id LIMIT ?`).bind(c.req.valid("query").limit).all();
+  return c.json({ ok: true as const, data: rows.results.map(readVideo) }, 200);
+});
+app.openapi(createRoute({ method: "get", path: "/videos/{id}", request: { params: imageParams }, responses: { 200: { description: "Video upload cache.", content: { "application/json": { schema: VideoResult } } }, 401: unavailable } }), async c => {
+  const row = await database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE id = ?`).bind(c.req.valid("param").id).first();
+  return c.json({ ok: true as const, data: row ? readVideo(row) : null }, 200);
+});
+app.openapi(createRoute({ method: "post", path: "/videos/{id}", request: { params: imageParams, body: { required: true, content: { "application/json": { schema: VideoAttachmentSchema } } } }, responses: { 200: { description: "Saved video upload progress.", content: { "application/json": { schema: VideoResult } } }, 400: unavailable, 401: unavailable } }), async c => {
+  const video = c.req.valid("json");
+  if (video.id !== c.req.valid("param").id) return c.json({ ok: false as const, error: { code: "invalid_video", message: "Video ID must match the request path." } }, 400);
+  await videoStatement(database(c), video, new Date().toISOString()).run();
+  return c.json({ ok: true as const, data: video }, 200);
 });
 
 app.openapi(createRoute({ method: "post", path: "/batches/{batchId}/complete", request: { params: z.object({ batchId: z.string().min(1).max(100) }), body: { required: true, content: { "application/json": { schema: BatchCompleteSchema } } } }, responses: { 200: { description: "Completed collector batch.", content: { "application/json": { schema: QueryIngestResponseSchema } } }, 401: unavailable, 404: unavailable, 503: unavailable } }), async c => {

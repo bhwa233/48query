@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ImageAttachment } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment } from "@starter/shared";
 import type { CollectionSource, CollectorMember, CollectorMessage } from "./types";
 
 // No installed parser is needed: Node 24 exposes the original JSON number in
@@ -40,6 +40,8 @@ export function contentList(content: unknown): unknown[] {
   for (const key of ["message", "messageList", "data", "posts", "postsList", "postList", "postsInfo", "essenceMessageList", "imgAndVideoList", "list"]) {
     if (Array.isArray(root[key])) return root[key] as unknown[];
   }
+  // Live empty public timelines use only an explicit terminal nextId marker.
+  if (Object.keys(root).length === 1 && string(root.nextId) === "0") return [];
   throw new Error("Pocket48 returned an unknown content list shape; refusing to advance its cursor.");
 }
 
@@ -95,6 +97,7 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
   let answer: string | null = null;
   let kind: NonNullable<CollectorMessage["kind"]> = "unknown";
   const images: ImageAttachment[] = [];
+  const videos: VideoAttachment[] = [];
   if (type === "TEXT") kind = "text";
   else if (type === "IMAGE" || type === "EXPRESSIMAGE") {
     kind = "image";
@@ -106,6 +109,13 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
     kind = "reply"; question = string(reply.replyText ?? ext.replyText); answer = string(reply.text ?? ext.text ?? body.text); text = answer;
   } else if (type === "FLIPCARD") {
     kind = "reply"; question = string(flip.question ?? ext.question ?? ext.faipaiContent); answer = string(flip.answer ?? ext.answer ?? ext.messageText); text = answer;
+  } else if (type === "VIDEO") {
+    const url = string(body.url);
+    let valid = false;
+    try { const parsed = new URL(url ?? ""); valid = ["https:", "http:"].includes(parsed.protocol) && !parsed.username && !parsed.password && parsed.href.length <= 2000; } catch { /* Missing or invalid URLs retain the page for retry. */ }
+    if (!url || !valid) throw new Error("A member video message has no valid video URL; page retained for retry.");
+    kind = "video"; text = null;
+    videos.push({ id: createHash("sha256").update(url).digest("hex"), sourceUrl: url, galleryUrl: null, thumbnailUrl: null, bytes: null, status: "pending", skipReason: null });
   } else if (excluded.test(type)) {
     kind = "excluded"; text = null; question = string(flip.question ?? ext.question);
   } else if (events.test(type)) { kind = "event"; text = null; }
@@ -125,6 +135,6 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
   if ([text, question, answer].some(part => part && part.length > 20000) || images.length > 30) throw new Error("A member message exceeds supported content bounds; page retained for retry.");
   return { id, memberId: senderId, author, occurredAt, type, text, senderId, senderName: author.name, senderType: "member",
     roomOwnerId: roomOwner.id, roomId: isPost ? null : roomId, kind, question, answer, source,
-    sourceFlags: sourceFlags[source], images: [...new Map(images.map(image => [image.id, image])).values()], parseStatus: kind === "unknown" ? "unsupported" : "parsed",
+    sourceFlags: sourceFlags[source], images: [...new Map(images.map(image => [image.id, image])).values()], videos, parseStatus: kind === "unknown" ? "unsupported" : "parsed",
     sourceJson: JSON.stringify({ upstreamId, postId, format: "pocket48-v2" }) };
 }

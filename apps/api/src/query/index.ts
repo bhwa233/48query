@@ -2,13 +2,14 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
-import type { ArchiveMessage, CollectionSource, SourceSync } from "@starter/shared";
+import type { CollectionSource, SourceSync } from "@starter/shared";
 import { CollectionSourceSchema, ErrorSchema, QueryMemberDetailSchema, QueryMembersSchema, QueryMessageSearchSchema, QueryOverviewSchema, QueryRecordingsSchema, SourceSyncSchema } from "@starter/shared/schemas";
 import type { AppEnv } from "../env";
 import ingest from "./ingest";
+import { readMessages as messages } from "./messages";
 
 const DateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
-const MessageQuery = z.object({ q: z.string().trim().max(100).optional(), memberId: z.string().trim().max(100).optional(), before: z.string().max(600).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), kind: z.enum(["text", "image", "reply", "post", "excluded", "unknown"]).optional(), source: CollectionSourceSchema.optional(), from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
+const MessageQuery = z.object({ q: z.string().trim().max(100).optional(), memberId: z.string().trim().max(100).optional(), before: z.string().max(600).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), kind: z.enum(["text", "image", "video", "reply", "post", "excluded", "unknown"]).optional(), source: CollectionSourceSchema.optional(), from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
 const unavailable = { description: "D1 profile is not configured.", content: { "application/json": { schema: ErrorSchema } } };
 const app = new OpenAPIHono<AppEnv>({ defaultHook: (result, c) => { if (!result.success) return c.json({ ok: false as const, error: { code: "invalid_request", message: "Request validation failed." } }, 400); } });
 app.use("*", async (c, next) => {
@@ -30,7 +31,7 @@ app.route("/ingest", ingest);
 function database(env: AppEnv["Bindings"]) { if (!env.APP_DB) throw new Error("APP_DB binding is missing"); return drizzle(env.APP_DB); }
 type Database = ReturnType<typeof database>;
 type Row = Record<string, unknown>;
-const publicKinds = sql`q.kind IN ('text', 'image', 'reply', 'post') AND q.parse_status = 'parsed'`;
+const publicKinds = sql`q.kind IN ('text', 'image', 'video', 'reply', 'post') AND q.parse_status = 'parsed'`;
 const sourceBits: Record<CollectionSource, number> = { room: 1, album: 2, essence: 4, posts: 8, post_images: 16, weibo: 32, room_posts: 64 };
 const projection = sql`q.*, m.name AS member_name, owner.name AS room_owner_name`;
 const joins = sql`query_messages q JOIN query_members m ON m.id = q.member_id LEFT JOIN query_members owner ON owner.id = q.room_owner_id`;
@@ -49,16 +50,6 @@ async function coverage(db: Database) {
   const covered = Number(row?.members_covered ?? 0);
   // Non-empty samples prove coverage, not complete history or account access.
   return { status: covered > 0 ? "partial" as const : "unavailable" as const, earliestDate: typeof row?.earliest_date === "string" ? row.earliest_date : null, latestDate: typeof row?.latest_date === "string" ? row.latest_date : null, membersCovered: covered, totalMembers: Number(row?.total_members ?? 0), lastBatchCompletedAt: typeof row?.last_batch_completed_at === "string" ? row.last_batch_completed_at : null };
-}
-async function messages(db: Database, rows: Row[]): Promise<ArchiveMessage[]> {
-  if (!rows.length) return [];
-  const images = await db.all<Row>(sql`SELECT link.message_id, image.id, image.source_url, image.gallery_url, image.thumbnail_url, image.width, image.height, image.status
-    FROM query_message_images link JOIN query_images image ON image.id = link.image_id WHERE link.message_id IN (${sql.join(rows.map(row => sql`${row.id}`), sql`, `)}) ORDER BY link.position, image.id`);
-  return rows.map(row => ({ id: String(row.id), memberId: String(row.member_id), memberName: String(row.member_name), type: String(row.type), text: row.text as string | null, occurredAt: String(row.occurred_at), senderId: row.sender_id as string | null, senderName: row.sender_name as string | null, senderType: row.sender_type as string | null,
-    roomOwnerId: row.room_owner_id as string | null, roomOwnerName: row.room_owner_name as string | null, roomId: row.room_id as string | null,
-    kind: row.kind as ArchiveMessage["kind"], question: row.question as string | null, answer: row.answer as string | null, source: row.source as CollectionSource, sourceFlags: Number(row.source_flags), parseStatus: row.parse_status as ArchiveMessage["parseStatus"],
-    images: images.filter(image => image.message_id === row.id).map(image => ({ id: String(image.id), sourceUrl: String(image.source_url), galleryUrl: image.gallery_url as string | null, thumbnailUrl: image.thumbnail_url as string | null, width: image.width as number | null, height: image.height as number | null, status: image.status as "pending" | "uploaded" | "failed" })),
-  }));
 }
 const memberProjection = (date: string) => sql`m.id, m.name, m.pinyin, m.group_name, m.team,
   (SELECT COUNT(*) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND date(q.occurred_at, '+8 hours') <= ${date}) AS messages,

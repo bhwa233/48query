@@ -71,6 +71,14 @@ export const ImageAttachmentSchema = z.object({
   width: z.number().int().positive().nullable().optional(), height: z.number().int().positive().nullable().optional(),
   status: z.enum(["pending", "uploaded", "failed"]).default("pending"),
 }).refine(image => image.status !== "uploaded" || Boolean(image.galleryUrl), "Uploaded images require a gallery URL.");
+export const VideoAttachmentSchema = z.object({
+  id: z.string().min(1).max(100), sourceUrl: ImageUrlSchema,
+  galleryUrl: ImageUrlSchema.nullable().optional(), thumbnailUrl: ImageUrlSchema.nullable().optional(),
+  bytes: z.number().int().positive().nullable().optional(),
+  status: z.enum(["pending", "uploaded", "failed", "skipped"]).default("pending"),
+  skipReason: z.literal("too_large").nullable().optional(),
+}).refine(video => video.status !== "uploaded" || Boolean(video.galleryUrl && video.bytes), "Uploaded videos require a gallery URL and measured size.")
+  .refine(video => video.status !== "skipped" || video.skipReason === "too_large", "Skipped videos require a reason.");
 export const SourceSyncSchema = z.object({
   source: CollectionSourceSchema, historyCursor: z.string().max(500).nullable(), historyDone: z.boolean(),
   latestAt: z.string().nullable(), latestIds: z.array(z.string().max(200)).max(100),
@@ -89,9 +97,9 @@ export const QueryMessageSchema = z.object({
   senderName: z.string().nullable(),
   senderType: z.string().nullable(),
   senderId: z.string().nullable(), roomOwnerId: z.string().nullable(), roomOwnerName: z.string().nullable(), roomId: z.string().nullable(),
-  kind: z.enum(["text", "image", "reply", "post", "event", "excluded", "unknown"]),
+  kind: z.enum(["text", "image", "video", "reply", "post", "event", "excluded", "unknown"]),
   question: z.string().nullable(), answer: z.string().nullable(), source: CollectionSourceSchema, sourceFlags: z.number().int(),
-  images: z.array(ImageAttachmentSchema), parseStatus: z.enum(["parsed", "unsupported"]),
+  images: z.array(ImageAttachmentSchema), videos: z.array(VideoAttachmentSchema), parseStatus: z.enum(["parsed", "unsupported"]),
 });
 
 export const QueryOverviewSchema = z.object({
@@ -152,10 +160,10 @@ const IngestMessageSchema = z.object({
   text: z.string().max(20000).nullable().optional(), senderId: z.string().max(200).nullable().optional(), senderName: z.string().max(200).nullable().optional(),
   senderType: z.string().max(50).nullable().optional(), sourceJson: z.string().max(2000).nullable().optional(),
   author: IngestMemberSchema.optional(), roomOwnerId: z.string().max(100).nullable().optional(), roomId: z.string().max(200).nullable().optional(),
-  kind: z.enum(["text", "image", "reply", "post", "event", "excluded", "unknown"]).default("text"),
+  kind: z.enum(["text", "image", "video", "reply", "post", "event", "excluded", "unknown"]).default("text"),
   question: z.string().max(20000).nullable().optional(), answer: z.string().max(20000).nullable().optional(),
   source: CollectionSourceSchema.default("room"), sourceFlags: z.number().int().min(1).max(127).default(1),
-  images: z.array(ImageAttachmentSchema).max(30).default([]), parseStatus: z.enum(["parsed", "unsupported"]).default("parsed"),
+  images: z.array(ImageAttachmentSchema).max(30).default([]), videos: z.array(VideoAttachmentSchema).max(5).default([]), parseStatus: z.enum(["parsed", "unsupported"]).default("parsed"),
 });
 
 export const QueryIngestUnitSchema = z.object({

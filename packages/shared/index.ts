@@ -19,7 +19,7 @@ import type {
   NoteResponseSchema,
   EchoSchema,
   QueryOverviewSchema,
-  QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, CollectionSourceSchema, SourceSyncSchema,
+  QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema,
 } from "./schemas";
 
 export type ApiErrorResponse = z.infer<typeof ErrorSchema>;
@@ -34,5 +34,6 @@ export type ArchiveMembers = z.infer<typeof QueryMembersSchema>;
 export type ArchiveMemberDetail = z.infer<typeof QueryMemberDetailSchema>;
 export type ArchiveMessages = z.infer<typeof QueryMessageSearchSchema>;
 export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
+export type VideoAttachment = z.infer<typeof VideoAttachmentSchema>;
 export type CollectionSource = z.infer<typeof CollectionSourceSchema>;
 export type SourceSync = z.infer<typeof SourceSyncSchema>;

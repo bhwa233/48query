@@ -1,4 +1,4 @@
-import type { CollectionSource, ImageAttachment, SourceSync } from "@starter/shared";
+import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync } from "@starter/shared";
 export type { CollectionSource, SourceSync } from "@starter/shared";
 
 export type CollectorMember = {
@@ -27,12 +27,13 @@ export type CollectorMessage = {
   author?: CollectorMember;
   roomOwnerId?: string | null;
   roomId?: string | null;
-  kind?: "text" | "image" | "reply" | "post" | "event" | "excluded" | "unknown";
+  kind?: "text" | "image" | "video" | "reply" | "post" | "event" | "excluded" | "unknown";
   question?: string | null;
   answer?: string | null;
   source?: CollectionSource;
   sourceFlags?: number;
   images?: ImageAttachment[];
+  videos?: VideoAttachment[];
   parseStatus?: "parsed" | "unsupported";
 };
 
@@ -92,4 +93,9 @@ export interface CollectorStore {
   getImage?(id: string): Promise<ImageAttachment | null>;
   saveImage?(image: ImageAttachment): Promise<void>;
   pendingImages?(limit: number): Promise<ImageAttachment[]>;
+  getVideo?(id: string): Promise<VideoAttachment | null>;
+  saveVideo?(video: VideoAttachment): Promise<void>;
+  pendingVideos?(limit: number): Promise<VideoAttachment[]>;
+  verifiedPostImages?(memberId: string, imageIds: string[]): Promise<CollectorMessage[]>;
+  verifiedRoomMedia?(roomId: string, assets: { id: string; occurredAt: string }[]): Promise<CollectorMessage[]>;
 }

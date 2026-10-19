@@ -36,6 +36,13 @@
       "when": 1792380256553,
       "tag": "0005_text_image_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792391817199,
+      "tag": "0006_room_videos",
+      "breakpoints": true
     }
   ]
 }

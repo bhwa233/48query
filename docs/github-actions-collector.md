@@ -26,6 +26,7 @@ INGEST_KEY
 | `COLLECTOR_SOURCES` | `room,album,essence,posts,post_images,weibo,room_posts` |
 | `POCKET48_MIN_INTERVAL_MS` | `5000`，上游请求的最小间隔，不是长期无风险保证 |
 | `GALLERY_BASE_URL` | `https://gallery233.pages.dev`，沿用 galaxy-spider 图库协议 |
+| `COLLECTOR_VIDEO_MAX_MIB` | `50`，普通房间短视频单文件上限，允许降低 |
 | `COLLECTOR_IMAGE_RETRY_LIMIT` | `25`，每次先重试的未完成图片数，可设 `0` |
 
 本地调试优先使用[本地凭证与采集器命令](collector.md#本地调试)，不需要推送代码反复跑 CI。手动工作流可覆盖 `max_members`、`max_pages`、`history_pages`、`member_scope`，可用 `member_id` 指定成员，`sources` 指定部分来源。未填写 `sources` 时使用 Variable 或七类默认来源。`dry_run` 可关闭写库和图片上传，`diagnostics` 只打印结构；只读调试使用独立并发组。页预算不是完整历史的承诺，实时性也不由 Actions cron 保证。

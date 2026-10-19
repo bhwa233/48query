@@ -41,6 +41,13 @@ export const queryImages = sqliteTable("query_images", {
 export const queryMessageImages = sqliteTable("query_message_images", {
   messageId: text("message_id").notNull().references(() => queryMessages.id), imageId: text("image_id").notNull().references(() => queryImages.id), position: integer("position").notNull(),
 }, table => [primaryKey({ columns: [table.messageId, table.imageId] })]);
+export const queryVideos = sqliteTable("query_videos", {
+  id: text("id").primaryKey(), sourceUrl: text("source_url").notNull(), galleryUrl: text("gallery_url"), thumbnailUrl: text("thumbnail_url"),
+  bytes: integer("bytes"), status: text("status").notNull().default("pending"), skipReason: text("skip_reason"), updatedAt: text("updated_at").notNull(),
+});
+export const queryMessageVideos = sqliteTable("query_message_videos", {
+  messageId: text("message_id").notNull().references(() => queryMessages.id), videoId: text("video_id").notNull().references(() => queryVideos.id), position: integer("position").notNull(),
+}, table => [primaryKey({ columns: [table.messageId, table.videoId] })]);
 export const querySourceSync = sqliteTable("query_source_sync", {
   memberId: text("member_id").notNull(), source: text("source").notNull(), stateJson: text("state_json").notNull(), updatedAt: text("updated_at").notNull(),
 }, table => [primaryKey({ columns: [table.memberId, table.source] })]);

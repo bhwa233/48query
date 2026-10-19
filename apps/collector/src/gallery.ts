@@ -1,9 +1,12 @@
-import type { ImageAttachment } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment } from "@starter/shared";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const GALLERY_URL = "https://gallery233.pages.dev";
 const allowedMediaHost = (hostname: string) => hostname === "48.cn" || hostname.endsWith(".48.cn") || hostname === "snh48.com" || hostname.endsWith(".snh48.com") || hostname.endsWith(".sinaimg.cn") || hostname === "kd48-nosdn.yunxinsvr.com";
-type GalleryFile = Pick<ImageAttachment, "id" | "sourceUrl" | "galleryUrl" | "thumbnailUrl" | "status">;
+type GalleryFile = Pick<VideoAttachment, "id" | "sourceUrl" | "galleryUrl" | "thumbnailUrl" | "status">;
+export class MediaSizeLimitError extends Error {
+  constructor() { super("Media exceeds size limit."); this.name = "MediaSizeLimitError"; }
+}
 
 // Reuse galaxy-spider's /upload multipart protocol with native Node fetch.
 // Preserve original bytes (including animated GIFs); no image processor needed.
@@ -47,7 +50,7 @@ export class GalleryUploader {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     const response = await this.sourceResponse(image.sourceUrl, "GET", { Accept: `${kind}/*` });
     if (!response.ok || !response.body) throw new Error("Media download failed.");
-    if (Number(response.headers.get("Content-Length")) > maxBytes) { await response.body.cancel(); throw new Error("Media exceeds size limit."); }
+    if (Number(response.headers.get("Content-Length")) > maxBytes) { await response.body.cancel(); throw new MediaSizeLimitError(); }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -56,7 +59,7 @@ export class GalleryUploader {
         const result = await reader.read();
         if (result.done) break;
         size += result.value.byteLength;
-        if (size > maxBytes) throw new Error("Media exceeds size limit.");
+        if (size > maxBytes) throw new MediaSizeLimitError();
         chunks.push(result.value);
       }
     } catch (error) { await reader.cancel(); throw error; }

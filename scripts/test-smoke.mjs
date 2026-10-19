@@ -209,7 +209,7 @@ try {
     startedAt: "2026-10-18T00:00:00.000Z",
     member: { id: "smoke-member", name: "Smoke Member", pinyin: "smokemember", groupName: "SNH48", team: "Team SII", roomId: "smoke-room" },
     messages: [
-      { id: "smoke-message", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "IMAGE", kind: "image", source: "posts", sourceFlags: 8, text: "smoke ingest full body", images: [{ id: "smoke-image", sourceUrl: "https://source.48.cn/smoke.png", status: "pending" }] },
+      { id: "smoke-message", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", senderId: "smoke-member", type: "POST_INFO", kind: "post", source: "posts", sourceFlags: 8, text: "smoke ingest full body", images: [{ id: "smoke-image", sourceUrl: "https://source.48.cn/smoke.png", status: "pending" }] },
       { id: "smoke-message-2", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "REPLY", kind: "reply", text: "smoke ingest two", question: "public smoke question", answer: "smoke ingest two" },
     ],
     recordings: [],
@@ -258,6 +258,24 @@ try {
   assert.deepEqual({ messages: memberDetail.messages, recordings: memberDetail.recordings }, { messages: 2, recordings: 0 });
   const messageResults = (await request(origin, "/api/query/messages?q=smoke&limit=5")).json().data;
   assert.deepEqual(messageResults.map((item) => item.id).sort(), ["smoke-message", "smoke-message-2"]);
+  // A replayed source page must not erase an uploaded video's URL/byte count;
+  // oversized videos stay queryable without entering the retry queue forever.
+  const video = { id: "smoke-video", sourceUrl: "https://source.48.cn/short.mp4", galleryUrl: "https://gallery233.pages.dev/short.mp4", status: "uploaded", bytes: 2048 };
+  const videoMessage = { id: "smoke-video-message", memberId: "smoke-member", senderId: "smoke-member", roomId: "verified-smoke-room", type: "VIDEO", kind: "video", occurredAt: "2026-10-17T12:00:01.000Z", videos: [video] };
+  const videoPage = { ...ingestUnit, messages: [videoMessage, { ...videoMessage, id: "smoke-large-video-message", videos: [{ ...video, id: "smoke-large-video", galleryUrl: null, status: "skipped", bytes: 60 * 1024 * 1024, skipReason: "too_large" }] }] };
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify(videoPage) });
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...videoPage, messages: [{ ...videoMessage, videos: [{ ...video, galleryUrl: null, status: "pending", bytes: null }] }] }) });
+  const videoResults = (await request(origin, "/api/query/messages?kind=video")).json().data;
+  assert.deepEqual(videoResults.find(message => message.id === videoMessage.id).videos[0], { ...video, thumbnailUrl: null, skipReason: null });
+  assert.deepEqual((await request(origin, "/api/query/ingest/videos", 200, imageOptions)).json().data, []);
+  const cacheRequest = (roomId, occurredAt = videoMessage.occurredAt) => ({ ...post({ scope: "room", roomId, assets: [{ id: video.id, occurredAt }] }), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
+  const verified = (await request(origin, "/api/query/ingest/verified-media", 200, cacheRequest(videoMessage.roomId))).json().data;
+  assert.deepEqual(verified.map(message => message.id), [videoMessage.id]);
+  assert.deepEqual((await request(origin, "/api/query/ingest/verified-media", 200, cacheRequest("different-room"))).json().data, []);
+  assert.deepEqual((await request(origin, "/api/query/ingest/verified-media", 200, cacheRequest(videoMessage.roomId, "2026-10-17T12:00:02.000Z"))).json().data, []);
+  const postCache = memberId => ({ ...post({ scope: "posts", memberId, imageIds: ["smoke-image"] }), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
+  assert.deepEqual((await request(origin, "/api/query/ingest/verified-media", 200, postCache("smoke-member"))).json().data.map(message => message.id), ["smoke-message"]);
+  assert.deepEqual((await request(origin, "/api/query/ingest/verified-media", 200, postCache("another-member"))).json().data, []);
   const recordingResults = (await request(origin, "/api/query/recordings")).json().data;
   assert.deepEqual(recordingResults.map((item) => item.id).sort(), []);
   await request(origin, "/api/query/members/missing", 404);
