@@ -8,6 +8,34 @@ import type { IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { GalleryUploader } from "../../apps/collector/src/gallery";
 
+// Variable signing latency must not let simultaneous callers send a burst
+// after their pre-signing rate-limit slots have already elapsed.
+test("spaces actual Pocket48 requests even when signing completes out of order", async context => {
+  const start = Date.parse("2026-10-19T00:00:00Z");
+  context.mock.timers.enable({ apis: ["Date", "setTimeout"], now: start });
+  let finishSigning!: (pa: string) => void;
+  const slowSignature = new Promise<string>(resolve => { finishSigning = resolve; });
+  let signatures = 0;
+  const attempts: number[] = [];
+  const source = new Pocket48Source({ token: "synthetic-token", minIntervalMs: 1200,
+    paFactory: () => ++signatures === 1 ? slowSignature : "synthetic-pa",
+    fetchImpl: async () => { attempts.push(Date.now()); return Response.json({ status: 200, content: { nextId: "0" } }); },
+  });
+  const member = { id: "1", name: "Member", groupName: "SNH48" };
+  const done = Promise.all([source.listContent(member, "posts", null), source.listContent(member, "posts", null)]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(attempts, [start]);
+  context.mock.timers.tick(500);
+  finishSigning("synthetic-pa");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  context.mock.timers.tick(699);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(attempts.length, 1, "Finishing a slow signature must not bypass the request delay");
+  context.mock.timers.tick(1);
+  await done;
+  assert.deepEqual(attempts, [start, start + 1200]);
+});
+
 // The public directory's channel IDs went stale. Production requested those
 // directly and got "频道不存在" instead of resolving the member's current room.
 test("resolves stale directory rooms once per member and preserves upstream failures", async () => {

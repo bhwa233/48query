@@ -19,6 +19,8 @@ COLLECTOR_SOURCE=pocket48 COLLECTOR_DRY_RUN=1 COLLECTOR_MAX_MEMBERS=1 COLLECTOR_
 
 dry-run 仍会读取所选上游源，输出只有数量、类型和同步状态，不上传图片、不写 D1。正式写入需设置 `INGEST_API_URL`、`INGEST_KEY`，并将 `COLLECTOR_DRY_RUN` 设为 `0`；缺少写入配置会报错，不会悄悄改成演示运行。
 
+Pocket48 请求共用限速队列，实际发送时间至少间隔 **5 秒**，成员列表、分页、相册原文核验和独立视频命令都遵守这一间隔。限速在签名生成后执行，签名耗时不同也不会造成并发请求扎堆。`POCKET48_MIN_INTERVAL_MS` 可调整间隔（毫秒），生产已明确配置为 `5000`；非有限数字或负数会直接报错，避免错误配置意外关闭限速。
+
 ## 来源与范围
 
 `COLLECTOR_SOURCES` 默认启用全部七类，逗号分隔可缩小验证范围：

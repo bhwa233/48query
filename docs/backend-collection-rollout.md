@@ -34,7 +34,7 @@
 | `COLLECTOR_MAX_PAGES` | 每来源增量最多 10 页 |
 | `COLLECTOR_HISTORY_PAGES` | 每来源历史最多 1 页，按游标逐日续采 |
 | `COLLECTOR_VIDEO_MAX_MIB` | `50` |
-| `POCKET48_MIN_INTERVAL_MS` | 默认 `5000` |
+| `POCKET48_MIN_INTERVAL_MS` | 生产明确设置 `5000`，实际发送至少间隔 5 秒 |
 | 来源 | 全部七类 |
 | 图片预重试 | 生产设置每次 100 个，先消化现有积压 |
 | 视频预重试 | 每次最多 25 个，超限项除外 |

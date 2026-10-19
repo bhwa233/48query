@@ -29,6 +29,7 @@ export class Pocket48Source implements CollectorSource {
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
+    if (options.minIntervalMs !== undefined && (!Number.isFinite(options.minIntervalMs) || options.minIntervalMs < 0)) throw new Error("POCKET48_MIN_INTERVAL_MS must be a finite non-negative number.");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = (options.apiBaseUrl ?? "https://pocketapi.48.cn").replace(/\/$/, "");
     const order: CollectionSource[] = ["room", "essence", "posts", "weibo", "room_posts", "album", "post_images"];
@@ -48,7 +49,6 @@ export class Pocket48Source implements CollectorSource {
   }
 
   private async post(pathname: string, body: Record<string, unknown>) {
-    await this.rateLimit();
     const pa = this.options.paFactory ? await this.options.paFactory() : this.options.pa;
     const headers: Record<string, string> = {
       Accept: "application/json", "Content-Type": "application/json;charset=utf-8", "Accept-Language": "zh-Hans-CN;q=1",
@@ -65,6 +65,8 @@ export class Pocket48Source implements CollectorSource {
       headers["User-Agent"] = "PocketFans201807/7.1.43_26082801 (SM-G9730:Android 12;Samsung V417IR release-keys)";
     }
     if (pa) headers.pa = pa;
+    // Signer latency must not consume the delay and bunch actual requests.
+    await this.rateLimit();
     const response = await this.fetchImpl(`${this.baseUrl}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const payload = object(parsePocketJson(await response.text()));
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
