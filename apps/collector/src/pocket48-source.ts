@@ -75,8 +75,8 @@ export class Pocket48Source implements CollectorSource {
     const requestHeaders: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/json;charset=utf-8",
-      appInfo: JSON.stringify({ vendor: "apple", appVersion: "7.1.35", appBuild: "25101021", osVersion: "16.3.0", osType: "ios", deviceName: "iPhone 14 Pro", os: "ios", ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}) }),
-      "User-Agent": "PocketFans201807/7.1.35 (iPhone; iOS 16.3; Scale/3.00)",
+      appInfo: JSON.stringify({ vendor: "apple", appVersion: "7.0.4", appBuild: "23011601", osVersion: "16.3.1", osType: "ios", deviceName: "iPhone XR", os: "ios", ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}) }),
+      "User-Agent": "PocketFans201807/6.0.16 (iPhone; iOS 13.5.1; Scale/2.00)",
     };
     requestHeaders["token"] = this.options["token"];
     if (pa) requestHeaders["pa"] = pa;

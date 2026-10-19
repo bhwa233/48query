@@ -231,6 +231,18 @@ try {
   const overview = await request(origin, "/api/query/overview?date=2026-10-17");
   assert.deepEqual(overview.json().data.totals, { messages: 2, activeMembers: 1, recordings: 2, danmaku: 5 });
   assert.equal(overview.json().coverage.status, "complete");
+  const previousCompletion = overview.json().coverage.lastBatchCompletedAt;
+  const failedCollector = launch(
+    ["--filter", "@starter/collector", "exec", "tsx", "../../tests/collector/failure.ts"],
+    { env: { INGEST_API_URL: origin, INGEST_KEY: "test-ingest-key" } },
+  );
+  console.log(await failedCollector.complete());
+  servers.delete(failedCollector);
+  assert.equal(
+    (await request(origin, "/api/query/overview")).json().coverage.lastBatchCompletedAt,
+    previousCompletion,
+    "A failed batch must not become the latest completed batch",
+  );
   const members = (await request(origin, "/api/query/members")).json().data;
   assert.equal(members[0].id, "smoke-member");
   assert.deepEqual({ messages: members[0].messages, recordings: members[0].recordings }, { messages: 2, recordings: 2 });

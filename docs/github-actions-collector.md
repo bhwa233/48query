@@ -42,6 +42,8 @@ workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运
 
 采集器在成员级请求失败时会继续处理其他成员，但最终批次会标记为 `failed`，并以非零退出码结束 GitHub Actions。只有 `errorCount = 0` 的批次才会标记为 `completed`，查询接口不会把失败批次当成完整覆盖。
 
+请求 Pocket48 前先通过现有入库事务登记批次与成员，保留原游标且不计入成功成员数。这样首个成员失败也有批次可收尾，不会再用 `Batch not found` 覆盖原始错误。目录为空则直接报错，不输出空批次成功。
+
 workflow 不会打印环境变量、请求头或完整上游响应，也不会上传包含凭证的 artifact。Pocket48 token 失效时应在日志中根据错误类型判断，然后从 SparkHub 后台执行轮换。
 
 采集启动命令是 `pnpm --filter @starter/collector run run`（或仓库根目录 `pnpm collector:run`）。第一个 `run` 是 pnpm 子命令，第二个是包内脚本名；省略第二个只会列出脚本并返回成功，不会采集。验收需检查日志包含 `batch_finished`，且 `membersCovered > 0`、`errorCount = 0`，不能只看工作流绿色状态。

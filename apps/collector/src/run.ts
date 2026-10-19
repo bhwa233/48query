@@ -11,6 +11,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   const maxPages = options.maxPagesPerMember ?? 10;
   const allMembers = await source.listMembers();
   const members = options.maxMembers && options.maxMembers > 0 ? allMembers.slice(0, options.maxMembers) : allMembers;
+  if (members.length === 0) throw new Error("No members found for collection.");
   let membersCovered = 0;
   let errorCount = 0;
   let lastError: string | null = null;
@@ -20,6 +21,9 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
       const state = await store.getSyncState(member.id);
       let messageCursor = state?.messageCursor ?? null;
       let recordingCursor = state?.recordingCursor ?? null;
+      // Register the batch and member before upstream requests can fail. Reuse
+      // the existing ingest transaction without advancing either saved cursor.
+      await store.ingestUnit({ batchId, statDate, startedAt, member, messages: [], recordings: [], messageCursor, recordingCursor, totalMembers: members.length, membersCovered, errorCount });
       let pages = 0;
       do {
         const [messagePage, recordingPage] = await Promise.all([
