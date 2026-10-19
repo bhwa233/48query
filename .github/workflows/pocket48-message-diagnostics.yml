@@ -49,11 +49,36 @@ jobs:
             console.log('[message-shape]', JSON.stringify({ pathname, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, targetFollowed: body.content?.friend === true, legacyProfile, requestLimit: requestBody.limit, requestStartsAtZero: requestBody.nextTime === 0, shape: shape(body) }));
             return body;
           };
+          const pause = () => new Promise(resolve => setTimeout(resolve, 5000));
           const room = await post('/im/api/v1/im/server/jump', { starId: 63566, targetType: 1, tabId: 0 });
-          await new Promise(resolve => setTimeout(resolve, 5000));
+          await pause();
           const info = await post('/im/api/v1/im/team/room/info', { channelId: String(room.content?.channelId) });
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/chatroom/msg/list/homeowner', {
-            roomId: String(info.content?.imRoomId ?? ''), ownerId: '63566', nextTime: '0', needTop1Msg: 'false',
-          });
+          const directoryResponse = await fetch('https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json');
+          const directory = (await directoryResponse.json()).roomId;
+          const original = directory.find(member => String(member.id) === '63566');
+          console.log('[message-shape]', JSON.stringify({ roomOwnerMatches: String(info.content?.channelInfo?.ownerId) === '63566', directoryChannelMatches: String(original?.channelId) === String(room.content?.channelId), channelPocketType: info.content?.channelInfo?.channelPocketType, functionType: info.content?.channelInfo?.functionType }));
+          await pause();
+          const all = await post('/im/api/v1/team/message/list/all', { channelId: Number(room.content?.channelId), serverId: Number(room.content?.serverId), nextTime: 0, limit: 50 });
+          const messages = all.content?.message ?? [];
+          const types = {};
+          let ownerMessages = 0;
+          for (const message of messages) {
+            types[message.msgType] = (types[message.msgType] ?? 0) + 1;
+            try { const ext = JSON.parse(message.extInfo); if (String(ext.user?.userId ?? ext.user?.id) === '63566') ownerMessages++; } catch {}
+          }
+          console.log('[message-shape]', JSON.stringify({ types, ownerMessages }));
+          if (original && String(original.channelId) !== String(room.content?.channelId)) {
+            await pause();
+            await post('/im/api/v1/team/message/list/homeowner', { channelId: Number(original.channelId), serverId: Number(original.serverId), nextTime: 0, limit: 25 });
+          }
+          await pause();
+          const follows = await post('/user/api/v1/friendships/friends/id', {});
+          const ids = new Set((follows.content?.data ?? []).map(String));
+          const candidates = directory.filter(member => ids.has(String(member.id)) && !['63', '63566'].includes(String(member.id))).slice(0, 2);
+          for (const member of candidates) {
+            await pause();
+            const current = await post('/im/api/v1/im/server/jump', { starId: Number(member.id), targetType: 1, tabId: 0 });
+            await pause();
+            await post('/im/api/v1/team/message/list/homeowner', { channelId: Number(current.content?.channelId), serverId: Number(current.content?.serverId), nextTime: 0, limit: 25 });
+          }
           JS
