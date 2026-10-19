@@ -4,7 +4,7 @@
 
 当前项目包含 48query 统计站的 Web、查询 API、D1 数据模型和每日 Pocket48 采集器。`template.json` 保留来源记录；`docs/verification.md` 记录来源模板的验证结果，不代表本项目的业务验收。
 
-当前采集范围评审见 [图文采集范围与实施方案](docs/text-image-collection-review.md)：停止采集录播，优先成员文字、图片和公开回复。`Daily collector` 已暂停，待消息链路独立并完成真实图文验收后再恢复。
+当前采集范围评审见 [图文采集范围与实施方案](docs/text-image-collection-review.md)：停止采集录播，优先成员文字、图片和公开回复。本地真实样本已验证 43 条唯一图文记录和 109 张关联图片，详情见[实施记录](docs/text-image-implementation.md)。`Daily collector` 保持暂停，房间普通消息与相册作者覆盖仍有待验证。
 
 ## 技术栈
 

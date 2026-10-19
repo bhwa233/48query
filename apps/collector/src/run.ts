@@ -3,12 +3,14 @@ import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStor
 const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { statDate?: string; batchId?: string; maxPagesPerMember?: number; maxMembers?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void> } = {}) {
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
   const batchId = options.batchId ?? `batch-${statDate}-${Date.now()}`;
   const maxPages = options.maxPagesPerMember ?? 10;
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000) throw new Error("Collector page budget must be between 1 and 1000.");
+  const historyPages = options.maxHistoryPagesPerMember ?? maxPages;
+  if (!Number.isInteger(historyPages) || historyPages < 0 || historyPages > 1000) throw new Error("Collector history budget must be between 0 and 1000.");
   const allMembers = await source.listMembers();
   const members = options.maxMembers && options.maxMembers > 0 ? allMembers.slice(0, options.maxMembers) : allMembers;
   if (members.length === 0) throw new Error("No members found for collection.");
@@ -32,16 +34,24 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         const write = async (messages: CollectorMessage[], next: SourceSync) => {
           // Cache/upload progress separately. A gallery outage does not discard text
           // or advance past a missing attachment: its pending row remains retryable.
-          for (const message of messages) for (const image of message.images ?? []) {
-            const existing = await store.getImage?.(image.id);
-            if (existing?.status === "uploaded") Object.assign(image, existing);
-            else if (options.archiveImage) {
-              await store.saveImage?.(image);
-              try { await options.archiveImage(image); }
-              catch { image.status = "failed"; imageFailures += 1; }
-              await store.saveImage?.(image);
-            }
+          const attachments = messages.flatMap(message => message.images ?? []);
+          const uniqueImages = new Map(attachments.map(image => [image.id, image]));
+          const uploads = [...uniqueImages.values()];
+          // Keep uploads bounded so one multi-image page can finish within a
+          // daily job; text/checkpoints are committed only after all results.
+          for (let offset = 0; offset < uploads.length; offset += 3) {
+            await Promise.all(uploads.slice(offset, offset + 3).map(async image => {
+              const existing = await store.getImage?.(image.id);
+              if (existing?.status === "uploaded") Object.assign(image, existing);
+              else if (options.archiveImage) {
+                await store.saveImage?.(image);
+                try { await options.archiveImage(image); }
+                catch { image.status = "failed"; imageFailures += 1; }
+                await store.saveImage?.(image);
+              }
+            }));
           }
+          for (const image of attachments) Object.assign(image, uniqueImages.get(image.id));
           await store.ingestUnit(unit(messages, next));
           sync = next;
           messagesWritten += messages.length;
@@ -53,6 +63,11 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         let cursor = sync.incrementalCursor;
         for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
           const page = await readPage(cursor);
+          if (page.unverified) {
+            const now = new Date().toISOString();
+            await write(page.items, { ...sync, lastSuccessAt: now, lastNonemptyAt: page.items.length ? now : sync.lastNonemptyAt });
+            throw new Error(`${page.unverified} catalog items lack verifiable authorship; matched records retained, cursor unchanged.`);
+          }
           const boundary = page.boundary ?? page.items.map(message => ({ id: message.id, occurredAt: message.occurredAt }));
           const observed = page.observed ?? boundary.length;
           const newestAt = boundary.reduce<string | null>((date, item) => !date || item.occurredAt > date ? item.occurredAt : date, sync.pendingLatestAt);
@@ -73,8 +88,12 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         }
         // Never start a fresh backfill at null after a successful exhaustion.
         if (sync.latestAt && !sync.historyDone && sync.historyCursor !== null) {
-          for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
+          for (let pageNumber = 0; pageNumber < historyPages; pageNumber++) {
             const page = await readPage(sync.historyCursor);
+            if (page.unverified) {
+              await write(page.items, sync);
+              throw new Error(`${page.unverified} catalog items lack verifiable authorship; history cursor unchanged.`);
+            }
             const now = new Date().toISOString();
             await write(page.items, { ...sync, historyCursor: page.nextCursor, historyDone: page.nextCursor === null, status: page.items.length ? "ok" : sync.status, lastSuccessAt: now, lastNonemptyAt: page.items.some(item => !["event", "excluded", "unknown"].includes(item.kind ?? "text")) ? now : sync.lastNonemptyAt });
             if (sync.historyDone) break;

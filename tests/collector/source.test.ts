@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeMessage, parsePocketJson } from "../../apps/collector/src/pocket48-content";
+import { contentList, normalizeMessage, parsePocketJson } from "../../apps/collector/src/pocket48-content";
 import { runBatch } from "../../apps/collector/src/run";
 import { DryRunStore } from "../../apps/collector/src/dry-run-store";
 import { DemoSource } from "../../apps/collector/src/demo-source";
@@ -31,6 +31,7 @@ test("resolves stale directory rooms once per member and preserves upstream fail
       if (body.channelId !== 22 || body.serverId !== 33) {
         return Response.json({ status: 500, success: false, message: "频道不存在" });
       }
+      if (String(url).endsWith("/essence/message/list")) return Response.json({ status: 200, content: { essenceMessageList: [{ msgIdServer: "essence-id", msgTime: 1792368000000, msgType: "TEXT", bodys: "member text", extInfo: { user: { userId: "1" } } }] } });
       return Response.json({ status: 200, content: { message: [], nextTime: body.nextTime } });
     },
   });
@@ -42,6 +43,11 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   denyLookup = true;
   await assert.rejects(source.listMessages({ ...member, id: "2" }, null), /business 401/);
   assert.equal(messageRequests, 2, "Failed room lookup must not become an empty successful page");
+  // Live essence responses have no nextTime. Missing cursors must not compare
+  // equal to the initial null cursor and reject a valid finite list.
+  const essence = await source.listContent(member, "essence", null);
+  assert.equal(essence.items[0]?.text, "member text");
+  assert.equal(essence.nextCursor, null);
 });
 
 // Reference formats place old TEXT content in extInfo, and use integers too
@@ -60,6 +66,15 @@ test("preserves member authorship, large IDs, legacy text and public question/an
   const reply = normalizeMessage({ msgIdClient: "reply", msgTime: 1792368000000, extInfo: { senderId: "1", messageObject: "faipaiText", faipaiContent: "public question", messageText: "member answer" } }, owner, "room", directory);
   assert.equal(reply?.question, "public question");
   assert.equal(reply.answer, "member answer");
+  // Live 2026 responses wrap posts twice and use createAt/previewImg. The
+  // previous parser silently skipped the entire member timeline.
+  const posts = contentList({ postsInfo: [{ type: "POST", data: { postsInfo: { postId: "large-post-id", userId: "1", createAt: "1792368000000", title: "Title", postContent: "Full member post", previewImg: [{ imgUrl: "https://source.48.cn/test.jpg", imgWidth: 640, imgHeight: 480 }] } } }] });
+  const post = normalizeMessage(posts[0], owner, "posts", directory);
+  assert.equal(post?.id, "post:large-post-id");
+  assert.equal(post.text, "Title\nFull member post");
+  assert.equal(post.images?.[0]?.width, 640);
+  assert.equal(normalizeMessage({ imgId: "anonymous", imgUrl: "https://source.48.cn/test.jpg", createAt: "1792368000000" }, owner, "post_images", directory), null, "Catalog request parameters cannot invent member authorship");
+
 });
 
 // The old batch always fetched recordings, and daily runs resumed only old

@@ -62,3 +62,17 @@ dry-run 仍会读取所选上游源，输出只有数量、类型和同步状态
 `pnpm check` 覆盖 lint、类型、解析和同步回归、构建；`pnpm test:smoke` 使用真实迁移与临时本地 D1 验证 HTTP 入库、失败续写、分页和拒绝录播；`pnpm test:e2e` 验证真实本地 API 的成员导航、问答检索、图片查看及移动端布局。测试数据仅写临时数据库。
 
 生产是否可读仍以当前账号的非空样本为准，不能以参考源码、合成测试或返回 200 代替验收。
+
+## 本地调试
+
+凭证 JSON 保存在 `~/.config/48query/cred.json`（权限 `600`），也可用 `POCKET48_CRED_PATH` 指定已有文件。文件不进入仓库。使用本地凭证直接请求 Pocket48，无需推送代码或触发 CI：
+
+```sh
+COLLECTOR_SOURCE=pocket48 COLLECTOR_DRY_RUN=1 \
+COLLECTOR_MEMBER_ID=63566 COLLECTOR_SOURCES=essence,posts \
+COLLECTOR_MAX_PAGES=1 COLLECTOR_HISTORY_PAGES=0 pnpm collector:run
+```
+
+`COLLECTOR_HISTORY_PAGES=0` 只查增量、不回溯历史；未设置时与 `COLLECTOR_MAX_PAGES` 相同。调试结构时可加 `POCKET48_LOG_SCHEMA=1`，只记录字段名、类型和数组数量。需要验证入库时启动本地临时 D1 API，配置本地 `INGEST_API_URL` 和本地测试 `INGEST_KEY`，不要让默认测试连接生产库。
+
+相册和主页图片目录的实测响应没有发送者 ID。这里只给已核验作者、且已存在的同 URL 附件补充来源标记；相册还要求返回姓名与已核验作者一致。未匹配项目使该来源标为待核实错误，保留游标，既不创造作者身份，也不宣称历史完成。图片上传按 URL 去重，最多并行三张；失败图片仍可重试。

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
-import { contentList, normalizeMessage, object, parsePocketJson, string, timestamp } from "./pocket48-content";
+import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
 
 type Pocket48Options = {
   token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
@@ -16,13 +17,15 @@ export class Pocket48Source implements CollectorSource {
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
   private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string; roomId: string | null }>>();
+  private readonly verifiedImages = new Map<string, CollectorMessage>();
   private readonly directory = new Map<string, CollectorMember>();
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = (options.apiBaseUrl ?? "https://pocketapi.48.cn").replace(/\/$/, "");
-    this.sources = options.sources ?? COLLECTION_SOURCES;
+    const order: CollectionSource[] = ["room", "essence", "posts", "weibo", "room_posts", "album", "post_images"];
+    this.sources = [...(options.sources ?? COLLECTION_SOURCES)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
   }
 
   private async rateLimit() {
@@ -66,7 +69,7 @@ export class Pocket48Source implements CollectorSource {
       // Schema diagnostics contain field names/types only, never body values,
       // account tokens, image URLs or message text.
       const shape = (value: unknown, depth = 0): unknown => {
-        if (depth > 4) return typeof value;
+        if (depth > 6) return typeof value;
         if (Array.isArray(value)) return { count: value.length, item: value.length ? shape(value[0], depth + 1) : null };
         if (value && typeof value === "object") return Object.fromEntries(Object.entries(object(value)).filter(([key]) => /^[a-zA-Z][a-zA-Z0-9_]{0,40}$/.test(key)).slice(0, 40).map(([key, entry]) => [key, shape(key === "bodys" || key === "extInfo" ? parsePocketJson(entry) : entry, depth + 1)]));
         return value === null ? "null" : typeof value;
@@ -136,10 +139,10 @@ export class Pocket48Source implements CollectorSource {
       } else {
         if (!room.roomId) {
           const info = object(await this.post("/im/api/v1/im/team/room/info", { channelId: room.channelId }));
-          const roomInfo = object(info.roomInfo ?? info);
+          const roomInfo = object(info.roomInfo ?? info.channelInfo ?? info);
           const ownerId = string(roomInfo.ownerId ?? roomInfo.starId);
           if (ownerId && ownerId !== member.id) throw new Error("Pocket48 room owner does not match the selected member.");
-          room.roomId = string(roomInfo.imRoomId ?? roomInfo.roomId);
+          room.roomId = string(info.imRoomId ?? roomInfo.imRoomId ?? roomInfo.roomId);
           member.roomId = room.roomId;
         }
         if (!room.roomId) throw new Error("Pocket48 returned no verified legacy room ID for this source.");
@@ -147,18 +150,38 @@ export class Pocket48Source implements CollectorSource {
       }
     }
     const values = contentList(content);
-    const items = values.flatMap(value => { const message = normalizeMessage(value, member, source, this.directory); return message ? [message] : []; });
-    console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, observed: values.length, accepted: items.length, images: items.reduce((count, item) => count + (item.images?.length ?? 0), 0), ownerMessages: items.filter(item => item.memberId === member.id).length }));
+    let unverified = 0;
+    const items = values.flatMap(value => {
+      const raw = object(value);
+      let message = normalizeMessage(value, member, source, this.directory);
+      if (!message && (source === "album" || source === "post_images")) {
+        const body = object(parsePocketJson(raw.bodys));
+        const url = imageUrl(body.url ?? raw.imgUrl);
+        const verified = url ? this.verifiedImages.get(url) : undefined;
+        // These catalogs omit sender IDs. Enrich an already attributed record;
+        // never invent a new member post from an endpoint parameter or name.
+        if (verified && (source === "album" ? string(raw.starName) === verified.author?.name : verified.memberId === member.id)) {
+          message = { ...verified, images: verified.images?.map(image => ({ ...image })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
+        } else if (string(raw.sourceType)?.toUpperCase() !== "VIDEO") unverified += 1;
+      }
+      if (message) for (const image of message.images ?? []) this.verifiedImages.set(image.sourceUrl, message);
+      return message ? [message] : [];
+    });
+    console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: items.length, images: items.reduce((count, item) => count + (item.images?.length ?? 0), 0), ownerMessages: items.filter(item => item.memberId === member.id).length }));
     const root = object(content);
     const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
-    if (values.length > 0 && rawCursor === cursor) throw new Error("Pocket48 repeated a non-empty page cursor; refusing to mark history complete.");
+    if (values.length > 0 && rawCursor !== null && rawCursor === cursor) throw new Error("Pocket48 repeated a non-empty page cursor; refusing to mark history complete.");
     const boundary = values.flatMap(value => {
       const item = object(value);
-      const id = string(item.msgIdServer ?? item.msgIdClient ?? item.msgidClient ?? item.postId ?? item.id);
-      const occurredAt = timestamp(item.msgTime ?? item.createTime ?? item.ctime);
-      return id && occurredAt ? [{ id, occurredAt }] : [];
+      const post = postObject(item);
+      const id = string(item.imgId ?? post.postId ?? item.msgIdServer ?? item.msgIdClient ?? item.msgidClient ?? item.postId ?? item.id);
+      const occurredAt = timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? item.createAt ?? post.createAt ?? post.ctime);
+      // Album rows have no message IDs; their canonical image URL identifies
+      // the discovery boundary only, never a new attributable archive record.
+      const assetId = id ?? (source === "album" ? string(object(parsePocketJson(item.bodys)).url) : null);
+      return assetId && occurredAt ? [{ id: source === "album" ? createHash("sha256").update(assetId).digest("hex") : assetId, occurredAt }] : [];
     });
     if (values.length > 0 && boundary.length !== values.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
-    return { items, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
+    return { items, unverified, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
   }
 }

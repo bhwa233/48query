@@ -37,7 +37,7 @@ export function timestamp(value: unknown): string | null {
 export function contentList(content: unknown): unknown[] {
   if (Array.isArray(content)) return content;
   const root = object(content);
-  for (const key of ["message", "messageList", "data", "posts", "postsList", "postList", "list"]) {
+  for (const key of ["message", "messageList", "data", "posts", "postsList", "postList", "postsInfo", "essenceMessageList", "imgAndVideoList", "list"]) {
     if (Array.isArray(root[key])) return root[key] as unknown[];
   }
   throw new Error("Pocket48 returned an unknown content list shape; refusing to advance its cursor.");
@@ -45,14 +45,14 @@ export function contentList(content: unknown): unknown[] {
 
 function attachment(value: unknown): ImageAttachment | null {
   const body = typeof value === "string" ? { url: value } : object(value);
-  const url = imageUrl(body.url ?? body.imageUrl ?? body.picUrl ?? body.originalUrl);
+  const url = imageUrl(body.url ?? body.imageUrl ?? body.picUrl ?? body.imgUrl ?? body.originalUrl);
   if (!url) return null;
   const dimension = (value: unknown) => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
   return { id: createHash("sha256").update(url).digest("hex"), sourceUrl: url, galleryUrl: null, thumbnailUrl: null,
-    width: dimension(body.w ?? body.width), height: dimension(body.h ?? body.height), status: "pending" };
+    width: dimension(body.w ?? body.width ?? body.imgWidth), height: dimension(body.h ?? body.height ?? body.imgHeight), status: "pending" };
 }
 
-function postObject(value: unknown, depth = 0): Record<string, unknown> {
+export function postObject(value: unknown, depth = 0): Record<string, unknown> {
   const parsed = object(parsePocketJson(value));
   if (parsed.postId !== undefined) return parsed;
   if (depth > 4) return {};
@@ -79,13 +79,13 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
   const author = directory.get(senderId) ?? (senderId === roomOwner.id ? roomOwner : null);
   if (!author) return null;
   if ((source === "posts" || source === "post_images") && senderId !== roomOwner.id) return null;
-  const occurredAt = timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? post.ctime ?? post.createTime ?? ext.createAt);
+  const occurredAt = timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? post.ctime ?? post.createTime ?? post.createAt ?? ext.createAt);
   if (!occurredAt) throw new Error("A member message has no valid timestamp; page retained for retry.");
 
   let type = string(body.messageType ?? ext.messageType ?? item.sourceType ?? item.msgType)?.toUpperCase() ?? "UNKNOWN";
   if (/^\d+$/.test(type)) type = ({ "0": "TEXT", "1": "IMAGE", "2": "AUDIO", "3": "VIDEO" } as Record<string, string>)[type] ?? "UNKNOWN";
   if (string(ext.messageObject) === "faipaiText") type = "FLIPCARD";
-  const isPost = source === "posts" || source === "post_images" || (source === "room_posts" && Object.keys(post).length > 0);
+  const isPost = source === "posts" || source === "post_images" || source === "room_posts";
   if (isPost) type = "POST_INFO";
   if (source === "weibo") type = "WEI_BO";
   const reply = object(body.replyInfo ?? body.giftReplyInfo ?? ext.replyInfo ?? ext.giftReplyInfo);
@@ -111,13 +111,14 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
   } else if (events.test(type)) { kind = "event"; text = null; }
   else if (type === "POST_INFO" || type === "WEI_BO") {
     kind = "post";
-    text = string(post.text ?? post.content ?? ext.content ?? ext.previewText ?? body.text) ?? (typeof bodyValue === "string" ? string(bodyValue) : null);
-    const list = post.images ?? post.imgUrls ?? post.imageUrls ?? post.picUrls ?? ext.coverUrlList ?? (ext.coverUrl ? [ext.coverUrl] : []);
+    text = string(post.postContent) ?? string(post.text ?? post.content ?? post.previewText ?? ext.content ?? ext.previewText ?? body.text) ?? (typeof bodyValue === "string" ? string(bodyValue) : null);
+    if (string(post.title)) text = [string(post.title), text].filter(Boolean).join("\n");
+    const list = post.previewImg ?? post.imgs ?? post.images ?? post.imgUrls ?? post.imageUrls ?? post.picUrls ?? ext.coverUrlList ?? (ext.coverUrl ? [ext.coverUrl] : []);
     if (Array.isArray(list)) for (const value of list) { const image = attachment(value); if (image) images.push(image); }
   } else if (type === "VOTE") { kind = "text"; }
 
   const upstreamId = string(item.msgIdServer ?? item.msgIdClient ?? item.msgidClient ?? item.messageId ?? item.id);
-  const postId = string(post.postId ?? item.postId ?? ext.postId);
+  const postId = string(post.postId ?? item.postId ?? ext.postId ?? (source === "room_posts" ? ext.id : null));
   const roomId = roomOwner.channelId ?? roomOwner.roomId ?? roomOwner.id;
   const id = isPost && postId ? `post:${postId}` : upstreamId ? `room:${roomId}:${upstreamId}` : null;
   if (!id) throw new Error("A member message has no stable ID; page retained for retry.");

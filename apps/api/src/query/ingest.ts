@@ -46,7 +46,7 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
     if (message.author && message.author.id !== input.member.id) statements.push(memberStatement(db, message.author, now));
     statements.push(db.prepare(`INSERT INTO query_messages (id, member_id, occurred_at, type, text, sender_id, sender_name, sender_type, source_json, room_owner_id, room_id, kind, question, answer, source, source_flags, parse_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET text = COALESCE(excluded.text, query_messages.text), question = COALESCE(excluded.question, query_messages.question), answer = COALESCE(excluded.answer, query_messages.answer),
+      ON CONFLICT(id) DO UPDATE SET text = CASE WHEN (query_messages.source_flags & 8) != 0 AND (excluded.source_flags & 8) = 0 THEN query_messages.text ELSE COALESCE(excluded.text, query_messages.text) END, question = COALESCE(excluded.question, query_messages.question), answer = COALESCE(excluded.answer, query_messages.answer),
       source_flags = query_messages.source_flags | excluded.source_flags,
       kind = CASE WHEN excluded.parse_status = 'parsed' THEN excluded.kind ELSE query_messages.kind END,
       parse_status = CASE WHEN query_messages.parse_status = 'parsed' THEN 'parsed' ELSE excluded.parse_status END`)

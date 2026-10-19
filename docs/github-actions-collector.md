@@ -22,12 +22,13 @@ INGEST_KEY
 | `COLLECTOR_MEMBER_SCOPE` | `followed`；可选 `all`，只改变候选名单，不自动关注 |
 | `COLLECTOR_MAX_MEMBERS` | `0` 表示全部候选；生产验证建议先 `1` |
 | `COLLECTOR_MAX_PAGES` | `10`，每成员、每来源的增量／历史各自页面预算 |
+| `COLLECTOR_HISTORY_PAGES` | 未设置时沿用增量页预算；`0` 跳过历史回溯 |
 | `COLLECTOR_SOURCES` | `room,album,essence,posts,post_images,weibo,room_posts` |
 | `POCKET48_MIN_INTERVAL_MS` | `5000`，上游请求的最小间隔，不是长期无风险保证 |
 | `GALLERY_BASE_URL` | `https://gallery233.pages.dev`，沿用 galaxy-spider 图库协议 |
 | `COLLECTOR_IMAGE_RETRY_LIMIT` | `25`，每次先重试的未完成图片数，可设 `0` |
 
-手动工作流可覆盖 `max_members`、`max_pages`、`member_scope`，可用 `member_id` 指定成员，`sources` 指定部分来源。未填写 `sources` 时使用 Variable 或七类默认来源。页预算不是完整历史的承诺，实时性也不由 Actions cron 保证。
+本地调试优先使用[本地凭证与采集器命令](collector.md#本地调试)，不需要推送代码反复跑 CI。手动工作流可覆盖 `max_members`、`max_pages`、`history_pages`、`member_scope`，可用 `member_id` 指定成员，`sources` 指定部分来源。未填写 `sources` 时使用 Variable 或七类默认来源。`dry_run` 可关闭写库和图片上传，`diagnostics` 只打印结构；只读调试使用独立并发组。页预算不是完整历史的承诺，实时性也不由 Actions cron 保证。
 
 ## 调度与行为
 

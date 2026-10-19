@@ -74,6 +74,8 @@ if (sourceName === "pocket48" && !sourceOptions["token"]) throw new Error(`Pocke
 if (!dryRun && (!endpoint || !authKey)) throw new Error("INGEST_API_URL and INGEST_KEY are required for writes; use --dry-run to inspect safely.");
 const maxMembers = Number(process.env["COLLECTOR_MAX_MEMBERS"] ?? 0);
 const maxPagesPerMember = Number(process.env["COLLECTOR_MAX_PAGES"] ?? 10);
+const historyBudget = process.env.COLLECTOR_HISTORY_PAGES?.trim();
+const maxHistoryPagesPerMember = historyBudget ? Number(historyBudget) : undefined;
 const gallery = new GalleryUploader({ baseUrl: process.env.GALLERY_BASE_URL });
 const archiveImage = !dryRun && sourceName === "pocket48" ? gallery.upload.bind(gallery) : undefined;
 let retryFailures = 0;
@@ -85,6 +87,6 @@ if (archiveImage && store.pendingImages) {
     await store.saveImage?.(image);
   }
 }
-const result = await runBatch(batchSource, store, { maxMembers, maxPagesPerMember, archiveImage });
+const result = await runBatch(batchSource, store, { maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, archiveImage });
 console.log(JSON.stringify({ event: "batch_finished", ...result }));
 if ((result.errorCount > 0 || retryFailures > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;

@@ -209,7 +209,7 @@ try {
     startedAt: "2026-10-18T00:00:00.000Z",
     member: { id: "smoke-member", name: "Smoke Member", pinyin: "smokemember", groupName: "SNH48", team: "Team SII", roomId: "smoke-room" },
     messages: [
-      { id: "smoke-message", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "IMAGE", kind: "image", text: "smoke ingest", images: [{ id: "smoke-image", sourceUrl: "https://source.48.cn/smoke.png", status: "pending" }] },
+      { id: "smoke-message", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "IMAGE", kind: "image", source: "posts", sourceFlags: 8, text: "smoke ingest full body", images: [{ id: "smoke-image", sourceUrl: "https://source.48.cn/smoke.png", status: "pending" }] },
       { id: "smoke-message-2", memberId: "smoke-member", occurredAt: "2026-10-17T12:00:00.000Z", type: "REPLY", kind: "reply", text: "smoke ingest two", question: "public smoke question", answer: "smoke ingest two" },
     ],
     recordings: [],
@@ -228,9 +228,10 @@ try {
   const imageCache = (await request(origin, "/api/query/ingest/images/smoke-image", 200, imageOptions)).json().data;
   assert.equal(imageCache.status, "pending");
   await request(origin, "/api/query/ingest/images/smoke-image", 200, { ...post({ ...imageCache, status: "uploaded", galleryUrl: "https://gallery233.pages.dev/smoke.png" }), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
-  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...ingestUnit, messages: [{ ...ingestUnit.messages[0], source: "essence", sourceFlags: 4 }] }) });
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...ingestUnit, messages: [{ ...ingestUnit.messages[0], source: "essence", sourceFlags: 4, text: "smoke preview" }] }) });
   const imageResults = (await request(origin, "/api/query/messages?kind=image&source=essence")).json().data;
   assert.equal(imageResults.length, 1);
+  assert.equal(imageResults[0].text, "smoke ingest full body", "a secondary-source preview must not replace the full post body");
   assert.equal(imageResults[0].images[0].galleryUrl, "https://gallery233.pages.dev/smoke.png");
   const firstPage = (await request(origin, "/api/query/messages?limit=1")).json();
   const secondPage = (await request(origin, `/api/query/messages?limit=1&before=${encodeURIComponent(firstPage.nextCursor)}`)).json();

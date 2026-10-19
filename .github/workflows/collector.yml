@@ -10,6 +10,10 @@ on:
         description: "Maximum pages per member"
         required: false
         default: "10"
+      history_pages:
+        description: "History pages per source; 0 skips backfill, empty follows max_pages"
+        required: false
+        default: ""
       max_members:
         description: "Maximum members; 0 means all members in the selected scope"
         required: false
@@ -57,6 +61,7 @@ jobs:
       COLLECTOR_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       COLLECTOR_FAIL_ON_ERROR: "1"
       COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || vars.COLLECTOR_MAX_PAGES || '10' }}
+      COLLECTOR_HISTORY_PAGES: ${{ inputs.history_pages || vars.COLLECTOR_HISTORY_PAGES || '' }}
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
       COLLECTOR_MEMBER_ID: ${{ inputs.member_id }}
       COLLECTOR_MEMBER_SCOPE: ${{ inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed' }}

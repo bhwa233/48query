@@ -51,7 +51,7 @@ export type CollectorPage<T> = {
   items: T[];
   nextCursor: string | null;
   boundary?: { id: string; occurredAt: string }[];
-  observed?: number;
+  observed?: number; unverified?: number;
 };
 
 export type SyncState = {
