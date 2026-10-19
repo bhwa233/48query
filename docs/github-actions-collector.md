@@ -17,6 +17,7 @@ INGEST_KEY
 INGEST_API_URL
 COLLECTOR_MAX_PAGES       # 可选，默认 10
 COLLECTOR_MAX_MEMBERS     # 可选，默认 0（全部成员）
+COLLECTOR_MEMBER_SCOPE    # 可选，默认 followed（仅当前账号已关注的成员）；all 为整个目录
 POCKET48_MIN_INTERVAL_MS  # 可选，默认 5000
 COLLECTOR_CREDENTIALS_URL # 可选，默认 https://api.bhwa233.com/api/collector/credentials
 ```
@@ -24,6 +25,8 @@ COLLECTOR_CREDENTIALS_URL # 可选，默认 https://api.bhwa233.com/api/collecto
 `POCKET48_PA` 不需要配置。采集器会在每次 Pocket48 请求前通过项目内 WASM 动态生成签名。`accid`、`pwd` 和完整 `cred.json` 只用于本地登录或其他长连接场景，不能上传到仓库或 GitHub Secrets。
 
 workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运行，也支持 `workflow_dispatch` 手动运行。生产任务使用并发锁，同一时间只允许一个批次运行。
+
+默认采集当前 Pocket48 账号已关注的成员。手动运行时可选择 `member_scope=all` 保留整个目录范围，但未关注成员可能无法返回可访问频道，会明确报错。`max_members=0` 表示选定范围内的全部成员。可填写 `member_id` 只验证一位成员，此时会直接在完整目录查找该 ID，范围选择不再过滤它；脚本不会替账号新增关注或加入房间。
 
 第一次上线建议将 `COLLECTOR_MAX_MEMBERS` 和 `COLLECTOR_MAX_PAGES` 都设为 `1`，完成单成员验证后再改为全量配置。
 
@@ -45,6 +48,8 @@ workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运
 请求 Pocket48 前先通过现有入库事务登记批次与成员，保留原游标且不计入成功成员数。这样首个成员失败也有批次可收尾，不会再用 `Batch not found` 覆盖原始错误。目录为空则直接报错，不输出空批次成功。
 
 成员目录仅提供成员身份信息，采集消息前通过 `/im/api/v1/im/server/jump` 按成员 ID 获取当前 `channelId`、`serverId`，避免目录中旧频道返回「频道不存在」。同一批次内复用查询结果；查询失败会保留为采集错误，不会伪装成空消息成功。消息每页请求 25 条，与入库接口的单页上限一致，保留 Pocket48 分页游标。
+
+`server/jump` 使用 `targetType=1`、`tabId=0`，兼容顶层 `serverId` 和 `jumpServerInfo.serverId`。当响应仅有 `star=true`、`friend=false` 而没有频道时，提示该账号未关注成员；无需重新生成 Token。录播按 48tools 的处理先获取非零 liveId 分页起点，再按成员筛选，并在入库前检查每条录播的归属，避免 `next=0` 返回全局列表导致串入其他成员的视频。
 
 workflow 不会打印环境变量、请求头或完整上游响应，也不会上传包含凭证的 artifact。Pocket48 token 失效时应在日志中根据错误类型判断，然后从 SparkHub 后台执行轮换。
 

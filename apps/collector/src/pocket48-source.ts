@@ -9,6 +9,7 @@ type Pocket48Options = {
   apiBaseUrl?: string;
   directoryUrl?: string;
   minIntervalMs?: number;
+  memberScope?: "followed" | "all";
   fetchImpl?: typeof fetch;
 };
 
@@ -91,7 +92,12 @@ export class Pocket48Source implements CollectorSource {
     await this.rateLimit();
     const response = await this.fetchImpl(this.directoryUrl, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`Pocket48 directory request failed with HTTP ${response.status}`);
-    return normalizeDirectory(await response.json());
+    const members = normalizeDirectory(await response.json());
+    if (this.options.memberScope === "all") return members;
+    const followed = await this.post("/user/api/v1/friendships/friends/id", {});
+    if (!Array.isArray(followed.data)) throw new Error("Pocket48 returned no followed-member list.");
+    const ids = new Set(followed.data.map(value => asString(value)));
+    return members.filter(member => ids.has(member.id));
   }
 
   async listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
@@ -99,9 +105,10 @@ export class Pocket48Source implements CollectorSource {
     // IDs may be stale or missing. Cache only for this source's current batch.
     let room = this.rooms.get(member.id);
     if (!room) {
-      room = this.post("/im/api/v1/im/server/jump", { starId: Number(member.id), targetType: 1 }).then(content => {
+      room = this.post("/im/api/v1/im/server/jump", { starId: Number(member.id), targetType: 1, tabId: 0 }).then(content => {
         const channelId = asString(content.channelId);
-        const serverId = asString(content.serverId);
+        const serverId = asString(asObject(content.jumpServerInfo).serverId ?? content.serverId);
+        if (!channelId && content.star === true && content.friend === false) throw new Error(`Pocket48 member ${member.id} is not followed by this account; select a followed member or follow them in Pocket48 first.`);
         if (!channelId || !serverId) throw new Error(`Pocket48 returned no current room for member ${member.id}.`);
         return { channelId, serverId };
       });
@@ -131,10 +138,25 @@ export class Pocket48Source implements CollectorSource {
   }
 
   async listRecordings(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorRecording>> {
-    const content = await this.post("/live/api/v1/live/getLiveList", { debug: true, next: Number(cursor ?? 0), record: true, userId: Number(member.id) });
-    const values = Array.isArray(content.liveList) ? content.liveList : [];
+    let next = cursor ?? "0";
+    let first: Record<string, unknown> | undefined;
+    // Pocket48 ignores userId at next=0 (also handled by 48tools). Establish
+    // a real liveId boundary first, then request this member's own recordings.
+    if (Number(next) === 0) {
+      const latest = await this.post("/live/api/v1/live/getLiveList", { debug: true, next: 0, record: true });
+      if (!Array.isArray(latest.liveList) || latest.liveList.length === 0) return { items: [], nextCursor: null };
+      const head = asObject(latest.liveList[0]);
+      const latestId = asString(head.liveId);
+      if (!latestId || latestId === "0") throw new Error("Pocket48 returned no recording pagination boundary.");
+      next = latestId;
+      if (asString(asObject(head.userInfo).userId) === member.id) first = head;
+    }
+    const content = await this.post("/live/api/v1/live/getLiveList", { debug: true, next, record: true, userId: Number(member.id) });
+    const values: unknown[] = Array.isArray(content.liveList) ? content.liveList : [];
+    if (first) values.unshift(first);
     const items = values.flatMap((value): CollectorRecording[] => {
       const item = asObject(value);
+      if (asString(asObject(item.userInfo).userId) !== member.id) throw new Error("Pocket48 returned recordings for a different member; refusing to ingest them.");
       const id = asString(item.liveId);
       const occurredAt = asString(item.ctime ?? item.stime);
       const iso = occurredAt ? dateValue(occurredAt) : null;

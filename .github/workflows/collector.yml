@@ -11,9 +11,20 @@ on:
         required: false
         default: "10"
       max_members:
-        description: "Maximum members; 0 means all members"
+        description: "Maximum members; 0 means all members in the selected scope"
         required: false
         default: "0"
+      member_id:
+        description: "Optional specific Pocket48 member ID"
+        required: false
+        default: ""
+      member_scope:
+        description: "Member scope; all may contain rooms not followed by this account"
+        type: choice
+        options:
+          - followed
+          - all
+        default: followed
 
 permissions:
   contents: read
@@ -34,6 +45,8 @@ jobs:
       COLLECTOR_FAIL_ON_ERROR: "1"
       COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || vars.COLLECTOR_MAX_PAGES || '10' }}
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
+      COLLECTOR_MEMBER_ID: ${{ inputs.member_id }}
+      COLLECTOR_MEMBER_SCOPE: ${{ inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed' }}
       POCKET48_MIN_INTERVAL_MS: ${{ vars.POCKET48_MIN_INTERVAL_MS || '5000' }}
       COLLECTOR_CREDENTIALS_URL: ${{ vars.COLLECTOR_CREDENTIALS_URL || 'https://api.bhwa233.com/api/collector/credentials' }}
       COLLECTOR_CREDENTIAL_READ_TOKEN: ${{ secrets.COLLECTOR_CREDENTIAL_READ_TOKEN }}

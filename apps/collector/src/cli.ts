@@ -33,6 +33,9 @@ async function loadProductionCredential() {
 
 const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_RUN === "1";
 const sourceName = process.env.COLLECTOR_SOURCE ?? "demo";
+const memberId = process.env["COLLECTOR_MEMBER_ID"]?.trim();
+const memberScope = process.env["COLLECTOR_MEMBER_SCOPE"]?.trim() || "followed";
+if (memberScope !== "followed" && memberScope !== "all") throw new Error("COLLECTOR_MEMBER_SCOPE must be followed or all.");
 const stored = sourceName === "pocket48" ? await loadProductionCredential() : null;
 const sourceOptions = {
   ["token"]: process.env["POCKET48_TOKEN"] ?? stored?.token ?? "",
@@ -42,13 +45,13 @@ const sourceOptions = {
   apiBaseUrl: process.env["POCKET48_API_BASE_URL"],
   directoryUrl: process.env["POCKET48_DIRECTORY_URL"],
   minIntervalMs: Number(process.env["POCKET48_MIN_INTERVAL_MS"] ?? 5000),
-};
+  memberScope: memberId ? "all" : memberScope,
+} satisfies ConstructorParameters<typeof Pocket48Source>[0];
 const source = sourceName === "demo"
   ? new DemoSource()
   : sourceName === "pocket48"
     ? new Pocket48Source(sourceOptions)
     : (() => { throw new Error(`Unsupported collector source: ${sourceName}.`); })();
-const memberId = process.env["COLLECTOR_MEMBER_ID"];
 const batchSource = memberId
   ? {
     listMembers: async () => (await source.listMembers()).filter((member) => member.id === memberId),
