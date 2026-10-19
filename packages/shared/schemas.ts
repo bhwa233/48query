@@ -132,6 +132,20 @@ export const QueryMemberSchema = z.object({
 
 export const QueryMembersSchema = z.object({ ok: z.literal(true), data: z.array(QueryMemberSchema), coverage: QueryCoverageSchema });
 
+export const QueryRankingsSchema = z.object({
+  ok: z.literal(true),
+  data: z.object({
+    from: z.string(), to: z.string(),
+    totals: z.object({ messages: z.number().int().nonnegative(), activeMembers: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() }),
+    members: z.array(QueryMemberSchema),
+    directory: z.array(z.object({ groupName: z.string(), team: z.string().nullable() })),
+    dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })),
+    typeBreakdown: z.array(z.object({ type: z.string(), count: z.number().int().nonnegative() })),
+    recentMessages: z.array(QueryMessageSchema),
+  }),
+  coverage: QueryCoverageSchema,
+});
+
 export const QueryMemberDetailSchema = z.object({
   ok: z.literal(true),
   data: QueryMemberSchema.extend({ dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })), recentMessages: z.array(QueryMessageSchema), sync: z.array(SourceSyncSchema) }),

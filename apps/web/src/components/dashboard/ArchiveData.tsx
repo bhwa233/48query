@@ -32,7 +32,7 @@ export function useArchiveQuery<T>(apiBaseUrl: string | undefined, path: string)
       .catch(() => { if (!controller.signal.aborted) setResult({ key, data: null, failed: true }); });
     return () => controller.abort();
   }, [apiBaseUrl, path, key]);
-  return { data: result.key === key ? result.data : null, loading: Boolean(apiBaseUrl) && result.key !== key, failed: result.key === key && result.failed, configured: Boolean(apiBaseUrl), retry: () => setAttempt(value => value + 1) };
+  return { data: result.key === key ? result.data : null, previousData: result.data, loading: Boolean(apiBaseUrl) && result.key !== key, failed: result.key === key && result.failed, configured: Boolean(apiBaseUrl), retry: () => setAttempt(value => value + 1) };
 }
 
 export function QueryStatus({ state, locale }: { state: { loading: boolean; failed: boolean; configured: boolean; retry: () => void }; locale: string }) {

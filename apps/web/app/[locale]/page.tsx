@@ -20,5 +20,7 @@ export default async function HomePage({
   const { locale: rawLocale } = await params;
   const locale = isLocale(rawLocale) ? rawLocale : "en";
   const { apiBaseUrl } = getWebConfig();
-  return <DashboardHome locale={locale} apiBaseUrl={apiBaseUrl} />;
+  // oxlint-disable-next-line react/purity -- This server route computes the request date once and serializes it to the client.
+  const yesterday = new Date(Date.now() + 8 * 3600_000 - 86400_000).toISOString().slice(0, 10);
+  return <DashboardHome locale={locale} apiBaseUrl={apiBaseUrl} yesterday={yesterday} />;
 }

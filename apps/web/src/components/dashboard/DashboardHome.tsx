@@ -1,20 +1,23 @@
-"use client";
-
+import { ArrowUpRight } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
-import type { ArchiveMembers, QueryOverview } from "@starter/shared";
 import { AppPageContainer } from "@/components/app-page-shell";
-import { Input } from "@/components/ui/input";
-import { archiveLabels, Coverage, MessageCard, QueryStatus, useArchiveQuery } from "./ArchiveData";
+import { Button } from "@/components/ui/button";
+import { messages } from "@/i18n/messages";
+import { isLocale } from "@/i18n/config";
+import { RankingDashboard } from "./RankingDashboard";
 
-export function DashboardHome({ locale, apiBaseUrl }: { locale: string; apiBaseUrl?: string }) {
-  const t = archiveLabels(locale);
-  const [date, setDate] = useState(() => new Date(Date.now() + 8 * 3600_000 - 86400_000).toISOString().slice(0, 10));
-  const [query, setQuery] = useState("");
-  const overview = useArchiveQuery<QueryOverview>(apiBaseUrl, `/api/query/overview?date=${date}`);
-  const members = useArchiveQuery<ArchiveMembers>(apiBaseUrl, `/api/query/members?date=${date}`);
-  const data = overview.data?.data;
-  const filtered = members.data?.data.filter(member => `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) ?? [];
-  const peak = Math.max(1, ...data?.dailyActivity.map(item => item.count) ?? []);
-  return <AppPageContainer className="gap-8"><header className="space-y-4"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">48query / {t.overview}</p><h1 className="max-w-4xl text-4xl font-semibold tracking-tight sm:text-6xl">{t.title}</h1><p className="max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">{t.description}</p><label className="inline-flex flex-col gap-2 text-xs text-muted-foreground">{t.archiveDate}<Input className="w-44" type="date" value={date} onChange={event => { if (event.target.value) setDate(event.target.value); }} /></label></header><QueryStatus state={overview} locale={locale} />{data && overview.data ? <><Coverage value={overview.data.coverage} locale={locale} /><section className="grid grid-cols-2 gap-3 lg:grid-cols-4">{[[t.dailyMessages, data.totals.messages], [t.activeMembers, data.totals.activeMembers], [t.imageMessages, data.totals.imageMessages], [t.replies, data.totals.replies]].map(([label, value]) => <div key={label} className="rounded-xl border border-border bg-card p-5"><p className="text-3xl font-semibold">{Number(value).toLocaleString()}</p><p className="mt-2 text-sm text-muted-foreground">{label}</p></div>)}</section><div className="grid gap-6 lg:grid-cols-2"><section className="rounded-xl border border-border bg-card p-5"><h2 className="font-medium">{t.activity}</h2>{data.dailyActivity.length ? <div className="mt-6 flex h-48 items-end gap-2">{data.dailyActivity.map(item => <div key={item.date} className="flex h-full min-w-0 flex-1 flex-col justify-end gap-2 text-center"><div className="min-h-px rounded-t bg-primary/80" style={{ height: `${item.count / peak * 100}%` }} title={`${item.date}: ${item.count}`} /><span className="text-[10px] text-muted-foreground">{item.date.slice(5)}</span></div>)}</div> : <p className="py-10 text-sm text-muted-foreground">{t.noMessages}</p>}</section><section className="rounded-xl border border-border bg-card p-5"><h2 className="font-medium">{t.types}</h2><div className="mt-5 space-y-3">{data.typeBreakdown.map(item => <div key={item.type} className="flex justify-between text-sm"><span>{t[`type_${item.type}`] ?? item.type}</span><span>{item.count}</span></div>)}{!data.typeBreakdown.length ? <p className="py-5 text-sm text-muted-foreground">{t.noMessages}</p> : null}</div></section></div><section><div className="mb-4 flex justify-between gap-3"><h2 className="font-medium">{t.latestMessages}</h2><Link className="text-sm text-muted-foreground hover:underline" href={`/${locale}/messages`}>{t.viewAll} →</Link></div><div className="divide-y divide-border rounded-xl border border-border bg-card">{data.recentMessages.map(message => <MessageCard key={message.id} message={message} locale={locale} />)}{!data.recentMessages.length ? <p className="p-6 text-sm text-muted-foreground">{t.noMessages}</p> : null}</div></section></> : null}<section className="space-y-4 border-t border-border pt-6"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center"><h2 className="font-medium">{t.members}</h2><Input className="sm:w-72" aria-label={t.searchMembers} placeholder={t.searchMembers} value={query} onChange={event => setQuery(event.target.value)} /></div><QueryStatus state={members} locale={locale} /><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{filtered.map(member => <Link key={member.id} href={`/${locale}/members/${encodeURIComponent(member.id)}`} className="flex min-w-0 items-center justify-between gap-3 rounded-xl border border-border p-4 hover:bg-muted/50"><span><span className="block font-medium">{member.name}</span><span className="text-xs text-muted-foreground">{member.groupName} · {member.team ?? ""}</span></span><span className="shrink-0 text-sm">{member.messages} {t.messages}</span></Link>)}</div>{members.data && !filtered.length ? <p className="py-6 text-sm text-muted-foreground">{t.empty}</p> : null}</section><p className="text-xs leading-6 text-muted-foreground">{t.notice}</p></AppPageContainer>;
+export function DashboardHome({ locale, apiBaseUrl, yesterday }: { locale: string; apiBaseUrl?: string; yesterday: string }) {
+  const t = messages[isLocale(locale) ? locale : "en"].archive;
+
+  return (
+    <AppPageContainer variant="workspace" width="content" className="gap-3 py-3 sm:gap-4 sm:py-4">
+      <header className="flex items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{t.rankingTitle}</h1>
+        <Button asChild variant="outline" size="sm" className="hidden shrink-0 sm:inline-flex">
+          <Link href={`/${locale}/messages`}>{t.exploreContent}<ArrowUpRight data-icon="inline-end" /></Link>
+        </Button>
+      </header>
+      <RankingDashboard locale={locale} apiBaseUrl={apiBaseUrl} yesterday={yesterday} />
+    </AppPageContainer>
+  );
 }

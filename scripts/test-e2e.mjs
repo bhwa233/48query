@@ -70,7 +70,7 @@ try {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
     body: JSON.stringify({ batchId: "e2e-archive", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
-      member: { id: "e2e-member", name: "验证成员", pinyin: "syntheticmember", groupName: "SNH48" },
+      member: { id: "e2e-member", name: "验证成员", pinyin: "syntheticmember", groupName: "SNH48", team: "Team SII" },
       messages: [
         { id: "e2e-text", memberId: "e2e-member", senderId: "e2e-member", type: "TEXT", text: "验证文字归档", occurredAt },
         { id: "e2e-image", memberId: "e2e-member", senderId: "e2e-member", type: "IMAGE", kind: "image", occurredAt, images: [{ id: "e2e-image-asset", sourceUrl: `${webOrigin}/favicon.svg`, galleryUrl: `${webOrigin}/favicon.svg`, status: "uploaded" }] },
@@ -78,6 +78,18 @@ try {
       ], recordings: [], messageCursor: null, recordingCursor: null, totalMembers: 1, membersCovered: 1, errorCount: 0 }),
   });
   if (!seed.ok) throw new Error(`E2E archive seed failed: ${seed.status}`);
+  const comparison = await fetch(`${apiOrigin}/api/query/ingest/unit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
+    body: JSON.stringify({ batchId: "e2e-comparison", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+      member: { id: "e2e-comparison", name: "对照成员", pinyin: "picturemember", groupName: "GNZ48", team: "Team G" },
+      messages: [
+        ...[1, 2].map(index => ({ id: `comparison-image-${index}`, memberId: "e2e-comparison", senderId: "e2e-comparison", type: "IMAGE", kind: "image", occurredAt,
+          images: [{ id: `comparison-asset-${index}`, sourceUrl: `${webOrigin}/favicon.svg?image=${index}`, galleryUrl: `${webOrigin}/favicon.svg?image=${index}`, status: "uploaded" }] })),
+        { id: "comparison-history", memberId: "e2e-comparison", senderId: "e2e-comparison", type: "TEXT", text: "早于七天的历史记录", occurredAt: new Date(Date.now() - 9 * 86400_000).toISOString() },
+      ], recordings: [], totalMembers: 2, membersCovered: 2, errorCount: 0 }),
+  });
+  if (!comparison.ok) throw new Error(`E2E comparison seed failed: ${comparison.status}`);
   const web = launch(["exec", "vinext", "dev", "--port", String(webPort)], {
     cwd: webDirectory,
     env: {

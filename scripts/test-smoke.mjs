@@ -287,6 +287,31 @@ try {
   );
   console.log(await largePage.complete());
   servers.delete(largePage);
+  // Beijing midnight must include the start, exclude the next midnight, and
+  // count two attachments once even after the message is replayed via essence.
+  const rankingPage = { ...ingestUnit, batchId: "ranking-boundary", member: { id: "ranking-member", name: "Ranking Boundary", groupName: "Boundary", team: "Boundary team" }, messages: [
+    { id: "ranking-before", memberId: "ranking-member", type: "TEXT", text: "before", occurredAt: "2024-01-01T15:59:59.999Z" },
+    { id: "ranking-start", memberId: "ranking-member", type: "REPLY", kind: "reply", text: "start", occurredAt: "2024-01-01T16:00:00.000Z" },
+    { id: "ranking-image", memberId: "ranking-member", type: "IMAGE", kind: "image", occurredAt: "2024-01-02T15:59:59.999Z", images: [
+      { id: "ranking-image-a", sourceUrl: "https://source.48.cn/ranking-a.png" }, { id: "ranking-image-b", sourceUrl: "https://source.48.cn/ranking-b.png" },
+    ] },
+    { id: "ranking-end", memberId: "ranking-member", type: "TEXT", text: "end", occurredAt: "2024-01-02T16:00:00.000Z" },
+  ] };
+  const rankingOptions = { ...ingestOptions, body: JSON.stringify(rankingPage) };
+  await request(origin, "/api/query/ingest/unit", 200, rankingOptions);
+  await request(origin, "/api/query/ingest/unit", 200, { ...rankingOptions, body: JSON.stringify({ ...rankingPage, messages: [{ ...rankingPage.messages[2], source: "essence", sourceFlags: 4 }] }) });
+  const dayRanking = (await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-02&group=Boundary&team=Boundary%20team")).json().data;
+  assert.deepEqual(dayRanking.totals, { messages: 2, activeMembers: 1, images: 2, replies: 1 });
+  assert.deepEqual(dayRanking.dailyActivity, [{ date: "2024-01-02", count: 2 }]);
+  assert.equal(dayRanking.members[0].activeDays, 1);
+  assert.equal(dayRanking.members[0].images, 2);
+  const expandedRanking = (await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-03&group=Boundary")).json().data;
+  assert.equal(expandedRanking.members[0].messages, 3);
+  assert.equal(expandedRanking.members[0].activeDays, 2);
+  assert.equal((await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-03&group=Boundary&team=other")).json().data.members.length, 0);
+  for (const range of ["from=2024-01-03&to=2024-01-02", "from=2024-01-01&to=2025-02-01", "from=2024-02-30&to=2024-03-01", "from=2099-01-01&to=2099-01-02"])
+    await request(origin, `/api/query/rankings?${range}`, 400);
+  console.log("PASS ranking ranges: Beijing midnight boundaries, image deduplication, active days, filter scope and invalid ranges");
   console.log(
     "PASS D1 API: uninitialized database, local migration, creation/readback, validation, no-store",
   );

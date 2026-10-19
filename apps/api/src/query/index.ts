@@ -3,12 +3,18 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
 import type { CollectionSource, SourceSync } from "@starter/shared";
-import { CollectionSourceSchema, ErrorSchema, QueryMemberDetailSchema, QueryMembersSchema, QueryMessageSearchSchema, QueryOverviewSchema, QueryRecordingsSchema, SourceSyncSchema } from "@starter/shared/schemas";
+import { CollectionSourceSchema, ErrorSchema, QueryMemberDetailSchema, QueryMembersSchema, QueryMessageSearchSchema, QueryOverviewSchema, QueryRankingsSchema, QueryRecordingsSchema, SourceSyncSchema } from "@starter/shared/schemas";
 import type { AppEnv } from "../env";
 import ingest from "./ingest";
 import { readMessages as messages } from "./messages";
 
 const DateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
+const RankingQuery = z.object({
+  from: z.iso.date(), to: z.iso.date(),
+  group: z.string().trim().min(1).max(100).optional(),
+  team: z.string().trim().min(1).max(100).optional(),
+}).refine(value => value.from <= value.to && Date.parse(value.to) - Date.parse(value.from) <= 365 * 86400_000, "Choose a date range of at most 366 days.")
+  .refine(value => value.to <= previousDate(), "Statistics are available through yesterday (Asia/Shanghai).");
 const MessageQuery = z.object({ q: z.string().trim().max(100).optional(), memberId: z.string().trim().max(100).optional(), before: z.string().max(600).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), kind: z.enum(["text", "image", "video", "reply", "post", "excluded", "unknown"]).optional(), source: CollectionSourceSchema.optional(), from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
 const unavailable = { description: "D1 profile is not configured.", content: { "application/json": { schema: ErrorSchema } } };
 const app = new OpenAPIHono<AppEnv>({ defaultHook: (result, c) => { if (!result.success) return c.json({ ok: false as const, error: { code: "invalid_request", message: "Request validation failed." } }, 400); } });
@@ -77,6 +83,49 @@ app.openapi(createRoute({ method: "get", path: "/overview", request: { query: Da
   return c.json({ ok: true as const, data: { date, totals: { messages: Number(totals?.messages ?? 0), activeMembers: Number(totals?.active_members ?? 0), images: Number(imageRows[0]?.images ?? 0), imageMessages: Number(totals?.image_messages ?? 0), replies: Number(totals?.replies ?? 0), recordings: 0, danmaku: 0 },
     typeBreakdown: breakdown.map(row => ({ type: String(row.type), count: Number(row.count) })), dailyActivity: activity.map(row => ({ date: String(row.date), count: Number(row.count) })),
     ranking: ranking.map(row => ({ memberId: String(row.member_id), memberName: String(row.member_name), groupName: String(row.group_name), team: row.team as string | null, messages: Number(row.messages), activeDays: 1 })), recentMessages: await messages(db, recent) }, coverage: cover }, 200);
+});
+app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: RankingQuery }, responses: {
+  200: { description: "Saved member content within an inclusive Beijing-time date range. Coverage does not imply complete history.", content: { "application/json": { schema: QueryRankingsSchema } } },
+  400: { description: "Invalid date range or filter.", content: { "application/json": { schema: ErrorSchema } } }, 503: unavailable,
+} }), async c => {
+  const db = database(c.env);
+  const { from, to, group, team } = c.req.valid("query");
+  // Filter timestamps directly so the existing author/time index remains usable.
+  const start = new Date(`${from}T00:00:00+08:00`).toISOString();
+  const end = new Date(Date.parse(`${to}T00:00:00+08:00`) + 86400_000).toISOString();
+  const inRange = sql`${publicKinds} AND q.occurred_at >= ${start} AND q.occurred_at < ${end}`;
+  const conditions = [inRange, sql`m.status = 'active'`];
+  if (group) conditions.push(sql`m.group_name = ${group}`);
+  if (team) conditions.push(sql`m.team = ${team}`);
+  const scope = sql.join(conditions, sql` AND `);
+  const [rows, imageRows, activity, breakdown, recent, directory, cover] = await Promise.all([
+    db.all<Row>(sql`SELECT m.id, m.name, m.pinyin, m.group_name, m.team, COUNT(*) AS messages,
+      COUNT(DISTINCT date(q.occurred_at, '+8 hours')) AS active_days,
+      SUM(CASE WHEN q.kind = 'reply' THEN 1 ELSE 0 END) AS replies, MAX(q.occurred_at) AS latest_message_at,
+      (SELECT COUNT(DISTINCT link.image_id) FROM query_message_images link JOIN query_messages q ON q.id = link.message_id
+        WHERE q.member_id = m.id AND ${inRange}) AS images
+      FROM query_messages q JOIN query_members m ON m.id = q.member_id WHERE ${scope}
+      GROUP BY m.id ORDER BY messages DESC, m.name, m.id`),
+    db.all<Row>(sql`SELECT COUNT(DISTINCT link.image_id) AS images FROM query_message_images link
+      JOIN query_messages q ON q.id = link.message_id JOIN query_members m ON m.id = q.member_id WHERE ${scope}`),
+    db.all<Row>(sql`SELECT date(q.occurred_at, '+8 hours') AS date, COUNT(*) AS count FROM query_messages q
+      JOIN query_members m ON m.id = q.member_id WHERE ${scope} GROUP BY date ORDER BY date`),
+    db.all<Row>(sql`SELECT q.type, COUNT(*) AS count FROM query_messages q JOIN query_members m ON m.id = q.member_id
+      WHERE ${scope} GROUP BY q.type ORDER BY count DESC, q.type`),
+    db.all<Row>(sql`SELECT ${projection} FROM ${joins} WHERE ${scope} ORDER BY q.occurred_at DESC, q.id DESC LIMIT 4`),
+    db.all<Row>(sql`SELECT DISTINCT group_name, team FROM query_members WHERE status = 'active' ORDER BY group_name, team`),
+    coverage(db),
+  ]);
+  const members = rows.map(memberData);
+  return c.json({ ok: true as const, data: {
+    from, to,
+    totals: { messages: members.reduce((sum, member) => sum + member.messages, 0), activeMembers: members.length,
+      images: Number(imageRows[0]?.images ?? 0), replies: members.reduce((sum, member) => sum + member.replies, 0) },
+    members, directory: directory.map(row => ({ groupName: String(row.group_name), team: row.team as string | null })),
+    dailyActivity: activity.map(row => ({ date: String(row.date), count: Number(row.count) })),
+    typeBreakdown: breakdown.map(row => ({ type: String(row.type), count: Number(row.count) })),
+    recentMessages: await messages(db, recent),
+  }, coverage: cover }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/members", request: { query: DateQuery }, responses: { 200: { description: "Member archive statistics.", content: { "application/json": { schema: QueryMembersSchema } } }, 503: unavailable } }), async c => {
   const db = database(c.env);

@@ -5,6 +5,7 @@ export const API_PATHS = {
   docs: "/docs",
   openapi: "/openapi.json",
   queryOverview: "/api/query/overview",
+  queryRankings: "/api/query/rankings",
   queryMembers: "/api/query/members",
   queryMessages: "/api/query/messages",
   queryRecordings: "/api/query/recordings",
@@ -19,6 +20,7 @@ import type {
   NoteResponseSchema,
   EchoSchema,
   QueryOverviewSchema,
+  QueryRankingsSchema,
   QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema,
 } from "./schemas";
 
@@ -29,6 +31,7 @@ export type NotesResponse = z.infer<typeof NotesSchema>;
 export type NoteResponse = z.infer<typeof NoteResponseSchema>;
 export type EchoResponse = z.infer<typeof EchoSchema>;
 export type QueryOverview = z.infer<typeof QueryOverviewSchema>;
+export type QueryRankings = z.infer<typeof QueryRankingsSchema>;
 export type ArchiveMessage = z.infer<typeof QueryMessageSchema>;
 export type ArchiveMembers = z.infer<typeof QueryMembersSchema>;
 export type ArchiveMemberDetail = z.infer<typeof QueryMemberDetailSchema>;

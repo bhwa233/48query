@@ -21,52 +21,58 @@
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
+  --color-brand: hsl(var(--brand));
+  --color-brand-foreground: hsl(var(--brand-foreground));
 }
 
 @layer base {
   :root {
     --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
+    --foreground: 0 0% 9.02%;
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
+    --card-foreground: 0 0% 9.02%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 9%;
-    --primary: 222 47% 11%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 221 83% 53%;
+    --popover-foreground: 0 0% 9.02%;
+    --primary: 0 0% 9.02%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 94.9%;
+    --secondary-foreground: 0 0% 9.02%;
+    --muted: 0 0% 94.9%;
+    --muted-foreground: 0 0% 30.2%;
+    --accent: 0 0% 92.16%;
+    --accent-foreground: 0 0% 9.02%;
+    --destructive: 352.56 100% 45.88%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 91.76%;
+    --input: 0 0% 91.76%;
+    --ring: 214.82 100% 50%;
+    --brand: 214.82 100% 50%;
+    --brand-foreground: 0 0% 100%;
     --radius: 0.75rem;
   }
 
   .dark {
-    --background: 0 0% 4%;
-    --foreground: 0 0% 93%;
-    --card: 0 0% 7%;
-    --card-foreground: 0 0% 93%;
-    --popover: 0 0% 7%;
-    --popover-foreground: 0 0% 93%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 63% 31%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217 33% 17%;
-    --input: 217 33% 17%;
-    --ring: 224 76% 48%;
+    --background: 0 0% 0%;
+    --foreground: 0 0% 92.94%;
+    --card: 0 0% 0%;
+    --card-foreground: 0 0% 92.94%;
+    --popover: 0 0% 0%;
+    --popover-foreground: 0 0% 92.94%;
+    --primary: 0 0% 92.94%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 10.2%;
+    --secondary-foreground: 0 0% 92.94%;
+    --muted: 0 0% 10.2%;
+    --muted-foreground: 0 0% 62.75%;
+    --accent: 0 0% 12.16%;
+    --accent-foreground: 0 0% 92.94%;
+    --destructive: 354.12 82.26% 48.63%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 18.04%;
+    --input: 0 0% 18.04%;
+    --ring: 214.02 100% 49.8%;
+    --brand: 214.02 100% 49.8%;
+    --brand-foreground: 0 0% 100%;
   }
 
   * {
@@ -82,6 +88,52 @@
     font-family: ui-sans-serif, system-ui, sans-serif;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: hsl(var(--brand) / 0.28);
+  }
+}
+
+/* Ranking-specific presentation uses the same semantic palette as SparkHub. */
+.rank-columns {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) repeat(4, minmax(4.25rem, 0.5fr));
+  align-items: center;
+  column-gap: 0.75rem;
+  row-gap: 0.25rem;
+}
+.ranking-metric[data-selected="true"] {
+  color: hsl(var(--brand));
+  font-weight: 600;
+}
+.archive-nav-link[aria-current="page"] {
+  color: hsl(var(--brand));
+  background: hsl(var(--brand) / 0.08);
+}
+.rank-tabs [data-state="active"] {
+  color: hsl(var(--brand));
+  background: hsl(var(--brand) / 0.08);
+}
+.rank-tabs [data-state="active"]::after {
+  background: hsl(var(--brand));
+  opacity: 1;
+  inset-inline: 0;
+  bottom: -1px;
+  height: 2px;
+}
+.rank-tabs [data-state="active"] .rank-tab-icon {
+  color: hsl(var(--brand));
+}
+.rank-date::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+}
+.dark .rank-date {
+  color-scheme: dark;
+}
+@media (max-width: 639px) {
+  .rank-columns {
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+    column-gap: 0.625rem;
   }
 }
 

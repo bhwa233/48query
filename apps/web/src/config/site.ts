@@ -1,6 +1,6 @@
 export const siteConfig = {
   name: "48query",
-  defaultTheme: "system" as const,
+  defaultTheme: "dark" as const,
   contentEnabled: true,
 };
 
