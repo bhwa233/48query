@@ -46,7 +46,7 @@ jobs:
               signal: AbortSignal.timeout(20000),
             });
             const body = await result.json();
-            console.log('[message-shape]', JSON.stringify({ pathname, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, targetFollowed: body.content?.friend === true, shape: shape(body) }));
+            console.log('[message-shape]', JSON.stringify({ pathname, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, targetFollowed: body.content?.friend === true, requestLimit: requestBody.limit, requestStartsAtZero: requestBody.nextTime === 0, shape: shape(body) }));
             return body;
           };
           const room = await post('/im/api/v1/im/server/jump', { starId: 63566, targetType: 1, tabId: 0 });
@@ -56,4 +56,12 @@ jobs:
             serverId: Number(room.content?.jumpServerInfo?.serverId ?? room.content?.serverId),
             nextTime: 0, limit: 25,
           });
+          for (const pagination of [{ nextTime: 0, limit: 50 }, { nextTime: Date.now(), limit: 25 }]) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            await post('/im/api/v1/team/message/list/homeowner', {
+              channelId: Number(room.content?.channelId),
+              serverId: Number(room.content?.jumpServerInfo?.serverId ?? room.content?.serverId),
+              ...pagination,
+            });
+          }
           JS
