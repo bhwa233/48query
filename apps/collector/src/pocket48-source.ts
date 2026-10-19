@@ -134,7 +134,7 @@ export class Pocket48Source implements CollectorSource {
         const content = object(value);
         const channelId = string(content.channelId);
         const serverId = string(object(content.jumpServerInfo).serverId ?? content.serverId);
-        if (!channelId || !serverId) throw new Error(`Pocket48 returned no readable room for member ${member.id}; account access or room mapping requires verification.`);
+        if (!channelId || !serverId) throw new Error(`Pocket48 returned no readable room for member ${member.id}; account access or room mapping requires verification.`, { cause: "missing_room_mapping" });
         const roomId = string(content.imRoomId ?? content.roomId);
         return { channelId, serverId, roomId };
       });
@@ -204,13 +204,24 @@ export class Pocket48Source implements CollectorSource {
 
   async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
     let content: unknown;
+    let historicalRoom: { channelId: string; serverId: string; roomId: null } | null = null;
     if (source === "posts" || source === "post_images") {
       content = await this.post(source === "posts" ? "/posts/api/v1/posts/timeline/home/new" : "/posts/api/v1/posts/img/list", { userId: Number(member.id), nextId: cursor ?? "0", limit: 25 });
     } else if (source === "weibo" || source === "room_posts") {
       const roomId = await this.resolveLegacyRoom(member);
       content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
     } else {
-      const room = await this.resolveRoom(member);
+      const room = await this.resolveRoom(member).catch((error: unknown) => {
+        // Yaya queries albums/essence directly by channel/server. Historical
+        // content can survive after jump and room-info stop resolving a channel.
+        // Keep it as a query candidate and verify actual authors/originals below;
+        // never promote it to the current room or bypass authentication failures.
+        if ((source !== "essence" && source !== "album") || !(error instanceof Error) || error.cause !== "missing_room_mapping"
+          || !member.channelId || !member.serverId
+          || ![member.channelId, member.serverId].every(id => /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0)) throw error;
+        historicalRoom = { channelId: member.channelId, serverId: member.serverId, roomId: null };
+        return historicalRoom;
+      });
       const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Number(cursor ?? 0), limit: 25 };
       if (source === "room") {
         // all includes verified members visiting other rooms. Never infer authorship
@@ -225,9 +236,13 @@ export class Pocket48Source implements CollectorSource {
     // Live empty essence lists omit their optional list field entirely. This
     // endpoint is finite (no pagination cursor); other unknown shapes still fail.
     const values = source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    if (historicalRoom && source === "essence" && (!values.length || values.some(value => normalizeMessage(value, member, source, this.directory)?.memberId !== member.id))) {
+      throw new Error("Pocket48 historical essence candidate could not be verified from target-member messages; source retained for retry.");
+    }
     const originalsFound = new Map<string, CollectorMessage>();
     if (source === "album") {
-      const room = await this.resolveRoom(member);
+      const room = historicalRoom ?? await this.resolveRoom(member);
+      if (historicalRoom && !values.length) throw new Error("Pocket48 historical album candidate has no verifiable originals; source retained for retry.");
       const assets = values.flatMap(value => {
         const raw = object(value);
         const url = string(object(parsePocketJson(raw.bodys)).url);
@@ -255,7 +270,7 @@ export class Pocket48Source implements CollectorSource {
         });
         for (const original of contentList(originals)) {
           const message = normalizeMessage(original, member, "room", this.directory);
-          if (message) {
+          if (message && (!historicalRoom || message.memberId === member.id)) {
             originalsFound.set(message.id, message);
             for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
           }
@@ -307,7 +322,7 @@ export class Pocket48Source implements CollectorSource {
         // Catalogs omit sender IDs. Album attribution requires the original's
         // exact room, image URL and timestamp plus a verified sender ID. Display
         // names can carry group prefixes or change, so they are not identity.
-        if (verified && (source === "album" ? verified.roomId === member.channelId && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
+        if (verified && (!historicalRoom || verified.memberId === member.id) && (source === "album" ? verified.roomId === member.channelId && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
           message = { ...verified, images: verified.images?.map(image => ({ ...image })), videos: verified.videos?.map(video => ({ ...video })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
         } else unverified += 1;
       }

@@ -82,6 +82,35 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   assert.deepEqual((await source.listContent(member, "essence", null)).items, []);
 });
 
+// Han Jiale's jump and room-info endpoints no longer locate her channel, but
+// the historical essence endpoint still returns her own messages. Missing
+// mapping must not suppress that archive or accept an unrelated candidate.
+test("recovers member-authored historical essence without treating the candidate as a current room", async () => {
+  let essenceRequests = 0;
+  let empty = false;
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (String(url).endsWith("/im/server/jump")) return Response.json(body.starId === 4
+      ? { status: 401 } : { status: 200, content: { friend: true, star: true } });
+    essenceRequests++;
+    return Response.json({ status: 200, content: empty ? {} : { essenceMessageList: [
+      { msgIdServer: "historical-essence", msgTime: 1772881086647, msgType: "TEXT", bodys: "archived member text", extInfo: { user: { userId: "1" } } },
+    ] } });
+  } });
+  const member = { id: "1", name: "Owner", groupName: "SNH48", channelId: "1345525", serverId: "951570" };
+  const page = await source.listContent(member, "essence", null);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.memberId, member.id);
+  await assert.rejects(source.listMessages(member, null), /no readable room/, "Historical essence must not authorize ordinary room requests");
+  assert.equal(essenceRequests, 1);
+  await assert.rejects(source.listContent({ ...member, id: "2" }, "essence", null), /historical essence.*verified/i, "Another sender cannot verify a candidate channel");
+  empty = true;
+  await assert.rejects(source.listContent({ ...member, id: "3" }, "essence", null), /historical essence.*verified/i, "An empty candidate must not mark unavailable history complete");
+  const requestsBeforeDenial = essenceRequests;
+  await assert.rejects(source.listContent({ ...member, id: "4" }, "essence", null), /business 401/);
+  assert.equal(essenceRequests, requestsBeforeDenial, "An authentication failure must not trigger historical fallback");
+});
+
 // Eleven followed accounts have no modern channel, but their legacy share
 // feeds still return content. A missing modern room must not block these feeds,
 // and a fuzzy name search must never select another member's room. Member 37
@@ -192,12 +221,13 @@ test("an empty room is reported as unverified without losing the batch", async (
 // or attributing a reused image from a different timestamp.
 test("verifies album authors from original room messages, including visiting members", async () => {
   const at = 1792368000000;
+  let historical = false;
   const photo = (name: string) => `https://source.48.cn/${name}.jpg`;
   const original = (id: string, userId: string, time: number) => ({ msgIdServer: id, msgTime: time, msgType: "IMAGE", bodys: { url: photo(id) }, extInfo: { user: { userId } } });
-  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, memberScope: "all", fetchImpl: async (url, init) => {
+  const makeSource = () => new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, memberScope: "all", fetchImpl: async (url, init) => {
     const path = new URL(String(url)).pathname;
     const body = init?.body ? JSON.parse(String(init.body)) : {};
-    const content = path.endsWith("/im/server/jump") ? { channelId: 22, jumpServerInfo: { serverId: 33 } }
+    const content = path.endsWith("/im/server/jump") ? historical ? { friend: true, star: true } : { channelId: 22, jumpServerInfo: { serverId: 33 } }
       : path.endsWith("/msg/list/img") ? { imgAndVideoList: [
         { starName: "SNH48-Owner", sourceType: "IMAGE", createTime: at, bodys: { url: photo("owner") } },
         { starName: "Visitor", sourceType: "IMAGE", createTime: at + 1000, bodys: { url: photo("visitor") } },
@@ -212,8 +242,9 @@ test("verifies album authors from original room messages, including visiting mem
         { msgIdServer: "nearby-text", msgTime: at - 2000, msgType: "TEXT", bodys: "verified nearby text", extInfo: { user: { userId: "1" } } },
       ].filter(row => row.msgTime < body.nextTime), nextTime: 0 }
       : null;
-    return Response.json(content ? { status: 200, content } : { members: [{ id: "1", name: "Owner" }, { id: "2", name: "Visitor" }] });
+    return Response.json(content ? { status: 200, content } : { members: [{ id: "1", name: "Owner", channelId: 22, serverId: 33 }, { id: "2", name: "Visitor" }] });
   } });
+  const source = makeSource();
   const members = await source.listMembers();
   const page = await source.listContent(members[0]!, "album", null);
   const catalog = page.items.filter(row => row.sourceFlags === 3);
@@ -222,6 +253,16 @@ test("verifies album authors from original room messages, including visiting mem
   assert.equal(catalog.find(row => row.kind === "video")?.videos?.[0]?.status, "pending");
   assert.equal(page.items.find(row => row.type === "TEXT")?.sourceFlags, 1, "Nearby room text must not masquerade as an album entry");
   assert.equal(page.unverified, 2, "Fan impersonation and wrong-time image reuse must remain unverified");
+  // Chen Hongyu's historical album survives while jump is empty. Keep matched
+  // owner content without promoting the candidate to a verified current room.
+  historical = true;
+  const archive = makeSource();
+  const archivedMembers = await archive.listMembers();
+  const archived = await archive.listContent(archivedMembers[0]!, "album", null);
+  assert.ok(archived.items.some(row => row.sourceFlags === 3 && row.kind === "image"));
+  assert.ok(archived.items.every(row => row.memberId === "1"), "An unconfirmed channel must not attribute visiting members to the selected owner");
+  assert.equal(archived.unverified, 4);
+  await assert.rejects(archive.listMessages(archivedMembers[0]!, null), /no readable room/);
 });
 
 // Han Jiale's image catalog predates her latest text-only posts by months.
@@ -257,6 +298,27 @@ test("resolves old post images from original posts and retains unverified catalo
   verified = page.items;
   await source.listContent(member, "post_images", null);
   assert.equal(lookups, 2, "Only the still-unverified image needs another lookup");
+});
+
+// Chen Hongyu's verified 2022 album originals use the older NIM CDN. Preserve
+// their image bytes while continuing to reject unrelated source hosts.
+test("uploads verified historical NIM images without accepting lookalike hosts", async () => {
+  const bytes = Buffer.from("ffd8ffe000104a4649460001", "hex");
+  let downloads = 0;
+  const gallery = new GalleryUploader({ fetchImpl: async (url, init) => {
+    if (!String(url).endsWith("/upload")) { downloads++; return new Response(bytes); }
+    assert.ok(init?.body instanceof FormData);
+    const file = init.body.get("file");
+    assert.ok(file instanceof File);
+    assert.equal(file.type, "image/jpeg");
+    assert.deepEqual(Buffer.from(await file.arrayBuffer()), bytes);
+    return Response.json([{ src: "https://gallery.example/historical.jpg" }]);
+  } });
+  const image = { id: "historical-image", sourceUrl: "https://nim-nosdn.netease.im/original", galleryUrl: null, thumbnailUrl: null, width: null, height: null, status: "pending" as const };
+  await gallery.upload(image);
+  assert.equal(image.galleryUrl, "https://gallery.example/historical.jpg");
+  await assert.rejects(gallery.upload({ ...image, sourceUrl: "https://nim-nosdn.netease.im.example/original" }), /source host/);
+  assert.equal(downloads, 1);
 });
 
 // The size rule must hold when a CDN omits Content-Length or lies about it:

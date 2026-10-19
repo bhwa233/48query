@@ -2,7 +2,7 @@ import type { ImageAttachment, VideoAttachment } from "@starter/shared";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const GALLERY_URL = "https://gallery233.pages.dev";
-const allowedMediaHost = (hostname: string) => hostname === "48.cn" || hostname.endsWith(".48.cn") || hostname === "snh48.com" || hostname.endsWith(".snh48.com") || hostname.endsWith(".sinaimg.cn") || hostname === "kd48-nosdn.yunxinsvr.com";
+const allowedMediaHost = (hostname: string) => hostname === "48.cn" || hostname.endsWith(".48.cn") || hostname === "snh48.com" || hostname.endsWith(".snh48.com") || hostname.endsWith(".sinaimg.cn") || hostname === "kd48-nosdn.yunxinsvr.com" || hostname === "nim-nosdn.netease.im";
 type GalleryFile = Pick<VideoAttachment, "id" | "sourceUrl" | "galleryUrl" | "thumbnailUrl" | "status">;
 export class MediaSizeLimitError extends Error {
   constructor() { super("Media exceeds size limit."); this.name = "MediaSizeLimitError"; }
