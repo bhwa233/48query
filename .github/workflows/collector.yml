@@ -25,6 +25,10 @@ on:
           - followed
           - all
         default: followed
+      diagnostics:
+        description: "Log response field names/types only (no content or credentials)"
+        type: boolean
+        default: false
       sources:
         description: "Comma-separated text/image sources; empty uses all seven"
         required: false
@@ -44,6 +48,7 @@ jobs:
     timeout-minutes: 360
     environment: production
     env:
+      POCKET48_LOG_SCHEMA: ${{ inputs.diagnostics && '1' || '0' }}
       COLLECTOR_SOURCE: pocket48
       COLLECTOR_DRY_RUN: "0"
       COLLECTOR_FAIL_ON_ERROR: "1"

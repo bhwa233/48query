@@ -62,6 +62,17 @@ export class Pocket48Source implements CollectorSource {
       throw new Error(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`);
     }
     if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
+    if (process.env.POCKET48_LOG_SCHEMA === "1") {
+      // Schema diagnostics contain field names/types only, never body values,
+      // account tokens, image URLs or message text.
+      const shape = (value: unknown, depth = 0): unknown => {
+        if (depth > 4) return typeof value;
+        if (Array.isArray(value)) return { count: value.length, item: value.length ? shape(value[0], depth + 1) : null };
+        if (value && typeof value === "object") return Object.fromEntries(Object.entries(object(value)).filter(([key]) => /^[a-zA-Z][a-zA-Z0-9_]{0,40}$/.test(key)).slice(0, 40).map(([key, entry]) => [key, shape(key === "bodys" || key === "extInfo" ? parsePocketJson(entry) : entry, depth + 1)]));
+        return value === null ? "null" : typeof value;
+      };
+      console.log(JSON.stringify({ event: "source_schema", path: pathname, shape: shape(payload.content) }));
+    }
     return payload.content;
   }
 
