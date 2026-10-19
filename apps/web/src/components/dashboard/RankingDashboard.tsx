@@ -5,7 +5,6 @@ import { useState } from "react";
 import { ArrowDown, ArrowRight, CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
 import type { QueryRankings } from "@starter/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,7 +13,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { archiveLabels, formatTime, MessageCard, useArchiveQuery } from "./ArchiveData";
+import { archiveLabels, MessageCard, useArchiveQuery } from "./ArchiveData";
 
 type Metric = "messages" | "images" | "replies" | "activeDays";
 const metrics = ["messages", "images", "replies", "activeDays"] as const;
@@ -39,7 +38,6 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   if (team !== "all") params.set("team", team);
   const state = useArchiveQuery<QueryRankings>(apiBaseUrl, `/api/query/rankings?${params}`);
   const data = state.data?.data;
-  const cover = state.data?.coverage;
   // Retain only filter options while a new request loads; never show old totals as current data.
   const directory = data?.directory ?? state.previousData?.data.directory ?? [];
   const groups = [...new Set(directory.map(item => item.groupName))];
@@ -154,7 +152,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
 
           <TabsContent value={metric} className="m-0">
             <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs text-muted-foreground">
-              <span aria-live="polite">{pending ? t.rankingLoading : `${number.format(ranked.length)} ${t.rankedMembers}`}<span className="mx-2">·</span>{t.collectedOnly}</span>
+              <span aria-live="polite">{pending ? t.rankingLoading : `${number.format(ranked.length)} ${t.rankedMembers}`}</span>
               <span className="flex items-center gap-1.5"><CalendarDays className="size-3.5" aria-hidden="true" />{rangeLabel}</span>
             </div>
             <div className="rank-columns border-y bg-muted/30 px-3 py-2 text-xs text-muted-foreground" aria-hidden="true">
@@ -211,12 +209,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
         {pending ? <Skeleton className="h-24 w-full" /> : data?.recentMessages.length ? <div className="grid gap-2 md:grid-cols-2 [&_article]:rounded-lg [&_article]:border [&_article]:border-border [&_article]:p-3 [&_article]:space-y-2 [&_figure]:max-w-20 [&_p]:leading-5">{data.recentMessages.map(message => <MessageCard key={message.id} message={message} locale={locale} />)}</div> : <p className="rounded-xl border border-dashed border-border px-5 py-8 text-center text-sm text-muted-foreground">{t.noMessages}</p>}
       </section>
 
-      {cover ? <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-3 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5"><ShieldCheck className="size-3.5" aria-hidden="true" />{t.archiveCoverage}<Badge variant="outline">{cover.status === "complete" ? t.complete : cover.status === "partial" ? t.partial : t.notObserved}</Badge></span>
-        <span>{t.coveredMembers}: {cover.membersCovered} / {cover.totalMembers}</span>
-        <span>{t.dataThrough}: {cover.latestDate ?? "—"}</span>
-        {cover.lastBatchCompletedAt ? <span>{t.archiveUpdated}: {formatTime(cover.lastBatchCompletedAt, locale)}</span> : null}
-      </div> : null}
+
     </div>
   );
 }
