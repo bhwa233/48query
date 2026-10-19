@@ -1,11 +1,7 @@
-import { notFound } from "next/navigation";
 import { MemberDetailView } from "@/components/dashboard/ExplorerViews";
-import { demoMembers } from "@/data/demo";
-
-export function generateStaticParams() { return demoMembers.map((member) => ({ id: member.id })); }
+import { getWebConfig } from "@/config/site";
 
 export default async function MemberPage({ params }: { params: Promise<{ locale: string; id: string }> }) {
   const { locale, id } = await params;
-  if (!demoMembers.some((member) => member.id === id)) notFound();
-  return <MemberDetailView locale={locale} id={id} />;
+  return <MemberDetailView locale={locale} id={id} apiBaseUrl={getWebConfig().apiBaseUrl} />;
 }

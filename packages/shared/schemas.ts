@@ -60,7 +60,26 @@ const QueryCoverageSchema = z.object({
   lastBatchCompletedAt: z.string().nullable(),
 });
 
-const QueryMessageSchema = z.object({
+export const CollectionSourceSchema = z.enum(["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"]);
+const ImageUrlSchema = z.string().url().max(2000).refine(value => {
+  const url = new URL(value);
+  return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+}, "Expected an HTTP(S) image URL without credentials.");
+export const ImageAttachmentSchema = z.object({
+  id: z.string().min(1).max(100), sourceUrl: ImageUrlSchema,
+  galleryUrl: ImageUrlSchema.nullable().optional(), thumbnailUrl: ImageUrlSchema.nullable().optional(),
+  width: z.number().int().positive().nullable().optional(), height: z.number().int().positive().nullable().optional(),
+  status: z.enum(["pending", "uploaded", "failed"]).default("pending"),
+}).refine(image => image.status !== "uploaded" || Boolean(image.galleryUrl), "Uploaded images require a gallery URL.");
+export const SourceSyncSchema = z.object({
+  source: CollectionSourceSchema, historyCursor: z.string().max(500).nullable(), historyDone: z.boolean(),
+  latestAt: z.string().nullable(), latestIds: z.array(z.string().max(200)).max(100),
+  incrementalCursor: z.string().max(500).nullable(), pendingLatestAt: z.string().nullable(), pendingLatestIds: z.array(z.string().max(200)).max(100),
+  status: z.enum(["pending", "ok", "empty", "failed"]), lastError: z.string().max(1000).nullable(),
+  lastSuccessAt: z.string().nullable(), lastNonemptyAt: z.string().nullable(),
+});
+
+export const QueryMessageSchema = z.object({
   id: z.string(),
   memberId: z.string(),
   memberName: z.string(),
@@ -69,6 +88,10 @@ const QueryMessageSchema = z.object({
   occurredAt: z.string(),
   senderName: z.string().nullable(),
   senderType: z.string().nullable(),
+  senderId: z.string().nullable(), roomOwnerId: z.string().nullable(), roomOwnerName: z.string().nullable(), roomId: z.string().nullable(),
+  kind: z.enum(["text", "image", "reply", "post", "event", "excluded", "unknown"]),
+  question: z.string().nullable(), answer: z.string().nullable(), source: CollectionSourceSchema, sourceFlags: z.number().int(),
+  images: z.array(ImageAttachmentSchema), parseStatus: z.enum(["parsed", "unsupported"]),
 });
 
 export const QueryOverviewSchema = z.object({
@@ -80,6 +103,7 @@ export const QueryOverviewSchema = z.object({
       activeMembers: z.number().int().nonnegative(),
       recordings: z.number().int().nonnegative(),
       danmaku: z.number().int().nonnegative(),
+      imageMessages: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative(),
     }),
     typeBreakdown: z.array(z.object({ type: z.string(), count: z.number().int().nonnegative() })),
     dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })),
@@ -95,13 +119,14 @@ export const QueryOverviewSchema = z.object({
 export const QueryMemberSchema = z.object({
   id: z.string(), name: z.string(), pinyin: z.string().nullable(), groupName: z.string(), team: z.string().nullable(),
   messages: z.number().int().nonnegative(), activeDays: z.number().int().nonnegative(), recordings: z.number().int().nonnegative(), latestMessageAt: z.string().nullable(),
+  images: z.number().int().nonnegative(), replies: z.number().int().nonnegative(),
 });
 
 export const QueryMembersSchema = z.object({ ok: z.literal(true), data: z.array(QueryMemberSchema), coverage: QueryCoverageSchema });
 
 export const QueryMemberDetailSchema = z.object({
   ok: z.literal(true),
-  data: QueryMemberSchema.extend({ dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })), recentMessages: z.array(QueryMessageSchema) }),
+  data: QueryMemberSchema.extend({ dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })), recentMessages: z.array(QueryMessageSchema), sync: z.array(SourceSyncSchema) }),
   coverage: QueryCoverageSchema,
 });
 
@@ -124,21 +149,22 @@ const IngestMemberSchema = z.object({
 });
 const IngestMessageSchema = z.object({
   id: z.string().min(1).max(200), memberId: z.string().min(1).max(100), occurredAt: z.string().min(1).max(80), type: z.string().min(1).max(50),
-  text: z.string().max(2000).nullable().optional(), senderId: z.string().max(200).nullable().optional(), senderName: z.string().max(200).nullable().optional(),
+  text: z.string().max(20000).nullable().optional(), senderId: z.string().max(200).nullable().optional(), senderName: z.string().max(200).nullable().optional(),
   senderType: z.string().max(50).nullable().optional(), sourceJson: z.string().max(2000).nullable().optional(),
-});
-const IngestRecordingSchema = z.object({
-  id: z.string().min(1).max(200), memberId: z.string().min(1).max(100), title: z.string().max(500).nullable().optional(), occurredAt: z.string().min(1).max(80),
-  durationSeconds: z.number().int().nonnegative().nullable().optional(), danmakuCount: z.number().int().nonnegative().default(0), danmakuStatus: z.enum(["pending", "parsed", "failed"]).default("pending"),
-  sourceJson: z.string().max(2000).nullable().optional(),
+  author: IngestMemberSchema.optional(), roomOwnerId: z.string().max(100).nullable().optional(), roomId: z.string().max(200).nullable().optional(),
+  kind: z.enum(["text", "image", "reply", "post", "event", "excluded", "unknown"]).default("text"),
+  question: z.string().max(20000).nullable().optional(), answer: z.string().max(20000).nullable().optional(),
+  source: CollectionSourceSchema.default("room"), sourceFlags: z.number().int().min(1).max(127).default(1),
+  images: z.array(ImageAttachmentSchema).max(30).default([]), parseStatus: z.enum(["parsed", "unsupported"]).default("parsed"),
 });
 
 export const QueryIngestUnitSchema = z.object({
   batchId: z.string().min(1).max(100), statDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), startedAt: z.string().max(80),
-  member: IngestMemberSchema, messages: z.array(IngestMessageSchema).max(25), recordings: z.array(IngestRecordingSchema).max(25),
+  member: IngestMemberSchema, messages: z.array(IngestMessageSchema).max(25), recordings: z.array(z.unknown()).max(0),
+  sync: SourceSyncSchema.optional(),
   messageCursor: z.string().max(500).nullable().optional(), recordingCursor: z.string().max(500).nullable().optional(),
   totalMembers: z.number().int().nonnegative(), membersCovered: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative().default(0),
 });
 
 export const QueryIngestResponseSchema = z.object({ ok: z.literal(true), data: z.object({ batchId: z.string(), memberId: z.string(), messagesWritten: z.number().int().nonnegative(), recordingsWritten: z.number().int().nonnegative() }) });
-export const QuerySyncStateSchema = z.object({ ok: z.literal(true), data: z.object({ memberId: z.string(), messageCursor: z.string().nullable(), recordingCursor: z.string().nullable(), updatedAt: z.string(), lastError: z.string().nullable() }) });
+export const QuerySyncStateSchema = z.object({ ok: z.literal(true), data: z.object({ memberId: z.string(), messageCursor: z.string().nullable(), recordingCursor: z.string().nullable(), updatedAt: z.string(), lastError: z.string().nullable(), sources: z.array(SourceSyncSchema) }) });

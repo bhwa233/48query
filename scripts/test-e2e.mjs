@@ -59,10 +59,25 @@ try {
       state,
       "--var",
       `CORS_ORIGINS:${webOrigin}`,
+      "--var",
+      "INGEST_KEY:test-e2e-ingest",
     ],
     { cwd: apiDirectory },
   );
   await api.ready(`${apiOrigin}/api/health`);
+  const occurredAt = new Date(Date.now() - 86400_000).toISOString();
+  const seed = await fetch(`${apiOrigin}/api/query/ingest/unit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
+    body: JSON.stringify({ batchId: "e2e-archive", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+      member: { id: "e2e-member", name: "验证成员", pinyin: "syntheticmember", groupName: "SNH48" },
+      messages: [
+        { id: "e2e-text", memberId: "e2e-member", senderId: "e2e-member", type: "TEXT", text: "验证文字归档", occurredAt },
+        { id: "e2e-image", memberId: "e2e-member", senderId: "e2e-member", type: "IMAGE", kind: "image", occurredAt, images: [{ id: "e2e-image-asset", sourceUrl: `${webOrigin}/favicon.svg`, galleryUrl: `${webOrigin}/favicon.svg`, status: "uploaded" }] },
+        { id: "e2e-reply", memberId: "e2e-member", senderId: "e2e-member", type: "REPLY", kind: "reply", text: "验证成员回答", question: "验证公开提问", answer: "验证成员回答", occurredAt },
+      ], recordings: [], messageCursor: null, recordingCursor: null, totalMembers: 1, membersCovered: 1, errorCount: 0 }),
+  });
+  if (!seed.ok) throw new Error(`E2E archive seed failed: ${seed.status}`);
   const web = launch(["exec", "vinext", "dev", "--port", String(webPort)], {
     cwd: webDirectory,
     env: {

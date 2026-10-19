@@ -29,6 +29,13 @@
       "when": 1792306762997,
       "tag": "0004_violet_swordsman",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792380256553,
+      "tag": "0005_text_image_archive",
+      "breakpoints": true
     }
   ]
 }

@@ -43,23 +43,15 @@ app.use(
     allowHeaders: ["Content-Type"],
   }),
 );
-app.use(
-  "/api/*",
-  bodyLimit({
-    maxSize: 16_384,
-    onError: (c) =>
-      c.json(
-        {
-          ok: false,
-          error: {
-            code: "body_too_large",
-            message: "Request body is too large.",
-          },
-        },
-        413,
-      ),
-  }),
-);
+app.use("/api/*", bodyLimit({
+  maxSize: 131_072,
+  onError: c => c.json({ ok: false, error: { code: "body_too_large", message: "Request body is too large." } }, 413),
+}));
+const normalBodyLimit = bodyLimit({
+  maxSize: 16_384,
+  onError: c => c.json({ ok: false, error: { code: "body_too_large", message: "Request body is too large." } }, 413),
+});
+for (const path of ["/api/echo", "/api/notes/*", "/api/query/ingest/images/*", "/api/query/ingest/batches/*"]) app.use(path, normalBodyLimit);
 app.onError((error, c) => {
   if (error instanceof HTTPException)
     return c.json(

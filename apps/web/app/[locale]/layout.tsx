@@ -40,9 +40,7 @@ export default async function LocaleLayout({
   if (!isLocale(rawLocale)) notFound();
   const locale: Locale = rawLocale;
   const content = messages[locale];
-  const navLabels = locale === "zh"
-    ? { members: "成员", messages: "消息", recordings: "录播" }
-    : { members: "Members", messages: "Messages", recordings: "Recordings" };
+  const navLabels = content.archive;
 
   return (
     <html lang={locale === "zh" ? "zh-CN" : "en"} suppressHydrationWarning>
@@ -67,7 +65,7 @@ export default async function LocaleLayout({
               >
                 <Button asChild variant="ghost" size="sm"><a href={`/${locale}/members`}>{navLabels.members}</a></Button>
                 <Button asChild variant="ghost" size="sm"><a href={`/${locale}/messages`}>{navLabels.messages}</a></Button>
-                <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex"><a href={`/${locale}/recordings`}>{navLabels.recordings}</a></Button>
+                <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex"><a href={`/${locale}/images`}>{navLabels.images}</a></Button>
                 <Button asChild variant="ghost" size="sm">
                   <LocaleSwitch locale={locale} />
                 </Button>
@@ -79,7 +77,7 @@ export default async function LocaleLayout({
             {children}
           </div>
           <footer className="border-t py-6 text-center text-sm text-muted-foreground">
-            <p>{content.footer}</p>
+            <p>{content.archive.footer}</p>
           </footer>
         </ThemeProvider>
       </body>

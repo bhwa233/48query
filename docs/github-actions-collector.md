@@ -1,68 +1,51 @@
-# GitHub Actions 采集
+# GitHub Actions 图文采集
 
-48query 的生产采集使用 GitHub Actions。Pocket48 凭证由 SparkHub API 加密保存，采集任务通过独立读取令牌临时获取，不把凭证写入仓库、D1 或采集日志。
+生产采集通过 GitHub Actions 运行，凭证由 SparkHub 加密保存，通过独立读取令牌临时获取。当前改造与真实运行状态见[实施记录](text-image-implementation.md)；`Daily collector` 是否恢复，以该记录及 GitHub 实际状态为准。
 
 ## 配置
 
-在运行采集的仓库中创建 `production` environment。`COLLECTOR_CREDENTIAL_READ_TOKEN` 必须放在仓库级 Actions Secret，值与 SparkHub Worker 的同名 Secret 一致。`INGEST_KEY` 也可放在仓库级。旧的 `POCKET48_TOKEN` 和 `POCKET48_DEVICE_ID` 在切换完成前可以保留，但新的工作流不会读取它们。需配置以下 Secrets：
+仓库需有 `production` environment。下列值放在仓库级 Actions Secrets，不写入 Variables：
 
 ```text
 COLLECTOR_CREDENTIAL_READ_TOKEN
 INGEST_KEY
 ```
 
-配置以下普通 Variables：
+`COLLECTOR_CREDENTIAL_READ_TOKEN` 与 SparkHub Worker 的凭证读取令牌一致。工作流不直接使用旧的 `POCKET48_TOKEN`／`POCKET48_DEVICE_ID` secrets，也不重新发短信。
 
-```text
-INGEST_API_URL
-COLLECTOR_MAX_PAGES       # 可选，默认 10
-COLLECTOR_MAX_MEMBERS     # 可选，默认 0（全部成员）
-COLLECTOR_MEMBER_SCOPE    # 可选，默认 followed（仅当前账号已关注的成员）；all 为整个目录
-POCKET48_MIN_INTERVAL_MS  # 可选，默认 5000
-COLLECTOR_CREDENTIALS_URL # 可选，默认 https://api.bhwa233.com/api/collector/credentials
+普通 Variables：
+
+| 名称 | 默认值／用途 |
+| --- | --- |
+| `INGEST_API_URL` | 必填，48query API origin |
+| `COLLECTOR_CREDENTIALS_URL` | `https://api.bhwa233.com/api/collector/credentials` |
+| `COLLECTOR_MEMBER_SCOPE` | `followed`；可选 `all`，只改变候选名单，不自动关注 |
+| `COLLECTOR_MAX_MEMBERS` | `0` 表示全部候选；生产验证建议先 `1` |
+| `COLLECTOR_MAX_PAGES` | `10`，每成员、每来源的增量／历史各自页面预算 |
+| `COLLECTOR_SOURCES` | `room,album,essence,posts,post_images,weibo,room_posts` |
+| `POCKET48_MIN_INTERVAL_MS` | `5000`，上游请求的最小间隔，不是长期无风险保证 |
+| `GALLERY_BASE_URL` | `https://gallery233.pages.dev`，沿用 galaxy-spider 图库协议 |
+| `COLLECTOR_IMAGE_RETRY_LIMIT` | `25`，每次先重试的未完成图片数，可设 `0` |
+
+手动工作流可覆盖 `max_members`、`max_pages`、`member_scope`，可用 `member_id` 指定成员，`sources` 指定部分来源。未填写 `sources` 时使用 Variable 或七类默认来源。页预算不是完整历史的承诺，实时性也不由 Actions cron 保证。
+
+## 调度与行为
+
+配置的定时点是北京时间每日 01:00（UTC 前一天 17:00）。并发组为 `48query-production-collector`，不取消正在写入的上一批次。执行命令必须是：
+
+```sh
+pnpm --filter @starter/collector run run
 ```
 
-`POCKET48_PA` 不需要配置。采集器会在每次 Pocket48 请求前通过项目内 WASM 动态生成签名。`accid`、`pwd` 和完整 `cred.json` 只用于本地登录或其他长连接场景，不能上传到仓库或 GitHub Secrets。
+该命令读取真实来源，通过保护的 ingest API 写入。图片上传至图库，不经过 Worker 下载，也不建立新的 R2 bucket。无任何录播、弹幕、视频文件下载请求。
 
-workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运行，也支持 `workflow_dispatch` 手动运行。生产任务使用并发锁，同一时间只允许一个批次运行。
+每来源独立分页与错误状态；图库失败保留重试记录，批次失败会使任务报错。`source_page` 日志只含数量、来源和成员 ID，不输出消息正文、图片 URL、凭证或请求头。网页读取本站已保存的数据，不在访客浏览时调用 Pocket48。
 
-默认采集当前 Pocket48 账号已关注的成员。手动运行时可选择 `member_scope=all` 保留整个目录范围，但未关注成员可能无法返回可访问频道，会明确报错。`max_members=0` 表示选定范围内的全部成员。可填写 `member_id` 只验证一位成员，此时会直接在完整目录查找该 ID，范围选择不再过滤它；脚本不会替账号新增关注或加入房间。
+## 上线顺序
 
-第一次上线建议将 `COLLECTOR_MAX_MEMBERS` 和 `COLLECTOR_MAX_PAGES` 都设为 `1`，完成单成员验证后再改为全量配置。
+1. 本地通过 `pnpm check`、`pnpm test:smoke`、`pnpm test:e2e`，检查 `0005_text_image_archive.sql` 仅增加图文字段、图片关联和来源状态。
+2. 发布前检查部署配置；在已授权的生产环境应用迁移并部署 D1 API，再部署 Web。历史录播数据保留。
+3. 手动运行少量成员、少量页，核对作者、文字、图片图库地址、分页、错误状态和录播数量不增加。若需要暂时启用 workflow 进行手动验证，验证后按结果决定是否恢复定时任务。
+4. 对已确认可读取的来源与成员逐步扩大范围。空列表或权限限制在状态中保留，不将其计为完整覆盖。
 
-## 凭证轮换
-
-在本地完成 Pocket48 登录后，将生成的 JSON 粘贴到 SparkHub 后台。SparkHub 加密保存到 D1，采集任务启动时临时读取：
-
-1. 在 SparkHub 仓库运行 `node scripts/pocket48-login.mjs`，本机直连 Pocket48，不使用远程代理。
-2. 根据提示输入手机号和短信验证码；本地脚本完成登录及 IM 访问验证。
-3. 复制生成的 `{ token, deviceId }` JSON，在 SparkHub 后台完成管理员认证后粘贴保存。
-4. 保存成功后，浏览器清空表单，展示凭证版本和保存时间。
-5. SparkHub 使用 AES-GCM 加密保存到 D1；手机号和短信验证码不提交到 SparkHub。
-6. 采集任务启动时请求 `COLLECTOR_CREDENTIALS_URL`，凭证只存在于当前进程内存中。
-
-## 失败行为
-
-采集器在成员级请求失败时会继续处理其他成员，但最终批次会标记为 `failed`，并以非零退出码结束 GitHub Actions。只有 `errorCount = 0` 的批次才会标记为 `completed`，查询接口不会把失败批次当成完整覆盖。
-
-请求 Pocket48 前先通过现有入库事务登记批次与成员，保留原游标且不计入成功成员数。这样首个成员失败也有批次可收尾，不会再用 `Batch not found` 覆盖原始错误。目录为空则直接报错，不输出空批次成功。
-
-成员目录仅提供成员身份信息，采集消息前通过 `/im/api/v1/im/server/jump` 按成员 ID 获取当前 `channelId`、`serverId`，避免目录中旧频道返回「频道不存在」。同一批次内复用查询结果；查询失败会保留为采集错误，不会伪装成空消息成功。消息每页请求 25 条，与入库接口的单页上限一致，保留 Pocket48 分页游标。
-
-`server/jump` 使用 `targetType=1`、`tabId=0`，兼容顶层 `serverId` 和 `jumpServerInfo.serverId`。当响应仅有 `star=true`、`friend=false` 而没有频道时，提示该账号未关注成员；无需重新生成 Token。录播按 48tools 的处理先获取非零 liveId 分页起点，再按成员筛选，并在入库前检查每条录播的归属，避免 `next=0` 返回全局列表导致串入其他成员的视频。
-
-workflow 不会打印环境变量、请求头或完整上游响应，也不会上传包含凭证的 artifact。Pocket48 token 失效时应在日志中根据错误类型判断，然后从 SparkHub 后台执行轮换。
-
-入库按 JSON 实际 UTF-8 字节数拆分，每个请求不超过 16 KiB，消息和录播各不超过 25 条。整页最后一个请求成功后才推进游标；中途失败保留原游标，重试通过 ID 更新已写入记录，避免漏采或重复记录。
-
-采集启动命令是 `pnpm --filter @starter/collector run run`（或仓库根目录 `pnpm collector:run`）。第一个 `run` 是 pnpm 子命令，第二个是包内脚本名；省略第二个只会列出脚本并返回成功，不会采集。验收需检查日志包含 `batch_finished`，且 `membersCovered > 0`、`errorCount = 0`，不能只看工作流绿色状态。
-
-## 生产入口
-
-- 网站：https://48.bhwa233.com/zh
-- API：https://48query-api.404174262.workers.dev
-- 凭证轮换：https://www.bhwa233.com/zh/admin/collector
-- 生产 API 部署使用 `wrangler.d1.jsonc`（`pnpm deploy:api:db`）；无 D1 配置只用于独立 API 验证。
-- 初次部署将 `COLLECTOR_MAX_MEMBERS=1`、`COLLECTOR_MAX_PAGES=1`，完成真实单成员验证后再调整全量。当前没有真实采集批次时，页面标注演示数据。
-- 手动点击 **Run workflow** 时，首次验证请将 `max_pages`、`max_members` 两个输入都改成 `1`；表单输入优先于仓库变量。
-- 数据库、`production` environment、`INGEST_KEY`、`COLLECTOR_CREDENTIAL_READ_TOKEN` 和上述普通变量需要在首次部署时配置。完成 SparkHub 凭证轮换后即可运行真实采集；当前成员、消息、录播页面仍使用演示数据时，首页会继续展示演示内容。
+完整的来源、游标和图片行为见[采集器说明](collector.md)。

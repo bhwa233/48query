@@ -1,4 +1,4 @@
-import type { CollectorMember, CollectorPage, CollectorMessage, CollectorRecording, CollectorSource } from "./types";
+import type { CollectorMember, CollectorPage, CollectorMessage, CollectorSource } from "./types";
 
 const member: CollectorMember = {
   id: "collector-demo",
@@ -10,6 +10,9 @@ const member: CollectorMember = {
 };
 
 export class DemoSource implements CollectorSource {
+  readonly sources = ["room"] as const;
+
+  async listContent(member: CollectorMember, _source: string, cursor: string | null) { return this.listMessages(member, cursor); }
   async listMembers() {
     return [member];
   }
@@ -22,11 +25,4 @@ export class DemoSource implements CollectorSource {
     };
   }
 
-  async listRecordings(_member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorRecording>> {
-    if (cursor !== null) return { items: [], nextCursor: null };
-    return {
-      items: [{ id: "collector-demo-recording", memberId: member.id, title: "每日批次演示录播", occurredAt: "2026-10-17T13:00:00.000Z", durationSeconds: 120, danmakuCount: 4, danmakuStatus: "parsed" }],
-      nextCursor: null,
-    };
-  }
 }

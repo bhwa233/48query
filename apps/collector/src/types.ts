@@ -1,3 +1,6 @@
+import type { CollectionSource, ImageAttachment, SourceSync } from "@starter/shared";
+export type { CollectionSource, SourceSync } from "@starter/shared";
+
 export type CollectorMember = {
   id: string;
   name: string;
@@ -21,6 +24,16 @@ export type CollectorMessage = {
   senderName?: string | null;
   senderType?: string | null;
   sourceJson?: string | null;
+  author?: CollectorMember;
+  roomOwnerId?: string | null;
+  roomId?: string | null;
+  kind?: "text" | "image" | "reply" | "post" | "event" | "excluded" | "unknown";
+  question?: string | null;
+  answer?: string | null;
+  source?: CollectionSource;
+  sourceFlags?: number;
+  images?: ImageAttachment[];
+  parseStatus?: "parsed" | "unsupported";
 };
 
 export type CollectorRecording = {
@@ -37,6 +50,8 @@ export type CollectorRecording = {
 export type CollectorPage<T> = {
   items: T[];
   nextCursor: string | null;
+  boundary?: { id: string; occurredAt: string }[];
+  observed?: number;
 };
 
 export type SyncState = {
@@ -45,12 +60,14 @@ export type SyncState = {
   recordingCursor: string | null;
   updatedAt: string;
   lastError: string | null;
+  sources?: SourceSync[];
 };
 
 export interface CollectorSource {
   listMembers(): Promise<CollectorMember[]>;
   listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>>;
-  listRecordings(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorRecording>>;
+  sources?: readonly CollectionSource[];
+  listContent?(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>>;
 }
 
 export type IngestUnit = {
@@ -65,10 +82,14 @@ export type IngestUnit = {
   totalMembers: number;
   membersCovered: number;
   errorCount: number;
+  sync?: SourceSync;
 };
 
 export interface CollectorStore {
   getSyncState(memberId: string): Promise<SyncState | null>;
   ingestUnit(unit: IngestUnit): Promise<void>;
   completeBatch(input: { batchId: string; completedAt: string; membersCovered: number; totalMembers: number; errorCount: number; errorMessage?: string | null }): Promise<void>;
+  getImage?(id: string): Promise<ImageAttachment | null>;
+  saveImage?(image: ImageAttachment): Promise<void>;
+  pendingImages?(limit: number): Promise<ImageAttachment[]>;
 }

@@ -8,6 +8,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const origin = getSiteOrigin();
   return ALL_LOCALES.flatMap((locale) => [
     { url: `${origin}/${locale}` },
+    { url: `${origin}/${locale}/members` },
+    { url: `${origin}/${locale}/messages` },
+    { url: `${origin}/${locale}/images` },
     ...(siteConfig.contentEnabled
       ? [
           { url: `${origin}/${locale}/articles` },

@@ -25,6 +25,10 @@ on:
           - followed
           - all
         default: followed
+      sources:
+        description: "Comma-separated text/image sources; empty uses all seven"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -47,6 +51,9 @@ jobs:
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
       COLLECTOR_MEMBER_ID: ${{ inputs.member_id }}
       COLLECTOR_MEMBER_SCOPE: ${{ inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed' }}
+      COLLECTOR_SOURCES: ${{ inputs.sources || vars.COLLECTOR_SOURCES || 'room,album,essence,posts,post_images,weibo,room_posts' }}
+      GALLERY_BASE_URL: ${{ vars.GALLERY_BASE_URL || 'https://gallery233.pages.dev' }}
+      COLLECTOR_IMAGE_RETRY_LIMIT: ${{ vars.COLLECTOR_IMAGE_RETRY_LIMIT || '25' }}
       POCKET48_MIN_INTERVAL_MS: ${{ vars.POCKET48_MIN_INTERVAL_MS || '5000' }}
       COLLECTOR_CREDENTIALS_URL: ${{ vars.COLLECTOR_CREDENTIALS_URL || 'https://api.bhwa233.com/api/collector/credentials' }}
       COLLECTOR_CREDENTIAL_READ_TOKEN: ${{ secrets.COLLECTOR_CREDENTIAL_READ_TOKEN }}

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import type { IngestUnit } from "../../apps/collector/src/types";
 
-// A real Pocket48 page exceeded the API's 16 KiB body limit. Keep real HTTP/D1
+// A real Pocket48 page exceeded the API's 128 KiB body limit. Keep real HTTP/D1
 // writes, inject a transport failure after the first chunk, and verify resume.
 const endpoint = process.env.INGEST_API_URL;
 const key = process.env.INGEST_KEY;
@@ -16,8 +16,8 @@ const unit: IngestUnit = {
 };
 await store.ingestUnit(unit);
 const page: IngestUnit = {
-  ...unit, membersCovered: 1, messageCursor: "after-message", recordingCursor: "after-recording",
-  messages: Array.from({ length: 12 }, (_, index) => ({
+  ...unit, membersCovered: 1, messageCursor: "after-message", recordingCursor: "before-recording",
+  messages: Array.from({ length: 50 }, (_, index) => ({
     id: `large-message-${index}`, memberId: unit.member.id, occurredAt: "2026-10-19T00:00:00.000Z",
     type: "TEXT", text: "分片记录".repeat(250), sourceJson: JSON.stringify({ detail: "x".repeat(1000) }),
   })),

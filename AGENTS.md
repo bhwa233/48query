@@ -18,3 +18,5 @@
 - Binding changes require `pnpm --filter @starter/api cf-typegen` and the generated declaration.
 - Deployment config verification intentionally rejects starter placeholders; it is separate from local checks.
 - Clean up verification servers and report the real environment used. Preserve explicitly requested preview/development services for the user.
+- Reuse installed dependencies (listed in workspace package.json files) and `apps/web/src/components/ui`; domain archive fetch/render helpers live in `apps/web/src/components/dashboard`.
+- Collector parsing/pagination regression tests use Node test via `pnpm test:collector`; real HTTP/D1 ingestion checks run in `pnpm test:smoke`. New collector test files must be included in that script's test glob; browser interactions use `tests/e2e` via `pnpm test:e2e`.

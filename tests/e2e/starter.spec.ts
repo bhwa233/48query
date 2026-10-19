@@ -61,21 +61,30 @@ test("theme changes persist after reload", async ({ page }) => {
 test("dashboard search and archive navigation work", async ({ page }) => {
   await page.goto("/zh");
   await expect(page.getByRole("heading", { name: "看见每一次发言，从历史开始。" })).toBeVisible();
-  await page.getByRole("textbox", { name: "搜索成员" }).fill("songxinran");
-  await expect(page.getByText("宋昕冉", { exact: true }).last()).toBeVisible();
+  await page.getByRole("textbox", { name: "搜索姓名或拼音" }).fill("syntheticmember");
+  await expect(page.getByText("验证成员", { exact: true }).last()).toBeVisible();
   await page.getByRole("link", { name: "成员", exact: true }).click();
   await expect(page).toHaveURL(/\/zh\/members$/);
   await expect(page.getByRole("heading", { name: "成员", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: /宋昕冉/ }).first().click();
-  await expect(page).toHaveURL(/\/zh\/members\/snr$/);
+  await page.getByRole("link", { name: /验证成员/ }).first().click();
+  await expect(page).toHaveURL(/\/zh\/members\/e2e-member$/);
   await expect(page.getByText("统计概览", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "消息", exact: true }).click();
+  await page.getByRole("textbox", { name: "搜索消息或提问内容" }).fill("验证公开提问");
+  await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
+  await expect(page.getByText("验证文字归档", { exact: true })).toHaveCount(0);
+  await page.goto("/zh/images");
+  await page.getByRole("button", { name: "查看原图", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
 });
 
 test("mobile pages fit the viewport and expose navigation and theme controls", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const path of ["/en", "/zh", "/zh/members", "/zh/messages", "/zh/recordings"]) {
+  for (const path of ["/en", "/zh", "/zh/members", "/zh/messages", "/zh/images", "/zh/recordings"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     expect(

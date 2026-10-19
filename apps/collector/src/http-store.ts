@@ -1,4 +1,5 @@
 import type { CollectorStore, IngestUnit, SyncState } from "./types";
+import type { ImageAttachment } from "@starter/shared";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
@@ -13,6 +14,7 @@ export class HttpIngestStore implements CollectorStore {
     const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}${path}`, {
       ...init,
       headers,
+      signal: AbortSignal.timeout(30_000),
     });
     const payload = (await response.json()) as ApiResponse<T>;
     if (!response.ok || !payload.ok) throw new Error(payload.ok ? `Ingest request failed: ${response.status}` : `${payload.error.code}: ${payload.error.message}`);
@@ -23,10 +25,16 @@ export class HttpIngestStore implements CollectorStore {
     return this.request<SyncState>(`/api/query/ingest/state/${encodeURIComponent(memberId)}`);
   }
 
+  async getImage(id: string) { return this.request<ImageAttachment | null>(`/api/query/ingest/images/${encodeURIComponent(id)}`); }
+  async saveImage(image: ImageAttachment) { await this.request(`/api/query/ingest/images/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify(image) }); }
+  async pendingImages(limit: number) { return this.request<ImageAttachment[]>(`/api/query/ingest/images?limit=${limit}`); }
+
   async ingestUnit(unit: IngestUnit) {
-    // The existing API caps both JSON bodies (16 KiB) and page arrays (25).
+    if (unit.recordings.length) throw new Error("Recording ingestion is disabled.");
+    // Authenticated content ingestion allows long text and multi-image messages;
+    // bound UTF-8 bytes and page arrays, preserving the previous sync checkpoint.
     // Partition this transport payload here; source pagination stays intact.
-    const fits = (part: IngestUnit) => part.messages.length <= 25 && part.recordings.length <= 25 && Buffer.byteLength(JSON.stringify(part), "utf8") <= 16_384;
+    const fits = (part: IngestUnit) => part.messages.length <= 25 && part.recordings.length === 0 && Buffer.byteLength(JSON.stringify(part), "utf8") <= 131_072;
     if (fits(unit)) {
       await this.request(`/api/query/ingest/unit`, { method: "POST", body: JSON.stringify(unit) });
       return;
@@ -56,7 +64,7 @@ export class HttpIngestStore implements CollectorStore {
     for (const [index, current] of parts.entries()) {
       // Earlier chunks retain the previous page's cursors. If any write fails,
       // retry the page: ingestion upserts IDs, so already-written items are safe.
-      const part = index === parts.length - 1 ? current : { ...current, ...checkpoint };
+      const part = index === parts.length - 1 ? current : { ...current, ...checkpoint, sync: undefined };
       await this.request(`/api/query/ingest/unit`, { method: "POST", body: JSON.stringify(part) });
     }
   }

@@ -1,5 +1,6 @@
-import { RecordingsView } from "@/components/dashboard/ExplorerViews";
+import { redirect } from "next/navigation";
 
-export default function RecordingsPage() {
-  return <RecordingsView />;
+export default async function RecordingsPage({ params }: { params: Promise<{ locale: string }> }) {
+  const { locale } = await params;
+  redirect(`/${locale}/messages`);
 }

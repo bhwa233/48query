@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const queryMembers = sqliteTable("query_members", {
   id: text("id").primaryKey(),
@@ -24,7 +24,26 @@ export const queryMessages = sqliteTable("query_messages", {
   senderName: text("sender_name"),
   senderType: text("sender_type"),
   sourceJson: text("source_json"),
+  roomOwnerId: text("room_owner_id"),
+  roomId: text("room_id"),
+  kind: text("kind").notNull().default("text"),
+  question: text("question"),
+  answer: text("answer"),
+  source: text("source").notNull().default("room"),
+  sourceFlags: integer("source_flags").notNull().default(1),
+  parseStatus: text("parse_status").notNull().default("parsed"),
+}, table => [index("query_messages_author_time").on(table.memberId, table.occurredAt, table.id), index("query_messages_kind_time").on(table.kind, table.occurredAt, table.id)]);
+
+export const queryImages = sqliteTable("query_images", {
+  id: text("id").primaryKey(), sourceUrl: text("source_url").notNull(), galleryUrl: text("gallery_url"), thumbnailUrl: text("thumbnail_url"),
+  width: integer("width"), height: integer("height"), status: text("status").notNull().default("pending"), updatedAt: text("updated_at").notNull(),
 });
+export const queryMessageImages = sqliteTable("query_message_images", {
+  messageId: text("message_id").notNull().references(() => queryMessages.id), imageId: text("image_id").notNull().references(() => queryImages.id), position: integer("position").notNull(),
+}, table => [primaryKey({ columns: [table.messageId, table.imageId] })]);
+export const querySourceSync = sqliteTable("query_source_sync", {
+  memberId: text("member_id").notNull(), source: text("source").notNull(), stateJson: text("state_json").notNull(), updatedAt: text("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.memberId, table.source] })]);
 
 export const queryRecordings = sqliteTable("query_recordings", {
   id: text("id").primaryKey(),

@@ -1,60 +1,28 @@
-import type { CollectorMember, CollectorMessage, CollectorPage, CollectorRecording, CollectorSource } from "./types";
+import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
+import { contentList, normalizeMessage, object, parsePocketJson, string, timestamp } from "./pocket48-content";
 
-type PocketResponse = { status?: number; success?: boolean; message?: string; content?: unknown };
 type Pocket48Options = {
-  token: string;
-  deviceId?: string;
-  pa?: string;
-  paFactory?: () => Promise<string> | string;
-  apiBaseUrl?: string;
-  directoryUrl?: string;
-  minIntervalMs?: number;
-  memberScope?: "followed" | "all";
-  fetchImpl?: typeof fetch;
+  token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
+  apiBaseUrl?: string; directoryUrl?: string; minIntervalMs?: number; memberScope?: "followed" | "all";
+  sources?: CollectionSource[]; fetchImpl?: typeof fetch;
 };
-
 const DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
-const asObject = (value: unknown): Record<string, unknown> => value && typeof value === "object" ? value as Record<string, unknown> : {};
-const asString = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : typeof value === "number" && Number.isFinite(value) ? String(value) : null;
-function parseJson(value: unknown): unknown { if (typeof value !== "string") return value; try { return JSON.parse(value) as unknown; } catch { return value; } }
-const compactJson = (value: unknown) => { try { const result = JSON.stringify(value); return result && result.length <= 2000 ? result : null; } catch { return null; } };
-const nextCursor = (value: unknown, previous: string | null) => { const cursor = asString(value); return cursor && cursor !== "0" && cursor !== previous ? cursor : null; };
-
-function normalizeDirectory(payload: unknown): CollectorMember[] {
-  const root = asObject(payload);
-  const list = Array.isArray(root.roomId) ? root.roomId : Array.isArray(root.members) ? root.members : [];
-  return list.flatMap((entry): CollectorMember[] => {
-    const item = asObject(entry);
-    const id = asString(item.id);
-    const name = asString(item.ownerName ?? item.name ?? item.nickname);
-    const channelId = asString(item.channelId ?? item.roomId);
-    const serverId = asString(item.serverId);
-    if (!id || !name) return [];
-    return [{ id, name, pinyin: asString(item.pinyin), groupName: asString(item.groupName) ?? "未知", team: asString(item.team ?? item.periodName), roomId: asString(item.roomId ?? item.channelId), channelId, serverId, liveRoomId: asString(item.liveRoomId), status: channelId && serverId ? "active" : "gone" }];
-  });
-}
-
-function dateValue(value: string): string | null {
-  const numeric = Number(value);
-  const date = Number.isFinite(numeric) && numeric > 0 ? new Date(numeric) : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
+export const COLLECTION_SOURCES: CollectionSource[] = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
 
 export class Pocket48Source implements CollectorSource {
+  readonly sources: CollectionSource[];
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
-  private readonly directoryUrl: string;
-  private readonly interval: number;
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
-  private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string }>>();
+  private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string; roomId: string | null }>>();
+  private readonly directory = new Map<string, CollectorMember>();
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = (options.apiBaseUrl ?? "https://pocketapi.48.cn").replace(/\/$/, "");
-    this.directoryUrl = options.directoryUrl ?? DIRECTORY_URL;
-    this.interval = Math.max(0, options.minIntervalMs ?? 5000);
+    this.sources = options.sources ?? COLLECTION_SOURCES;
   }
 
   private async rateLimit() {
@@ -62,107 +30,124 @@ export class Pocket48Source implements CollectorSource {
     const previous = this.requestTurn;
     this.requestTurn = new Promise<void>((resolve) => { release = resolve; });
     await previous;
-    const wait = this.interval - (Date.now() - this.lastRequestAt);
     try {
+      const wait = Math.max(0, this.options.minIntervalMs ?? 5000) - (Date.now() - this.lastRequestAt);
       if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
       this.lastRequestAt = Date.now();
-    } finally {
-      release();
-    }
+    } finally { release(); }
   }
 
   private async post(pathname: string, body: Record<string, unknown>) {
     await this.rateLimit();
     const pa = this.options.paFactory ? await this.options.paFactory() : this.options.pa;
-    const requestHeaders: Record<string, string> = {
-      Accept: "application/json",
-      "Content-Type": "application/json;charset=utf-8",
+    const headers: Record<string, string> = {
+      Accept: "application/json", "Content-Type": "application/json;charset=utf-8", "Accept-Language": "zh-Hans-CN;q=1",
       appInfo: JSON.stringify({ vendor: "apple", appVersion: "7.1.35", appBuild: "25101021", osVersion: "16.3.0", osType: "ios", deviceName: "iPhone 14 Pro", os: "ios", ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}) }),
-      "User-Agent": "PocketFans201807/7.1.35 (iPhone; iOS 16.3; Scale/3.00)",
+      "User-Agent": "PocketFans201807/7.1.35 (iPhone; iOS 16.3; Scale/3.00)", token: this.options.token,
     };
-    requestHeaders["token"] = this.options["token"];
-    if (pa) requestHeaders["pa"] = pa;
-    const response = await this.fetchImpl(`${this.baseUrl}${pathname}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
-    const payload = await response.json() as PocketResponse;
-    if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) throw new Error(payload.message || `Pocket48 request failed with HTTP ${response.status}`);
-    return asObject(payload.content);
+    if (pathname.endsWith("/aim/type")) {
+      headers.appInfo = JSON.stringify({ vendor: "apple", deviceId: this.options.deviceId, appVersion: "7.1.38", appBuild: "26042402", osVersion: "26.5.0", osType: "ios", deviceName: "iPhone17,1", os: "ios" });
+      headers["User-Agent"] = "PocketFans201807/7.1.38 (iPhone; iOS 26.5; Scale/3.00)";
+      headers["P-Sign-Type"] = "V0";
+    } else if (pathname.endsWith("/posts/img/list")) {
+      const deviceId = this.options.deviceId?.replace(/[^a-f0-9]/gi, "").slice(0, 16).toLowerCase();
+      headers.appInfo = JSON.stringify({ IMEI: deviceId, deviceId, appName: "pocket48", appVersion: "7.1.43", appBuild: "26082801", osType: "android", osVersion: "12", deviceName: "SM-G9730", phoneName: "SM-G9730", phoneSystemVersion: "12", vendor: "Samsung" });
+      headers["User-Agent"] = "PocketFans201807/7.1.43_26082801 (SM-G9730:Android 12;Samsung V417IR release-keys)";
+    }
+    if (pa) headers.pa = pa;
+    const response = await this.fetchImpl(`${this.baseUrl}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const payload = object(parsePocketJson(await response.text()));
+    if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
+      // Do not include upstream free-form error text, which can contain user data.
+      throw new Error(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`);
+    }
+    if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
+    return payload.content;
   }
 
   async listMembers(): Promise<CollectorMember[]> {
     await this.rateLimit();
-    const response = await this.fetchImpl(this.directoryUrl, { headers: { Accept: "application/json" } });
+    const response = await this.fetchImpl(this.options.directoryUrl ?? DIRECTORY_URL, { signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`Pocket48 directory request failed with HTTP ${response.status}`);
-    const members = normalizeDirectory(await response.json());
+    const root = object(parsePocketJson(await response.text()));
+    const entries = Array.isArray(root.roomId) ? root.roomId : Array.isArray(root.members) ? root.members : [];
+    for (const entry of entries) {
+      const item = object(entry);
+      const id = string(item.id);
+      const name = string(item.ownerName ?? item.name ?? item.nickname);
+      if (!id || !name) continue;
+      this.directory.set(id, { id, name, pinyin: string(item.pinyin), groupName: string(item.groupName) ?? "未知", team: string(item.team ?? item.periodName),
+        roomId: string(item.roomId), channelId: string(item.channelId), serverId: string(item.serverId), status: "active" });
+    }
+    const members = [...this.directory.values()];
     if (this.options.memberScope === "all") return members;
-    const followed = await this.post("/user/api/v1/friendships/friends/id", {});
+    const followed = object(await this.post("/user/api/v1/friendships/friends/id", {}));
     if (!Array.isArray(followed.data)) throw new Error("Pocket48 returned no followed-member list.");
-    const ids = new Set(followed.data.map(value => asString(value)));
+    const ids = new Set(followed.data.map(value => string(value)));
     return members.filter(member => ids.has(member.id));
   }
 
-  async listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
-    // Like 48tools, resolve by member ID; the public directory's channel/server
-    // IDs may be stale or missing. Cache only for this source's current batch.
+  private async resolveRoom(member: CollectorMember) {
     let room = this.rooms.get(member.id);
     if (!room) {
-      room = this.post("/im/api/v1/im/server/jump", { starId: Number(member.id), targetType: 1, tabId: 0 }).then(content => {
-        const channelId = asString(content.channelId);
-        const serverId = asString(asObject(content.jumpServerInfo).serverId ?? content.serverId);
-        if (!channelId && content.star === true && content.friend === false) throw new Error(`Pocket48 member ${member.id} is not followed by this account; select a followed member or follow them in Pocket48 first.`);
-        if (!channelId || !serverId) throw new Error(`Pocket48 returned no current room for member ${member.id}.`);
-        return { channelId, serverId };
+      room = this.post("/im/api/v1/im/server/jump", { starId: Number(member.id), targetType: 1, tabId: 0 }).then(value => {
+        const content = object(value);
+        const channelId = string(content.channelId);
+        const serverId = string(object(content.jumpServerInfo).serverId ?? content.serverId);
+        if (!channelId || !serverId) throw new Error(`Pocket48 returned no readable room for member ${member.id}; account access or room mapping requires verification.`);
+        const roomId = string(content.imRoomId ?? content.roomId);
+        return { channelId, serverId, roomId };
       });
       this.rooms.set(member.id, room);
     }
-    const currentRoom = await room;
-    member.channelId = currentRoom.channelId;
-    member.serverId = currentRoom.serverId;
-    member.status = "active";
-    // Each ingest unit accepts at most 25 messages. Preserve the upstream cursor
-    // and request that page size rather than dropping half of a larger page.
-    const content = await this.post("/im/api/v1/team/message/list/homeowner", { channelId: Number(currentRoom.channelId), serverId: Number(currentRoom.serverId), nextTime: Number(cursor ?? 0), limit: 25 });
-    const values = Array.isArray(content.message) ? content.message : [];
-    const items = values.flatMap((value): CollectorMessage[] => {
-      const item = asObject(value);
-      const id = asString(item.msgIdServer);
-      const timestamp = asString(item.msgTime);
-      const occurredAt = timestamp ? dateValue(timestamp) : null;
-      if (!id || !occurredAt) return [];
-      const body = asObject(parseJson(item.bodys));
-      const ext = asObject(parseJson(item.extInfo));
-      const sender = asObject(ext.user ?? ext.sender);
-      const text = asString(body.text ?? body.content ?? body.message ?? body.msg ?? body.body) ?? (typeof item.bodys === "string" && !item.bodys.trim().startsWith("{") ? item.bodys : null);
-      return [{ id, memberId: member.id, occurredAt, type: asString(item.msgType) ?? "UNKNOWN", text, senderId: asString(sender.userId ?? sender.id), senderName: asString(sender.nickName ?? sender.nickname ?? sender.userName ?? sender.name), senderType: asString(sender.roleName ?? sender.role), sourceJson: compactJson(value) }];
-    });
-    return { items, nextCursor: nextCursor(content.nextTime, cursor) };
+    const current = await room;
+    member.channelId = current.channelId; member.serverId = current.serverId; member.roomId = current.roomId; member.status = "active";
+    return current;
   }
 
-  async listRecordings(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorRecording>> {
-    let next = cursor ?? "0";
-    let first: Record<string, unknown> | undefined;
-    // Pocket48 ignores userId at next=0 (also handled by 48tools). Establish
-    // a real liveId boundary first, then request this member's own recordings.
-    if (Number(next) === 0) {
-      const latest = await this.post("/live/api/v1/live/getLiveList", { debug: true, next: 0, record: true });
-      if (!Array.isArray(latest.liveList) || latest.liveList.length === 0) return { items: [], nextCursor: null };
-      const head = asObject(latest.liveList[0]);
-      const latestId = asString(head.liveId);
-      if (!latestId || latestId === "0") throw new Error("Pocket48 returned no recording pagination boundary.");
-      next = latestId;
-      if (asString(asObject(head.userInfo).userId) === member.id) first = head;
+  async listMessages(member: CollectorMember, cursor: string | null) { return this.listContent(member, "room", cursor); }
+
+  async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
+    let content: unknown;
+    if (source === "posts" || source === "post_images") {
+      content = await this.post(source === "posts" ? "/posts/api/v1/posts/timeline/home/new" : "/posts/api/v1/posts/img/list", { userId: Number(member.id), nextId: cursor ?? "0", limit: 25 });
+    } else {
+      const room = await this.resolveRoom(member);
+      const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Number(cursor ?? 0), limit: 25 };
+      if (source === "room") {
+        // all includes verified members visiting other rooms. Never infer authorship
+        // from the selected room, role labels, or a non-empty response alone.
+        content = await this.post("/im/api/v1/team/message/list/all", body);
+      } else if (source === "album") {
+        content = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
+      } else if (source === "essence") {
+        content = await this.post("/im/api/v1/team/essence/message/list", body);
+      } else {
+        if (!room.roomId) {
+          const info = object(await this.post("/im/api/v1/im/team/room/info", { channelId: room.channelId }));
+          const roomInfo = object(info.roomInfo ?? info);
+          const ownerId = string(roomInfo.ownerId ?? roomInfo.starId);
+          if (ownerId && ownerId !== member.id) throw new Error("Pocket48 room owner does not match the selected member.");
+          room.roomId = string(roomInfo.imRoomId ?? roomInfo.roomId);
+          member.roomId = room.roomId;
+        }
+        if (!room.roomId) throw new Error("Pocket48 returned no verified legacy room ID for this source.");
+        content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId: room.roomId, nextTime: Number(cursor ?? 0) });
+      }
     }
-    const content = await this.post("/live/api/v1/live/getLiveList", { debug: true, next, record: true, userId: Number(member.id) });
-    const values: unknown[] = Array.isArray(content.liveList) ? content.liveList : [];
-    if (first) values.unshift(first);
-    const items = values.flatMap((value): CollectorRecording[] => {
-      const item = asObject(value);
-      if (asString(asObject(item.userInfo).userId) !== member.id) throw new Error("Pocket48 returned recordings for a different member; refusing to ingest them.");
-      const id = asString(item.liveId);
-      const occurredAt = asString(item.ctime ?? item.stime);
-      const iso = occurredAt ? dateValue(occurredAt) : null;
-      if (!id || !iso) return [];
-      return [{ id, memberId: member.id, title: asString(item.title), occurredAt: iso, danmakuCount: 0, danmakuStatus: "pending", sourceJson: compactJson(value) }];
+    const values = contentList(content);
+    const items = values.flatMap(value => { const message = normalizeMessage(value, member, source, this.directory); return message ? [message] : []; });
+    console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, observed: values.length, accepted: items.length, images: items.reduce((count, item) => count + (item.images?.length ?? 0), 0), ownerMessages: items.filter(item => item.memberId === member.id).length }));
+    const root = object(content);
+    const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
+    if (values.length > 0 && rawCursor === cursor) throw new Error("Pocket48 repeated a non-empty page cursor; refusing to mark history complete.");
+    const boundary = values.flatMap(value => {
+      const item = object(value);
+      const id = string(item.msgIdServer ?? item.msgIdClient ?? item.msgidClient ?? item.postId ?? item.id);
+      const occurredAt = timestamp(item.msgTime ?? item.createTime ?? item.ctime);
+      return id && occurredAt ? [{ id, occurredAt }] : [];
     });
-    return { items, nextCursor: nextCursor(content.next, cursor) };
+    if (values.length > 0 && boundary.length !== values.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
+    return { items, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
   }
 }

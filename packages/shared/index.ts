@@ -19,6 +19,7 @@ import type {
   NoteResponseSchema,
   EchoSchema,
   QueryOverviewSchema,
+  QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, CollectionSourceSchema, SourceSyncSchema,
 } from "./schemas";
 
 export type ApiErrorResponse = z.infer<typeof ErrorSchema>;
@@ -28,3 +29,10 @@ export type NotesResponse = z.infer<typeof NotesSchema>;
 export type NoteResponse = z.infer<typeof NoteResponseSchema>;
 export type EchoResponse = z.infer<typeof EchoSchema>;
 export type QueryOverview = z.infer<typeof QueryOverviewSchema>;
+export type ArchiveMessage = z.infer<typeof QueryMessageSchema>;
+export type ArchiveMembers = z.infer<typeof QueryMembersSchema>;
+export type ArchiveMemberDetail = z.infer<typeof QueryMemberDetailSchema>;
+export type ArchiveMessages = z.infer<typeof QueryMessageSearchSchema>;
+export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
+export type CollectionSource = z.infer<typeof CollectionSourceSchema>;
+export type SourceSync = z.infer<typeof SourceSyncSchema>;

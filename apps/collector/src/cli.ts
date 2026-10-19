@@ -1,7 +1,9 @@
 import { DemoSource } from "./demo-source";
 import { DryRunStore } from "./dry-run-store";
 import { HttpIngestStore } from "./http-store";
-import { Pocket48Source } from "./pocket48-source";
+import { COLLECTION_SOURCES, Pocket48Source } from "./pocket48-source";
+import { GalleryUploader } from "./gallery";
+import type { CollectionSource, CollectorStore } from "./types";
 import { createPocket48Pa, loadCredential, CREDENTIAL_PATH } from "./pocket48-auth.mjs";
 import { runBatch } from "./run";
 
@@ -46,6 +48,10 @@ const sourceOptions = {
   directoryUrl: process.env["POCKET48_DIRECTORY_URL"],
   minIntervalMs: Number(process.env["POCKET48_MIN_INTERVAL_MS"] ?? 5000),
   memberScope: memberId ? "all" : memberScope,
+  sources: (process.env.COLLECTOR_SOURCES?.split(",").map(value => value.trim()).filter(Boolean) ?? COLLECTION_SOURCES).map(value => {
+    if (!COLLECTION_SOURCES.includes(value as CollectionSource)) throw new Error(`Unsupported collection source: ${value}`);
+    return value as CollectionSource;
+  }),
 } satisfies ConstructorParameters<typeof Pocket48Source>[0];
 const source = sourceName === "demo"
   ? new DemoSource()
@@ -56,17 +62,29 @@ const batchSource = memberId
   ? {
     listMembers: async () => (await source.listMembers()).filter((member) => member.id === memberId),
     listMessages: source.listMessages.bind(source),
-    listRecordings: source.listRecordings.bind(source),
+    sources: source.sources,
+    listContent: source.listContent?.bind(source),
   }
   : source;
 const endpoint = process.env["INGEST_API_URL"];
 const authKey = process.env["INGEST_KEY"];
-const store = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey) : new DryRunStore();
+const store: CollectorStore = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey) : new DryRunStore();
 
 if (sourceName === "pocket48" && !sourceOptions["token"]) throw new Error(`Pocket48 credential not found. Run the login command first: ${CREDENTIAL_PATH}`);
-if (!dryRun && (!endpoint || !authKey)) console.warn("INGEST_API_URL and INGEST_KEY are missing; using dry-run store.");
+if (!dryRun && (!endpoint || !authKey)) throw new Error("INGEST_API_URL and INGEST_KEY are required for writes; use --dry-run to inspect safely.");
 const maxMembers = Number(process.env["COLLECTOR_MAX_MEMBERS"] ?? 0);
 const maxPagesPerMember = Number(process.env["COLLECTOR_MAX_PAGES"] ?? 10);
-const result = await runBatch(batchSource, store, { maxMembers, maxPagesPerMember });
+const gallery = new GalleryUploader({ baseUrl: process.env.GALLERY_BASE_URL });
+const archiveImage = !dryRun && sourceName === "pocket48" ? gallery.upload.bind(gallery) : undefined;
+let retryFailures = 0;
+if (archiveImage && store.pendingImages) {
+  const limit = Number(process.env.COLLECTOR_IMAGE_RETRY_LIMIT ?? 25);
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100) throw new Error("Image retry limit must be between 0 and 100.");
+  for (const image of limit > 0 ? await store.pendingImages(limit) : []) {
+    try { await archiveImage(image); } catch { image.status = "failed"; retryFailures += 1; }
+    await store.saveImage?.(image);
+  }
+}
+const result = await runBatch(batchSource, store, { maxMembers, maxPagesPerMember, archiveImage });
 console.log(JSON.stringify({ event: "batch_finished", ...result }));
-if (result.errorCount > 0 && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;
+if ((result.errorCount > 0 || retryFailures > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;
