@@ -50,14 +50,10 @@ jobs:
             return body;
           };
           const room = await post('/im/api/v1/im/server/jump', { starId: 63566, targetType: 1, tabId: 0 });
-          console.log('[message-shape]', JSON.stringify({ serverIdsMatch: room.content?.serverId === room.content?.jumpServerInfo?.serverId }));
-          const messageBody = { channelId: Number(room.content?.channelId), serverId: Number(room.content?.serverId), nextTime: 0, limit: 50 };
           await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/team/message/list/homeowner', messageBody);
+          const info = await post('/im/api/v1/im/team/room/info', { channelId: String(room.content?.channelId) });
           await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/team/message/list/homeowner', messageBody, true);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/team/message/list/all', messageBody);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/im/team/room/info', { channelId: String(room.content?.channelId) });
+          await post('/im/api/v1/chatroom/msg/list/homeowner', {
+            roomId: String(info.content?.imRoomId ?? ''), ownerId: '63566', nextTime: '0', needTop1Msg: 'false',
+          });
           JS
