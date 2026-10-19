@@ -1,6 +1,6 @@
 # GitHub Actions 图文采集
 
-生产采集通过 GitHub Actions 运行，凭证由 SparkHub 加密保存，通过独立读取令牌临时获取。当前改造与真实运行状态见[实施记录](text-image-implementation.md)；`Daily collector` 是否恢复，以该记录及 GitHub 实际状态为准。
+生产采集通过 GitHub Actions 运行，凭证由 SparkHub 加密保存，通过独立读取令牌临时获取。当前配置与真实运行状态见[后端上线记录](backend-collection-rollout.md)；`Daily collector` 是否恢复，以该记录及 GitHub 实际状态为准。
 
 ## 配置
 
@@ -39,7 +39,7 @@ INGEST_KEY
 pnpm --filter @starter/collector run run
 ```
 
-该命令读取真实来源，通过保护的 ingest API 写入。图片上传至图库，不经过 Worker 下载，也不建立新的 R2 bucket。无任何录播、弹幕、视频文件下载请求。
+该命令读取真实来源，通过保护的 ingest API 写入。图片上传至图库，不经过 Worker 下载，也不建立新的 R2 bucket。不请求录播或弹幕；仅下载和上传已核验的普通房间小视频，单文件上限为 50 MiB。
 
 每来源独立分页与错误状态；图库失败保留重试记录，批次失败会使任务报错。`source_page` 日志只含数量、来源和成员 ID，不输出消息正文、图片 URL、凭证或请求头。网页读取本站已保存的数据，不在访客浏览时调用 Pocket48。
 
