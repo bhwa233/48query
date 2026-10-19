@@ -32,13 +32,13 @@ jobs:
             if (typeof value === 'object') return Object.fromEntries(Object.keys(value).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(key)).slice(0, 30).map(key => [key, shape(value[key], depth + 1)]));
             return typeof value;
           };
-          const post = async (pathname, requestBody) => {
+          const post = async (pathname, requestBody, legacyProfile = false) => {
             const result = await fetch(`https://pocketapi.48.cn${pathname}`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json;charset=utf-8',
-                'User-Agent': 'PocketFans201807/7.1.35 (iPhone; iOS 16.3.1; Scale/2.00)',
-                appInfo: JSON.stringify({ vendor: 'apple', deviceId: data.deviceId, appVersion: '7.1.35', appBuild: '25101021', osVersion: '16.3.1', osType: 'ios', deviceName: 'iPhone XR', os: 'ios' }),
+                'User-Agent': legacyProfile ? 'PocketFans201807/7.0.4 (iPhone; iOS 15.4.1; Scale/2.00)' : 'PocketFans201807/7.1.35 (iPhone; iOS 16.3.1; Scale/2.00)',
+                appInfo: JSON.stringify({ vendor: 'apple', deviceId: data.deviceId, appVersion: legacyProfile ? '7.0.4' : '7.1.35', appBuild: legacyProfile ? '23011601' : '25101021', osVersion: '16.3.1', osType: 'ios', deviceName: 'iPhone XR', os: 'ios' }),
                 token: data.token,
                 pa: await createPocket48Pa(),
               },
@@ -46,22 +46,18 @@ jobs:
               signal: AbortSignal.timeout(20000),
             });
             const body = await result.json();
-            console.log('[message-shape]', JSON.stringify({ pathname, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, targetFollowed: body.content?.friend === true, requestLimit: requestBody.limit, requestStartsAtZero: requestBody.nextTime === 0, shape: shape(body) }));
+            console.log('[message-shape]', JSON.stringify({ pathname, http: result.status, status: typeof body.status === 'number' ? body.status : 'unknown', success: body.success === true, targetIsStar: body.content?.star === true, targetFollowed: body.content?.friend === true, legacyProfile, requestLimit: requestBody.limit, requestStartsAtZero: requestBody.nextTime === 0, shape: shape(body) }));
             return body;
           };
           const room = await post('/im/api/v1/im/server/jump', { starId: 63566, targetType: 1, tabId: 0 });
+          console.log('[message-shape]', JSON.stringify({ serverIdsMatch: room.content?.serverId === room.content?.jumpServerInfo?.serverId }));
+          const messageBody = { channelId: Number(room.content?.channelId), serverId: Number(room.content?.serverId), nextTime: 0, limit: 50 };
           await new Promise(resolve => setTimeout(resolve, 5000));
-          await post('/im/api/v1/team/message/list/homeowner', {
-            channelId: Number(room.content?.channelId),
-            serverId: Number(room.content?.jumpServerInfo?.serverId ?? room.content?.serverId),
-            nextTime: 0, limit: 25,
-          });
-          for (const pagination of [{ nextTime: 0, limit: 50 }, { nextTime: Date.now(), limit: 25 }]) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            await post('/im/api/v1/team/message/list/homeowner', {
-              channelId: Number(room.content?.channelId),
-              serverId: Number(room.content?.jumpServerInfo?.serverId ?? room.content?.serverId),
-              ...pagination,
-            });
-          }
+          await post('/im/api/v1/team/message/list/homeowner', messageBody);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          await post('/im/api/v1/team/message/list/homeowner', messageBody, true);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          await post('/im/api/v1/team/message/list/all', messageBody);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          await post('/im/api/v1/im/team/room/info', { channelId: String(room.content?.channelId) });
           JS
