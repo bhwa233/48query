@@ -13,7 +13,7 @@
     "dev:api": "pnpm --filter @starter/api dev",
     "dev:api:db": "pnpm --filter @starter/api dev:db",
     "collector:dev": "pnpm --filter @starter/collector dev",
-    "collector:run": "pnpm --filter @starter/collector run",
+    "collector:run": "pnpm --filter @starter/collector run run",
     "dev:all": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api\"",
     "dev:all:db": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api:db\"",
     "build": "pnpm build:web && pnpm build:api && pnpm build:api:db",

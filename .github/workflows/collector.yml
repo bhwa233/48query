@@ -62,4 +62,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Run collector
-        run: pnpm --filter @starter/collector run
+        run: pnpm --filter @starter/collector run run

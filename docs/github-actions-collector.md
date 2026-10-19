@@ -29,13 +29,13 @@ workflow 位于 `.github/workflows/collector.yml`，每天北京时间 01:00 运
 
 ## 凭证轮换
 
-SparkHub 后台负责轮换，明文凭证只在后端验证和采集任务内存中短暂存在，不会返回浏览器或写入 D1：
+在本地完成 Pocket48 登录后，将生成的 JSON 粘贴到 SparkHub 后台。SparkHub 加密保存到 D1，采集任务启动时临时读取：
 
-1. 管理员在 SparkHub 后台完成管理员认证。
-2. 后端请求 Pocket48 发送短信验证码，手机号和验证码不写日志。
-3. 后端用验证码完成登录，拿到 token 和设备号。
-4. 后端立即请求 Pocket48 IM 用户信息，验证凭证的认证访问。
-5. 验证成功后，SparkHub 将凭证使用 AES-GCM 加密保存到 D1。
+1. 在 SparkHub 仓库运行 `node scripts/pocket48-login.mjs`，本机直连 Pocket48，不使用远程代理。
+2. 根据提示输入手机号和短信验证码；本地脚本完成登录及 IM 访问验证。
+3. 复制生成的 `{ token, deviceId }` JSON，在 SparkHub 后台完成管理员认证后粘贴保存。
+4. 保存成功后，浏览器清空表单，展示凭证版本和保存时间。
+5. SparkHub 使用 AES-GCM 加密保存到 D1；手机号和短信验证码不提交到 SparkHub。
 6. 采集任务启动时请求 `COLLECTOR_CREDENTIALS_URL`，凭证只存在于当前进程内存中。
 
 ## 失败行为
@@ -43,6 +43,8 @@ SparkHub 后台负责轮换，明文凭证只在后端验证和采集任务内�
 采集器在成员级请求失败时会继续处理其他成员，但最终批次会标记为 `failed`，并以非零退出码结束 GitHub Actions。只有 `errorCount = 0` 的批次才会标记为 `completed`，查询接口不会把失败批次当成完整覆盖。
 
 workflow 不会打印环境变量、请求头或完整上游响应，也不会上传包含凭证的 artifact。Pocket48 token 失效时应在日志中根据错误类型判断，然后从 SparkHub 后台执行轮换。
+
+采集启动命令是 `pnpm --filter @starter/collector run run`（或仓库根目录 `pnpm collector:run`）。第一个 `run` 是 pnpm 子命令，第二个是包内脚本名；省略第二个只会列出脚本并返回成功，不会采集。验收需检查日志包含 `batch_finished`，且 `membersCovered > 0`、`errorCount = 0`，不能只看工作流绿色状态。
 
 ## 生产入口
 
