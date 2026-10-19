@@ -24,6 +24,7 @@ export class Pocket48Source implements CollectorSource {
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
   private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string; roomId: string | null }>>();
+  private readonly legacyRooms = new Map<string, Promise<string>>();
   private readonly verifiedMedia = new Map<string, CollectorMessage>();
   private readonly directory = new Map<string, CollectorMember>();
 
@@ -144,6 +145,30 @@ export class Pocket48Source implements CollectorSource {
     return current;
   }
 
+  // Reuse Pocket48's official search (also used by DipperStar), rather than
+  // trusting directory IDs or coupling legacy feeds to the modern jump API.
+  private async resolveLegacyRoom(member: CollectorMember) {
+    let room = this.legacyRooms.get(member.id);
+    if (!room) {
+      room = this.post("/im/api/v1/im/search", { name: member.name }).then(value => {
+        const ids = new Set(contentList(value).flatMap(entry => {
+          const item = object(entry);
+          const id = string(item.targetId);
+          return string(item.ownerId) === member.id && string(item.targetType) === "0" && id ? [id] : [];
+        }));
+        if (ids.size > 1) throw new Error("Pocket48 returned multiple verified legacy rooms for this member.");
+        // Historical members can disappear from search. This legacy endpoint
+        // supports an empty roomId with ownerId; returned senders still require
+        // normal verification, and an unrelated search result is never used.
+        return [...ids][0] ?? "";
+      });
+      this.legacyRooms.set(member.id, room);
+    }
+    const roomId = await room;
+    if (roomId) member.roomId = roomId;
+    return roomId;
+  }
+
   async listMessages(member: CollectorMember, cursor: string | null) { return this.listContent(member, "room", cursor); }
 
   // Explicit local short-video command; daily text/image collection remains
@@ -181,6 +206,9 @@ export class Pocket48Source implements CollectorSource {
     let content: unknown;
     if (source === "posts" || source === "post_images") {
       content = await this.post(source === "posts" ? "/posts/api/v1/posts/timeline/home/new" : "/posts/api/v1/posts/img/list", { userId: Number(member.id), nextId: cursor ?? "0", limit: 25 });
+    } else if (source === "weibo" || source === "room_posts") {
+      const roomId = await this.resolveLegacyRoom(member);
+      content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
     } else {
       const room = await this.resolveRoom(member);
       const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Number(cursor ?? 0), limit: 25 };
@@ -192,17 +220,6 @@ export class Pocket48Source implements CollectorSource {
         content = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
       } else if (source === "essence") {
         content = await this.post("/im/api/v1/team/essence/message/list", body);
-      } else {
-        if (!room.roomId) {
-          const info = object(await this.post("/im/api/v1/im/team/room/info", { channelId: room.channelId }));
-          const roomInfo = object(info.roomInfo ?? info.channelInfo ?? info);
-          const ownerId = string(roomInfo.ownerId ?? roomInfo.starId);
-          if (ownerId && ownerId !== member.id) throw new Error("Pocket48 room owner does not match the selected member.");
-          room.roomId = string(info.imRoomId ?? roomInfo.imRoomId ?? roomInfo.roomId);
-          member.roomId = room.roomId;
-        }
-        if (!room.roomId) throw new Error("Pocket48 returned no verified legacy room ID for this source.");
-        content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId: room.roomId, nextTime: Number(cursor ?? 0) });
       }
     }
     // Live empty essence lists omit their optional list field entirely. This
@@ -252,6 +269,31 @@ export class Pocket48Source implements CollectorSource {
       });
       for (const message of await this.options.readVerifiedPostImages?.(member.id, ids) ?? []) {
         for (const image of message.images ?? []) this.verifiedMedia.set(image.sourceUrl, message);
+      }
+      // The timeline and image catalog have independent cursors. Reuse our
+      // post parser to verify originals near each missing image group; numeric
+      // image IDs are search hints only, never evidence of authorship.
+      const groups = new Map<string, { anchor: string; urls: string[] }>();
+      for (const value of values) {
+        const raw = object(value);
+        const url = imageUrl(raw.imgUrl);
+        const id = string(raw.imgId);
+        const at = timestamp(raw.createAt);
+        if (!url || !id || !/^\d{1,32}$/.test(id) || !at || this.verifiedMedia.get(url)?.memberId === member.id) continue;
+        const group = groups.get(at) ?? { anchor: id, urls: [] };
+        if (BigInt(id) > BigInt(group.anchor)) group.anchor = id;
+        group.urls.push(url);
+        groups.set(at, group);
+      }
+      for (const group of groups.values()) {
+        if (group.urls.every(url => this.verifiedMedia.get(url)?.memberId === member.id)) continue;
+        const originals = await this.post("/posts/api/v1/posts/timeline/home/new", { userId: Number(member.id), nextId: String(BigInt(group.anchor) + 1n) });
+        for (const original of contentList(originals)) {
+          const message = normalizeMessage(original, member, "posts", this.directory);
+          if (!message || !message.images?.some(image => group.urls.includes(image.sourceUrl))) continue;
+          originalsFound.set(message.id, message);
+          for (const image of message.images) this.verifiedMedia.set(image.sourceUrl, message);
+        }
       }
     }
     let unverified = 0;

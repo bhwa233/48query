@@ -82,6 +82,36 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   assert.deepEqual((await source.listContent(member, "essence", null)).items, []);
 });
 
+// Eleven followed accounts have no modern channel, but their legacy share
+// feeds still return content. A missing modern room must not block these feeds,
+// and a fuzzy name search must never select another member's room. Member 37
+// is absent from search; that API supports an owner-only feed with roomId="".
+test("reads legacy shares without a modern channel and verifies the searched room owner", async () => {
+  let shareRequests = 0;
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const content = String(url).endsWith("/im/server/jump") ? { friend: true, star: true }
+      : String(url).endsWith("/im/search") ? { data: [{ ownerId: "1", targetType: 0, targetId: "verified-room" }] }
+      : (() => {
+        assert.equal(body.roomId, body.ownerId === "1" ? "verified-room" : "");
+        shareRequests++;
+        return { message: [
+          { msgidClient: "share", msgTime: 1754995019661, msgType: "CUSTOM", bodys: "", extInfo: { messageType: "WEI_BO", user: { userId: "1" }, content: "verified shared text" } },
+          ...(body.ownerId === "2" ? [{ msgidClient: "owner-only", msgTime: 1754995019661, msgType: "CUSTOM", bodys: "", extInfo: { user: { userId: "2" }, content: "owner-only text" } }] : []),
+        ], nextTime: 0 };
+      })();
+    return Response.json({ status: 200, content });
+  } });
+  const member = { id: "1", name: "Owner", groupName: "SNH48", channelId: "stale-channel", roomId: "stale-room" };
+  const page = await source.listContent(member, "weibo", null);
+  assert.equal(page.items[0]?.text, "verified shared text");
+  assert.equal(member.roomId, "verified-room");
+  const other = await source.listContent({ id: "2", name: "Other owner", groupName: "SNH48" }, "weibo", null);
+  assert.deepEqual(other.items.map(row => row.memberId), ["2"], "Owner-only lookup must still reject content with an unverified sender");
+  assert.equal(other.items[0]?.roomId, null, "A member ID is not evidence of a room ID");
+  assert.equal(shareRequests, 2, "Wrong-owner search results must use owner-only lookup instead of the other room");
+});
+
 // Reference formats place old TEXT content in extInfo, and use integers too
 // large for IEEE-754 IDs. A room name or member role must never assign fan text.
 test("preserves member authorship, large IDs, legacy text and public question/answer meaning", () => {
@@ -192,6 +222,41 @@ test("verifies album authors from original room messages, including visiting mem
   assert.equal(catalog.find(row => row.kind === "video")?.videos?.[0]?.status, "pending");
   assert.equal(page.items.find(row => row.type === "TEXT")?.sourceFlags, 1, "Nearby room text must not masquerade as an album entry");
   assert.equal(page.unverified, 2, "Fan impersonation and wrong-time image reuse must remain unverified");
+});
+
+// Han Jiale's image catalog predates her latest text-only posts by months.
+// Resolve nearby original posts, but never use the catalog's owner parameter
+// as evidence that an image belongs to that member.
+test("resolves old post images from original posts and retains unverified catalog entries", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const photo = (name: string) => `https://source.48.cn/${name}.jpg`;
+  const time = 1754995019661;
+  let lookups = 0;
+  let verified: Awaited<ReturnType<Pocket48Source["listMessages"]>>["items"] = [];
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0,
+    readVerifiedPostImages: async () => verified,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/posts/img/list")) return Response.json({ status: 200, content: { list: [
+        { imgId: "1162096596169330688", imgUrl: photo("a"), createAt: time },
+        { imgId: "1162096596169330687", imgUrl: photo("b"), createAt: time },
+        { imgId: "1162096596169330686", imgUrl: photo("unverified"), createAt: time },
+      ], next: "older-images" } });
+      lookups++;
+      return Response.json({ status: 200, content: { postsInfo: [
+        { type: "POSTS", data: { postsInfo: { postId: "original", userId: "1", createAt: time + 7, postContent: "original member post", previewImg: [{ imgUrl: photo("a") }, { imgUrl: photo("b") }] } } },
+        { type: "POSTS", data: { postsInfo: { postId: "other-author", userId: "2", createAt: time, previewImg: [{ imgUrl: photo("unverified") }] } } },
+      ], nextId: "0" } });
+    },
+  });
+  const page = await source.listContent(member, "post_images", null);
+  assert.equal(page.unverified, 1, "An image owned only by a different author's post remains unverified");
+  assert.equal(lookups, 1, "Images created together should share the original-post lookup");
+  assert.ok(page.items.some(row => row.id === "post:original" && row.text === "original member post"));
+  assert.ok(page.items.every(row => row.memberId === member.id));
+  assert.equal(page.nextCursor, "older-images", "The catalog's pagination remains independent from post lookups");
+  verified = page.items;
+  await source.listContent(member, "post_images", null);
+  assert.equal(lookups, 2, "Only the still-unverified image needs another lookup");
 });
 
 // The size rule must hold when a CDN omits Content-Length or lies about it:

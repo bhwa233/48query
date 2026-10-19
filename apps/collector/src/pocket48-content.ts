@@ -134,7 +134,7 @@ export function normalizeMessage(value: unknown, roomOwner: CollectorMember, sou
   if (!id) throw new Error("A member message has no stable ID; page retained for retry.");
   if ([text, question, answer].some(part => part && part.length > 20000) || images.length > 30) throw new Error("A member message exceeds supported content bounds; page retained for retry.");
   return { id, memberId: senderId, author, occurredAt, type, text, senderId, senderName: author.name, senderType: "member",
-    roomOwnerId: roomOwner.id, roomId: isPost ? null : roomId, kind, question, answer, source,
+    roomOwnerId: roomOwner.id, roomId: isPost ? null : roomOwner.channelId ?? roomOwner.roomId ?? null, kind, question, answer, source,
     sourceFlags: sourceFlags[source], images: [...new Map(images.map(image => [image.id, image])).values()], videos, parseStatus: kind === "unknown" ? "unsupported" : "parsed",
     sourceJson: JSON.stringify({ upstreamId, postId, format: "pocket48-v2" }) };
 }
