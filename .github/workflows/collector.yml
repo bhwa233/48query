@@ -25,6 +25,10 @@ on:
           - followed
           - all
         default: followed
+      dry_run:
+        description: "Inspect sources without database writes or image uploads"
+        type: boolean
+        default: false
       diagnostics:
         description: "Log response field names/types only (no content or credentials)"
         type: boolean
@@ -38,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: 48query-production-collector
+  group: 48query-production-collector${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -50,7 +54,7 @@ jobs:
     env:
       POCKET48_LOG_SCHEMA: ${{ inputs.diagnostics && '1' || '0' }}
       COLLECTOR_SOURCE: pocket48
-      COLLECTOR_DRY_RUN: "0"
+      COLLECTOR_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       COLLECTOR_FAIL_ON_ERROR: "1"
       COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || vars.COLLECTOR_MAX_PAGES || '10' }}
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
