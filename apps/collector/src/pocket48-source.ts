@@ -150,6 +150,29 @@ export class Pocket48Source implements CollectorSource {
       }
     }
     const values = contentList(content);
+    if (source === "album") {
+      const room = await this.resolveRoom(member);
+      const checkedTimes = new Set<string>();
+      for (const value of values) {
+        const raw = object(value);
+        if (string(raw.sourceType)?.toUpperCase() === "VIDEO") continue;
+        const url = imageUrl(object(parsePocketJson(raw.bodys)).url);
+        const at = timestamp(raw.createTime);
+        const known = url ? this.verifiedImages.get(url) : undefined;
+        if (!url || !at || (known?.occurredAt === at && known.roomId === room.channelId) || checkedTimes.has(at)) continue;
+        checkedTimes.add(at);
+        // Reuse the room parser and its sender-ID checks. Latest room pages can
+        // contain only fans while album images are months older; the timestamp
+        // cursor retrieves the original without walking every intervening chat.
+        const originals = await this.post("/im/api/v1/team/message/list/all", {
+          channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Date.parse(at) + 1, limit: 50,
+        });
+        for (const original of contentList(originals)) {
+          const message = normalizeMessage(original, member, "room", this.directory);
+          if (message) for (const image of message.images ?? []) this.verifiedImages.set(image.sourceUrl, message);
+        }
+      }
+    }
     let unverified = 0;
     const items = values.flatMap(value => {
       const raw = object(value);
@@ -158,9 +181,10 @@ export class Pocket48Source implements CollectorSource {
         const body = object(parsePocketJson(raw.bodys));
         const url = imageUrl(body.url ?? raw.imgUrl);
         const verified = url ? this.verifiedImages.get(url) : undefined;
-        // These catalogs omit sender IDs. Enrich an already attributed record;
-        // never invent a new member post from an endpoint parameter or name.
-        if (verified && (source === "album" ? string(raw.starName) === verified.author?.name : verified.memberId === member.id)) {
+        // Catalogs omit sender IDs. Album attribution requires the original's
+        // exact room, image URL and timestamp plus a verified sender ID. Display
+        // names can carry group prefixes or change, so they are not identity.
+        if (verified && (source === "album" ? verified.roomId === member.channelId && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
           message = { ...verified, images: verified.images?.map(image => ({ ...image })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
         } else if (string(raw.sourceType)?.toUpperCase() !== "VIDEO") unverified += 1;
       }

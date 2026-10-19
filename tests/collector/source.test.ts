@@ -122,3 +122,35 @@ test("an empty room is reported as unverified without losing the batch", async (
   assert.equal(result.membersCovered, 0);
   assert.equal(store.units.at(-2)?.sync?.historyDone, false);
 });
+
+// Live albums omit sender IDs and may be months older than the latest room
+// page. Resolve the original message, without trusting its displayed starName
+// or attributing a reused image from a different timestamp.
+test("verifies album authors from original room messages, including visiting members", async () => {
+  const at = 1792368000000;
+  const photo = (name: string) => `https://source.48.cn/${name}.jpg`;
+  const original = (id: string, userId: string, time: number) => ({ msgIdServer: id, msgTime: time, msgType: "IMAGE", bodys: { url: photo(id) }, extInfo: { user: { userId } } });
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, memberScope: "all", fetchImpl: async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const content = path.endsWith("/im/server/jump") ? { channelId: 22, jumpServerInfo: { serverId: 33 } }
+      : path.endsWith("/msg/list/img") ? { imgAndVideoList: [
+        { starName: "SNH48-Owner", sourceType: "IMAGE", createTime: at, bodys: { url: photo("owner") } },
+        { starName: "Visitor", sourceType: "IMAGE", createTime: at + 1000, bodys: { url: photo("visitor") } },
+        { starName: "Owner", sourceType: "IMAGE", createTime: at + 2000, bodys: { url: photo("fan") } },
+        { starName: "Owner", sourceType: "IMAGE", createTime: at + 3000, bodys: { url: photo("stale") } },
+        { starName: "Owner", sourceType: "VIDEO", createTime: at + 4000, bodys: { url: "https://source.48.cn/video.mp4" } },
+      ], nextTime: 0 }
+      : path.endsWith("/message/list/all") ? { message: [
+        original("owner", "1", at), original("visitor", "2", at + 1000),
+        original("fan", "999", at + 2000), original("stale", "1", at - 1000),
+      ].filter(row => row.msgTime < body.nextTime), nextTime: 0 }
+      : null;
+    return Response.json(content ? { status: 200, content } : { members: [{ id: "1", name: "Owner" }, { id: "2", name: "Visitor" }] });
+  } });
+  const members = await source.listMembers();
+  const page = await source.listContent(members[0]!, "album", null);
+  assert.deepEqual(page.items.map(row => [row.memberId, row.roomOwnerId]), [["1", "1"], ["2", "1"]]);
+  assert.ok(page.items.every(row => row.sourceFlags === 3 && row.id.startsWith("room:22:")));
+  assert.equal(page.unverified, 2, "Fan impersonation and wrong-time image reuse must remain unverified");
+});
