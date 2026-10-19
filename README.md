@@ -131,6 +131,8 @@ docs/                     架构、初始化和验证说明
 
 如使用 Cloudflare Workers Builds，应从仓库根目录安装依赖，分别为 Web/API 配置对应部署命令。新项目需要自行设置分支和发布授权，不继承 SparkHub 的自动部署设置。
 
+生产网站为 <https://48.bhwa233.com/zh>。Web Wrangler 配置通过 `custom_domain` 绑定 `48.bhwa233.com`，构建时的站点 URL 同步用于 canonical 和 sitemap；API 的 CORS 允许该来源。发布域名配置时需部署 Web 和 D1 API（`pnpm deploy:web`、`pnpm deploy:api:db`），无需重新执行数据库迁移。
+
 ## 来源与维护
 
 来源和基线 commit 记录在 `template.json`。此目录拥有自己的版本历史，不通过运行时路径引用 SparkHub，也没有继承它的 Git 历史或远程地址。

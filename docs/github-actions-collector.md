@@ -59,7 +59,7 @@ workflow 不会打印环境变量、请求头或完整上游响应，也不会�
 
 ## 生产入口
 
-- 网站：https://48query-web.404174262.workers.dev/zh
+- 网站：https://48.bhwa233.com/zh
 - API：https://48query-api.404174262.workers.dev
 - 凭证轮换：https://www.bhwa233.com/zh/admin/collector
 - 生产 API 部署使用 `wrangler.d1.jsonc`（`pnpm deploy:api:db`）；无 D1 配置只用于独立 API 验证。

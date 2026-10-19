@@ -7,7 +7,7 @@
     "nodejs_compat"
   ],
   "vars": {
-    "CORS_ORIGINS": "https://48query-web.404174262.workers.dev"
+    "CORS_ORIGINS": "https://48.bhwa233.com,https://48query-web.404174262.workers.dev"
   },
   "observability": {
     "enabled": true
