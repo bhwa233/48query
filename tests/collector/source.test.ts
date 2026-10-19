@@ -6,6 +6,7 @@ import { DryRunStore } from "../../apps/collector/src/dry-run-store";
 import { DemoSource } from "../../apps/collector/src/demo-source";
 import type { IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
+import { GalleryUploader } from "../../apps/collector/src/gallery";
 
 // The public directory's channel IDs went stale. Production requested those
 // directly and got "频道不存在" instead of resolving the member's current room.
@@ -153,4 +154,37 @@ test("verifies album authors from original room messages, including visiting mem
   assert.deepEqual(page.items.map(row => [row.memberId, row.roomOwnerId]), [["1", "1"], ["2", "1"]]);
   assert.ok(page.items.every(row => row.sourceFlags === 3 && row.id.startsWith("room:22:")));
   assert.equal(page.unverified, 2, "Fan impersonation and wrong-time image reuse must remain unverified");
+});
+
+// The size rule must hold when a CDN omits Content-Length or lies about it:
+// reject oversized streamed bodies before any upload, and keep MP4 bytes intact.
+test("bounds short-video downloads before uploading original MP4 bytes", async () => {
+  const bytes = Buffer.from("00000018667479706d7034320000000069736f6d6d703432", "hex");
+  let uploads = 0;
+  let redirect = false;
+  const gallery = new GalleryUploader({ fetchImpl: async (url, init) => {
+    if (String(url).endsWith("/upload")) {
+      uploads += 1;
+      assert.ok(init?.body instanceof FormData);
+      const file = init.body.get("file");
+      assert.ok(file instanceof File);
+      assert.equal(file.type, "video/mp4");
+      assert.deepEqual(Buffer.from(await file.arrayBuffer()), bytes);
+      return Response.json([{ src: "https://gallery.example/short.mp4" }]);
+    }
+    if (redirect) return new Response(null, { status: 302, headers: { Location: "http://127.0.0.1/private" } });
+    if (init?.method === "HEAD") return new Response(null, { status: 405 });
+    if ((init?.headers as Record<string, string>)?.Range) return new Response(bytes.subarray(0, 1), { status: 206, headers: { "Content-Range": `bytes 0-0/${bytes.length}` } });
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes.subarray(0, 12)); controller.enqueue(bytes.subarray(12)); controller.close(); } }));
+  } });
+  const video = { id: "synthetic-video", sourceUrl: "https://kd48-nosdn.yunxinsvr.com/short-video", galleryUrl: null as string | null, thumbnailUrl: null as string | null, status: "pending" as const };
+  assert.equal(await gallery.videoSize(video.sourceUrl), bytes.length);
+  await assert.rejects(gallery.uploadVideo(video, bytes.length - 1), /size limit/);
+  assert.equal(uploads, 0);
+  assert.equal(await gallery.uploadVideo(video, bytes.length), bytes.length);
+  assert.equal(video.galleryUrl, "https://gallery.example/short.mp4");
+  assert.equal(uploads, 1);
+  redirect = true;
+  await assert.rejects(gallery.uploadVideo({ ...video, galleryUrl: null }), /source host/);
+  assert.equal(uploads, 1, "Untrusted redirects must not result in uploads");
 });

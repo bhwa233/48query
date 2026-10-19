@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts --dry-run",
     "run": "tsx src/cli.ts",
+    "videos": "tsx src/videos.ts",
     "login": "node src/login.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint -c ../../.oxlintrc.json src --type-aware --ignore-pattern '**/*.mjs'"

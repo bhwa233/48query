@@ -9,6 +9,10 @@ type Pocket48Options = {
 };
 const DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
 export const COLLECTION_SOURCES: CollectionSource[] = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
+export type RoomVideo = {
+  id: string; messageId: string; sourceUrl: string; memberId: string; roomOwnerId: string; occurredAt: string;
+  declaredBytes: number | null; galleryUrl: string | null; thumbnailUrl: string | null; status: "pending" | "uploaded" | "failed";
+};
 
 export class Pocket48Source implements CollectorSource {
   readonly sources: CollectionSource[];
@@ -120,6 +124,37 @@ export class Pocket48Source implements CollectorSource {
   }
 
   async listMessages(member: CollectorMember, cursor: string | null) { return this.listContent(member, "room", cursor); }
+
+  // Explicit local short-video command; daily text/image collection remains
+  // independent. Album names and request ownership never establish authorship.
+  async listRoomVideos(member: CollectorMember, cursor: string | null) {
+    const room = await this.resolveRoom(member);
+    const content = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
+    const videos: RoomVideo[] = [];
+    let unverified = 0;
+    const rows = contentList(content).filter(value => string(object(value).sourceType)?.toUpperCase() === "VIDEO");
+    for (const value of rows) {
+      const raw = object(value);
+      const body = object(parsePocketJson(raw.bodys));
+      const url = string(body.url);
+      const at = timestamp(raw.createTime);
+      if (!url || !at) { unverified += 1; continue; }
+      const originals = await this.post("/im/api/v1/team/message/list/all", { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Date.parse(at) + 1, limit: 50 });
+      const original = contentList(originals).find(value => {
+        const row = object(value);
+        return timestamp(row.msgTime) === at && string(object(parsePocketJson(row.bodys)).url) === url;
+      });
+      const message = original ? normalizeMessage(original, member, "room", this.directory) : null;
+      if (!message || message.type !== "VIDEO") { unverified += 1; continue; }
+      const declaredBytes = Number(body.size);
+      videos.push({ id: createHash("sha256").update(url).digest("hex"), messageId: message.id, sourceUrl: url, memberId: message.memberId,
+        roomOwnerId: member.id, occurredAt: at, declaredBytes: Number.isSafeInteger(declaredBytes) && declaredBytes > 0 ? declaredBytes : null,
+        galleryUrl: null, thumbnailUrl: null, status: "pending" });
+    }
+    const next = string(object(content).nextTime);
+    if (contentList(content).length > 0 && next !== null && next === cursor) throw new Error("Pocket48 repeated the video catalog cursor.");
+    return { videos, unverified, observed: rows.length, nextCursor: next && next !== "0" && next !== "-1" ? next : null };
+  }
 
   async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
     let content: unknown;

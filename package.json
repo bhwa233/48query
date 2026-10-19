@@ -14,6 +14,7 @@
     "dev:api:db": "pnpm --filter @starter/api dev:db",
     "collector:dev": "pnpm --filter @starter/collector dev",
     "collector:run": "pnpm --filter @starter/collector run run",
+    "collector:videos": "pnpm --filter @starter/collector videos",
     "dev:all": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api\"",
     "dev:all:db": "concurrently -k -n web,api \"pnpm dev:web\" \"pnpm dev:api:db\"",
     "build": "pnpm build:web && pnpm build:api && pnpm build:api:db",
