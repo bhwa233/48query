@@ -235,3 +235,35 @@ test("persists media-page text before uploading without advancing its checkpoint
   assert.equal(result.messagesWritten, 1);
   assert.equal(store.units.find(unit => unit.sync)?.sync?.historyCursor, "history");
 });
+
+// Gallery production logs exposed Telegram 429s as HTTP 200/[]; pausing only
+// the failed file lets queued files keep hitting the same flood window.
+test("pauses all queued gallery uploads after an empty success response and retries", async context => {
+  const start = Date.parse("2026-10-19T00:00:00Z");
+  context.mock.timers.enable({ apis: ["Date", "setTimeout"], now: start });
+  const bytes = Buffer.from("00000018667479706d7034320000000069736f6d6d703432", "hex");
+  const attempts: number[] = [];
+  const gallery = new GalleryUploader({ fetchImpl: async url => {
+    if (!String(url).endsWith("/upload")) return new Response(bytes);
+    attempts.push(Date.now());
+    return Response.json(attempts.length === 1 ? [] : [{ src: "https://gallery.example/video.mp4" }]);
+  } });
+  const video = (id: string) => ({ id, sourceUrl: "https://kd48-nosdn.yunxinsvr.com/video", galleryUrl: null as string | null, thumbnailUrl: null as string | null, status: "pending" as const });
+  const first = video("first");
+  const second = video("second");
+  const done = Promise.all([gallery.uploadVideo(first), gallery.uploadVideo(second)]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(attempts, [start]);
+  assert.equal(first.galleryUrl, null, "An empty response cannot mark a file uploaded");
+  context.mock.timers.tick(29_999);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(attempts.length, 1, "Other waiting files must also respect the cooldown");
+  context.mock.timers.tick(1);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(attempts, [start, start + 30_000]);
+  context.mock.timers.tick(3100);
+  await done;
+  assert.deepEqual(attempts, [start, start + 30_000, start + 33_100]);
+  assert.equal(first.galleryUrl, "https://gallery.example/video.mp4");
+  assert.equal(second.galleryUrl, first.galleryUrl);
+});

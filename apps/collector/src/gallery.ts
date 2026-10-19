@@ -11,7 +11,29 @@ export class MediaSizeLimitError extends Error {
 // Reuse galaxy-spider's /upload multipart protocol with native Node fetch.
 // Preserve original bytes (including animated GIFs); no image processor needed.
 export class GalleryUploader {
+  private uploadTurn: Promise<void> = Promise.resolve();
+  private lastUploadAt = 0;
   constructor(private readonly options: { baseUrl?: string; fetchImpl?: typeof fetch } = {}) {}
+
+  private async uploadResponse(url: string, form: FormData): Promise<{ uploaded: Response; payload: unknown }> {
+    let release!: () => void;
+    const previous = this.uploadTurn;
+    this.uploadTurn = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      // The gallery forwards files to Telegram. Its live logs confirmed 429s
+      // hidden behind HTTP 200/[]; serialize uploads below 20 files/minute.
+      const wait = 3100 - (Date.now() - this.lastUploadAt);
+      if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+      this.lastUploadAt = Date.now();
+      const uploaded = await (this.options.fetchImpl ?? fetch)(url, { method: "POST", body: form, redirect: "error", signal: AbortSignal.timeout(60_000) });
+      const payload: unknown = uploaded.ok ? await uploaded.json() : null;
+      // Pause the shared queue, including other files already waiting. The
+      // gallery strips Telegram's retry_after (observed live: 23–25 seconds).
+      if (uploaded.status === 429 || (Array.isArray(payload) && payload.length === 0)) this.lastUploadAt = Date.now() + 30_000 - 3100;
+      return { uploaded, payload };
+    } finally { release(); }
+  }
 
   private async sourceResponse(sourceUrl: string, method: "GET" | "HEAD", headers: Record<string, string>) {
     const fetchImpl = this.options.fetchImpl ?? fetch;
@@ -47,7 +69,6 @@ export class GalleryUploader {
 
   private async uploadFile(image: GalleryFile, kind: "image" | "video", maxBytes: number): Promise<number> {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_BYTES) throw new Error("Media size limit must be between 1 byte and 50 MiB.");
-    const fetchImpl = this.options.fetchImpl ?? fetch;
     const response = await this.sourceResponse(image.sourceUrl, "GET", { Accept: `${kind}/*` });
     if (!response.ok || !response.body) throw new Error("Media download failed.");
     if (Number(response.headers.get("Content-Length")) > maxBytes) { await response.body.cancel(); throw new MediaSizeLimitError(); }
@@ -79,8 +100,9 @@ export class GalleryUploader {
     form.append("file", new Blob([new Uint8Array(bytes)], { type: format[1] }), `${image.id}.${format[0]}`);
     for (let attempt = 0; attempt < 3; attempt++) {
       let uploaded: Response;
+      let payload: unknown;
       try {
-        uploaded = await fetchImpl(`${base.origin}/upload`, { method: "POST", body: form, redirect: "error", signal: AbortSignal.timeout(60_000) });
+        ({ uploaded, payload } = await this.uploadResponse(`${base.origin}/upload`, form));
       } catch {
         if (attempt === 2) throw new Error("Gallery upload network failure.");
         await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
@@ -92,7 +114,9 @@ export class GalleryUploader {
         continue;
       }
       if (!uploaded.ok) throw new Error(`Gallery upload failed (HTTP ${uploaded.status}).`);
-      const payload: unknown = await uploaded.json();
+      if (Array.isArray(payload) && payload.length === 0 && attempt < 2) {
+        continue;
+      }
       const first = Array.isArray(payload) ? payload[0] as { src?: unknown; thumbnail?: { src?: unknown } } | undefined : undefined;
       const safeUrl = (value: unknown) => {
         if (typeof value !== "string" || value.length > 2000) return null;
