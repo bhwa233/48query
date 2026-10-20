@@ -4,16 +4,19 @@ import { HttpIngestStore } from "./http-store";
 import { COLLECTION_SOURCES, Pocket48Source } from "./pocket48-source";
 import { GalleryUploader, MediaSizeLimitError } from "./gallery";
 import type { VideoAttachment } from "@starter/shared";
-import type { CollectionSource, CollectorStore } from "./types";
+import type { CollectionSource, CollectorStore, SourceSync } from "./types";
 import { createPocket48Pa, CREDENTIAL_PATH } from "./pocket48-auth.mjs";
 import { runBatch } from "./run";
 import { retryMedia } from "./media-retry";
 import { loadProductionCredential } from "./credentials";
+import { collectionSince, openScopedCheckpoints } from "./collection-scope";
+import { dirname, join } from "node:path";
 
 const backfillOnly = process.argv.includes("--backfill");
 const mediaOnly = process.argv.includes("--retry-media");
 const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_RUN === "1";
 const sourceName = process.env.COLLECTOR_SOURCE ?? (mediaOnly ? "pocket48" : "demo");
+const since = sourceName === "pocket48" ? collectionSince() : undefined;
 if (mediaOnly && process.env.COLLECTOR_DEFER_MEDIA === "1") throw new Error("Unset COLLECTOR_DEFER_MEDIA before retrying media.");
 if (mediaOnly && (dryRun || sourceName !== "pocket48")) throw new Error("Media retries require the Pocket48 source and a writable ingestion store.");
 if (backfillOnly && (mediaOnly || dryRun || sourceName !== "pocket48")) throw new Error("Backfill requires a writable Pocket48 source.");
@@ -22,9 +25,10 @@ const memberScope = process.env["COLLECTOR_MEMBER_SCOPE"]?.trim() || "followed";
 if (memberScope !== "followed" && memberScope !== "all") throw new Error("COLLECTOR_MEMBER_SCOPE must be followed or all.");
 const endpoint = process.env["INGEST_API_URL"];
 const authKey = process.env["INGEST_KEY"];
-const store: CollectorStore = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey) : new DryRunStore();
+const store: CollectorStore = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey, since) : new DryRunStore();
 const stored = sourceName === "pocket48" && !mediaOnly ? await loadProductionCredential() : null;
 const sourceOptions = {
+  since,
   ["token"]: process.env["POCKET48_TOKEN"] ?? stored?.token ?? "",
   deviceId: process.env["POCKET48_DEVICE_ID"] ?? stored?.deviceId,
   pa: process.env["POCKET48_PA"],
@@ -84,7 +88,12 @@ const retries = await retryMedia(store, { archiveImage, archiveVideo, mediaOnly,
   imageLimit: Number(process.env.COLLECTOR_IMAGE_RETRY_LIMIT ?? (mediaOnly ? 100 : 25)),
   maxBatches: mediaOnly ? Number(process.env.COLLECTOR_MEDIA_RETRY_BATCHES ?? 100) : 1 });
 const retryFailures = retries.failures;
-const runOptions = { maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
+const memoryCheckpoints = new Map<string, SourceSync[]>();
+const checkpoints = since && !mediaOnly ? dryRun ? {
+  read: (id: string) => memoryCheckpoints.get(id) ?? [],
+  write: async (id: string, sync: SourceSync) => { memoryCheckpoints.set(id, [...(memoryCheckpoints.get(id) ?? []).filter(item => item.source !== sync.source), sync]); },
+} : await openScopedCheckpoints(process.env.COLLECTOR_CHECKPOINT_STATE ?? join(dirname(CREDENTIAL_PATH), "collection-scope.json"), since) : undefined;
+const runOptions = { since, checkpoints, maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
 let errorCount = 0;
 if (backfillOnly) {
   if (mediaOnly || dryRun || !(source instanceof Pocket48Source)) throw new Error("Backfill requires a writable Pocket48 source.");
@@ -95,11 +104,12 @@ if (backfillOnly) {
     for (const stream of source.sources) {
       const singleSource = { sources: [stream], listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
       try {
-        const sync = (await store.getSyncState(member.id))?.sources?.find(item => item.source === stream);
+        const sync = (checkpoints?.read(member.id) ?? (await store.getSyncState(member.id))?.sources)?.find(item => item.source === stream);
         const pending = (stream === "album" || stream === "post_images") && store.pendingCatalog ? await store.pendingCatalog(member.id, stream, 1) : [];
         if (sync?.historyDone && !pending.length) continue;
         const result = await runBatch(singleSource, store, runOptions);
         errorCount += result.errorCount;
+        if (since && !result.scopeComplete) errorCount += 1;
         console.log(JSON.stringify({ event: "backfill_source_finished", memberId: member.id, source: stream, ...result }));
       } catch (error) {
         // A bridge outage can also interrupt error-state persistence. Leave its
@@ -112,6 +122,7 @@ if (backfillOnly) {
 } else if (!mediaOnly) {
   const result = await runBatch(batchSource, store, runOptions);
   errorCount = result.errorCount;
+  if (since && !result.scopeComplete) errorCount += 1;
   console.log(JSON.stringify({ event: "batch_finished", ...result }));
 }
 console.log(JSON.stringify({ event: "collector_finished", errorCount, retryFailures }));

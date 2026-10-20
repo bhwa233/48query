@@ -1,10 +1,12 @@
 import type { CatalogEntry } from "@starter/shared";
 import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStore, IngestUnit, SourceSync } from "./types";
+import type { ScopedCheckpoints } from "./collection-scope";
 
 const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+  if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
   const batchId = options.batchId ?? `batch-${statDate}-${Date.now()}`;
@@ -23,21 +25,35 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   let messagesWritten = 0;
   let imageFailures = 0;
   let videoFailures = 0;
+  let sourcesPending = 0;
   const streams = source.sources ?? ["room"];
 
   for (const member of members) {
     const state = await store.getSyncState(member.id);
+    if (state && options.checkpoints) state.sources = options.checkpoints.read(member.id);
     let covered = false;
     let roomSync: SourceSync | undefined;
     let verifiedRoomContent = false;
-    const unit = (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]): IngestUnit => ({ catalog, batchId, statDate, startedAt, member, messages, recordings: [], messageCursor: state?.messageCursor ?? null, recordingCursor: state?.recordingCursor ?? null, totalMembers: members.length, membersCovered, errorCount, ...(sync ? { sync } : {}) });
+    const unit = (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]): IngestUnit => ({ catalog, batchId, statDate, startedAt, member, messages, recordings: [], messageCursor: state?.messageCursor ?? null, recordingCursor: state?.recordingCursor ?? null, totalMembers: members.length, membersCovered, errorCount, ...(sync && !options.checkpoints ? { sync } : {}) });
+    const persist = async (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]) => {
+      await store.ingestUnit(unit(messages, sync, catalog));
+      if (sync) await options.checkpoints?.write(member.id, sync);
+    };
     // Register before any source can fail, preserving the original error on completion.
     await store.ingestUnit(unit([]));
     for (const stream of streams) {
-      let sync = structuredClone(state?.sources?.find(item => item.source === stream) ?? emptySync(stream));
+      let sync = structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream));
       try {
-        const readPage = (cursor: string | null) => source.listContent ? source.listContent(member, stream, cursor) : source.listMessages(member, cursor);
+        const readPage = async (cursor: string | null) => {
+          const page = await (source.listContent ? source.listContent(member, stream, cursor) : source.listMessages(member, cursor));
+          if (!options.since) return page;
+          const boundary = page.boundary ?? page.items.map(item => ({ id: item.id, occurredAt: item.occurredAt }));
+          const times = boundary.map(item => Date.parse(item.occurredAt));
+          const reached = page.reachedSince || times.length > 0 && times.every((at, index) => Number.isFinite(at) && (index === 0 || at <= times[index - 1]!)) && times.some(at => at < Date.parse(options.since!));
+          return { ...page, items: page.items.filter(item => Date.parse(item.occurredAt) >= Date.parse(options.since!)), boundary: boundary.filter(item => Date.parse(item.occurredAt) >= Date.parse(options.since!)), nextCursor: reached ? null : page.nextCursor };
+        };
         const write = async (messages: CollectorMessage[], next: SourceSync, catalog?: CatalogEntry[]) => {
+          if (options.since) messages = messages.filter(message => Date.parse(message.occurredAt) >= Date.parse(options.since!));
           // Persist attributable content before slow external uploads. Leave the
           // checkpoint unchanged until all upload results have been recorded, so
           // interruption can safely replay the page without losing its text.
@@ -75,7 +91,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             }
           }
           for (const video of videos) Object.assign(video, uniqueVideos.get(video.id));
-          await store.ingestUnit(unit(messages, next, catalog));
+          await persist(messages, next, catalog);
           sync = next;
           messagesWritten += messages.length;
           if (messages.some(message => !["event", "excluded", "unknown"].includes(message.kind ?? "text"))) covered = true;
@@ -120,7 +136,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             lastNonemptyAt: page.items.some(item => !["event", "excluded", "unknown"].includes(item.kind ?? "text")) ? now : sync.lastNonemptyAt,
             ...(finished ? { latestAt: newestAt ?? sync.latestAt, latestIds: newestIds.length ? newestIds : sync.latestIds, incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [] }
               : { incrementalCursor: page.nextCursor, pendingLatestAt: newestAt, pendingLatestIds: newestIds }),
-            ...(initial && (observed > 0 || page.nextCursor !== null) ? { historyCursor: page.nextCursor, historyDone: page.nextCursor === null } : {}),
+            ...(initial && (options.since || observed > 0 || page.nextCursor !== null) ? { historyCursor: page.nextCursor, historyDone: page.nextCursor === null } : {}),
           };
           await write(page.items, next, page.catalog);
           if (finished) break;
@@ -150,21 +166,22 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         errorCount += 1;
         lastError = error instanceof Error ? error.message : "Collection failed.";
         sync = { ...sync, status: "failed", lastError: lastError.slice(0, 1000) };
-        await store.ingestUnit(unit([], sync));
+        await persist([], sync);
         if (stream === "room") roomSync = sync;
         console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: stream, error: lastError }));
       }
+      if (!sync.historyDone || sync.incrementalCursor !== null || sync.status === "failed") sourcesPending += 1;
     }
     // Album verification can find genuine older member messages beyond pages of
     // fan chat. Record that evidence without changing newest/history boundaries.
     if (roomSync && !roomSync.lastNonemptyAt) {
       const now = new Date().toISOString();
-      if (verifiedRoomContent) await store.ingestUnit(unit([], { ...roomSync,
-        ...(roomSync.status === "failed" ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now }));
-      else if (roomSync.status !== "failed") {
+      if (verifiedRoomContent) await persist([], { ...roomSync,
+        ...(roomSync.status === "failed" ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now });
+      else if (roomSync.status !== "failed" && !(options.since && roomSync.historyDone)) {
         errorCount += 1;
         lastError = "No attributable member room messages observed yet; collection is not verified.";
-        await store.ingestUnit(unit([], { ...roomSync, status: "failed", lastError }));
+        await persist([], { ...roomSync, status: "failed", lastError });
         console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: "room", error: lastError }));
       }
     }
@@ -174,5 +191,5 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   if (imageFailures > 0) { errorCount += imageFailures; lastError = `${imageFailures} image uploads failed; retained for retry.`; }
   if (videoFailures > 0) { errorCount += videoFailures; lastError = `${videoFailures} video uploads failed; retained for retry.`; }
   await store.completeBatch({ batchId, completedAt: new Date().toISOString(), membersCovered, totalMembers: members.length, errorCount, errorMessage: lastError });
-  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures };
+  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, scopeComplete: sourcesPending === 0 && errorCount === 0 };
 }

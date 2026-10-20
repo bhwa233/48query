@@ -2,12 +2,14 @@ import type { CatalogEntry } from "@starter/shared";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
-import { rosterName, type RosterCandidate } from "./group-roster";
+import { directoryEntries, rosterName, type RosterCandidate } from "./group-roster";
+import { collectionSince } from "./collection-scope";
 
 type Pocket48Options = {
   token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
-  apiBaseUrl?: string; directoryUrl?: string; minIntervalMs?: number; memberScope?: "followed" | "all";
+  apiBaseUrl?: string; directoryUrl?: string; historyDirectoryUrl?: string; minIntervalMs?: number; memberScope?: "followed" | "all";
   requestedMemberId?: string;
+  since?: string | null;
   readVerifiedPostImages?: (memberId: string, imageIds: string[]) => Promise<CollectorMessage[]>;
   readVerifiedMedia?: (roomId: string, assets: { id: string; occurredAt: string }[]) => Promise<CollectorMessage[]>;
   albumOriginalPages?: number;
@@ -24,6 +26,7 @@ export class Pocket48Source implements CollectorSource {
   readonly sources: CollectionSource[];
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
+  private readonly since: string | null;
   private lastRequestAt = 0;
   private requestTurn: Promise<void> = Promise.resolve();
   private readonly rooms = new Map<string, Promise<{ channelId: string; serverId: string; roomId: string | null }>>();
@@ -38,9 +41,19 @@ export class Pocket48Source implements CollectorSource {
     if (options.minIntervalMs !== undefined && (!Number.isFinite(options.minIntervalMs) || options.minIntervalMs < 0)) throw new Error("POCKET48_MIN_INTERVAL_MS must be a finite non-negative number.");
     if (options.albumOriginalPages !== undefined && (!Number.isInteger(options.albumOriginalPages) || options.albumOriginalPages < 1 || options.albumOriginalPages > 20)) throw new Error("Album original page budget must be between 1 and 20.");
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.since = options.since === null ? null : collectionSince(options.since);
     this.baseUrl = (options.apiBaseUrl ?? "https://pocketapi.48.cn").replace(/\/$/, "");
     const order: CollectionSource[] = ["room", "essence", "posts", "weibo", "room_posts", "album", "post_images"];
     this.sources = [...(options.sources ?? COLLECTION_SOURCES)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }
+
+  private inRange(at: string | null) { return !this.since || at !== null && Date.parse(at) >= Date.parse(this.since); }
+  private scopedPage(page: CollectorPage<CollectorMessage>): CollectorPage<CollectorMessage> {
+    if (!this.since) return page;
+    const times = (page.boundary ?? []).map(item => Date.parse(item.occurredAt));
+    const reachedSince = times.length > 0 && times.every((at, index) => Number.isFinite(at) && (index === 0 || at <= times[index - 1]!)) && times.some(at => at < Date.parse(this.since!));
+    return { ...page, items: page.items.filter(item => this.inRange(item.occurredAt)), reachedSince,
+      nextCursor: reachedSince ? null : page.nextCursor };
   }
 
   private async rateLimit() {
@@ -99,18 +112,7 @@ export class Pocket48Source implements CollectorSource {
     await this.rateLimit();
     const response = await this.fetchImpl(this.options.directoryUrl ?? DIRECTORY_URL, { signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`Pocket48 directory request failed with HTTP ${response.status}`);
-    const root = object(parsePocketJson(await response.text()));
-    const entries = Array.isArray(root.roomId) ? root.roomId : Array.isArray(root.members) ? root.members : [];
-    for (const entry of entries) {
-      const item = object(entry);
-      const id = string(item.id);
-      const name = string(item.ownerName ?? item.name ?? item.nickname);
-      // The community room directory also lists Pocket48's system account.
-      // Its official user profile reports isStar=false, userRole=999.
-      if (!id || !name || id === "63") continue;
-      this.directory.set(id, { id, name, pinyin: string(item.pinyin), groupName: string(item.groupName) ?? "未知", team: string(item.team ?? item.periodName),
-        roomId: string(item.roomId), channelId: string(item.channelId), serverId: string(item.serverId), status: "active" });
-    }
+    this.addDirectory(parsePocketJson(await response.text()));
     if (this.options.requestedMemberId && !this.directory.has(this.options.requestedMemberId)) await this.resolveDirectoryMember(this.options.requestedMemberId);
     if (this.options.memberScope === "all") return [...this.directory.values()];
     const followed = object(await this.post("/user/api/v1/friendships/friends/id", {}));
@@ -122,9 +124,28 @@ export class Pocket48Source implements CollectorSource {
     return members;
   }
 
+  private addDirectory(payload: unknown) {
+    const entries = directoryEntries(payload);
+    for (const entry of entries) {
+      const item = object(entry);
+      const id = string(item.id);
+      const name = string(item.ownerName ?? item.name ?? item.nickname);
+      // The community room directory also lists Pocket48's system account.
+      // Its official user profile reports isStar=false, userRole=999.
+      if (!id || !name || id === "63") continue;
+      this.directory.set(id, { id, name, pinyin: string(item.pinyin), groupName: string(item.groupName) ?? "未知", team: string(item.team ?? item.periodName),
+        roomId: string(item.roomId), channelId: string(item.channelId), serverId: string(item.serverId), status: "active" });
+    }
+  }
+
   async prepareGroupDirectory(verifiedMembers: CollectorMember[] = []) {
-    const members = await this.listMembers();
-    for (const member of members) this.groupDirectory.set(member.id, member);
+    await this.listMembers();
+    if (this.options.historyDirectoryUrl) {
+      const response = await this.fetchImpl(this.options.historyDirectoryUrl, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Historical member directory request failed with HTTP ${response.status}`);
+      this.addDirectory(parsePocketJson(await response.text()));
+    }
+    for (const member of this.directory.values()) this.groupDirectory.set(member.id, member);
     this.directory.clear();
     for (const member of verifiedMembers) this.directory.set(member.id, member);
   }
@@ -161,9 +182,10 @@ export class Pocket48Source implements CollectorSource {
           catch (error) {
             if ([401, 403].includes(Number(object(error instanceof Error ? error.cause : null).http)) || [401, 403, 1001, 2001].includes(Number(object(error instanceof Error ? error.cause : null).business))) throw error;
           }
+          if (info.userId !== undefined && string(info.userId) !== id) throw new Error("Official member archives returned a different user ID.");
           const previous = this.groupDirectory.get(id) ?? this.directory.get(id);
           if (!candidate.officialIds.length && ![info.starGroupName, info.periodName].some(value => /^(?:SNH48|BEJ48|GNZ48|SHY48|CKG48|CGT48|IDFT|IDOLS\s*FT)(?:\b|\s)/i.test(string(value) ?? ""))) continue;
-          verified.push({ ...previous, id, name: candidate.name,
+          verified.push({ ...previous, id, name: rosterName(string(user.starName) ?? candidate.name),
             groupName: string(info.starGroupName) ?? (candidate.groups.length === 1 ? candidate.groups[0]! : previous?.groupName ?? "未知"),
             team: string(info.starTeamName) ?? (candidate.teams.length === 1 ? candidate.teams[0] : previous?.team),
             pinyin: string(info.pinyin) ?? previous?.pinyin, status: previous?.status ?? "active" });
@@ -238,6 +260,7 @@ export class Pocket48Source implements CollectorSource {
 
   private async legacyMediaPage(member: CollectorMember, kind: "IMAGE" | "VIDEO", cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
     if (cursor !== null && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) throw new Error("Legacy media history completeness remains unverified.");
+    if (this.since && Number(cursor) > 0 && Number(cursor) < Date.parse(this.since)) return { items: [], boundary: [], observed: 0, reachedSince: true, nextCursor: null };
     const roomId = await this.resolveLegacyRoom(member);
     const content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: kind, ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
     const rows = contentList(content);
@@ -266,11 +289,17 @@ export class Pocket48Source implements CollectorSource {
     const next = string(object(content).nextTime);
     const nextCursor = next && next !== "0" && next !== "-1" ? next : null;
     if (nextCursor && (!/^\d+$/.test(nextCursor) || !Number.isSafeInteger(Number(nextCursor)) || (Number(cursor) > 0 && Number(nextCursor) >= Number(cursor)))) throw new Error("Pocket48 repeated or invalidated the legacy media cursor.");
-    return { items, boundary, observed: rows.length, nextCursor };
+    return this.scopedPage({ items, boundary, observed: rows.length, nextCursor });
   }
 
   private async legacyRoomMedia(member: CollectorMember, kind: "IMAGE" | "VIDEO", cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
     const page = await this.legacyMediaPage(member, kind, cursor);
+    if (page.reachedSince) {
+      // The two feeds are independently ordered. Finish images, then inspect
+      // the newest videos; neither feed proves ordinary text completeness.
+      return { ...page, reachedSince: false, boundary: page.boundary?.filter(item => this.inRange(item.occurredAt)),
+        nextCursor: kind === "IMAGE" ? "legacy-video:0" : "legacy-video:end" };
+    }
     if (!page.items.length && page.nextCursor === null) {
       if (kind === "IMAGE") return this.legacyRoomMedia(member, "VIDEO", null);
       throw new Error("Legacy room returned no further attributable media; ordinary text history remains unverified.");
@@ -301,7 +330,7 @@ export class Pocket48Source implements CollectorSource {
     });
     const next = string(object(content).nextTime);
     if (next === nextTime && next !== "0") throw new Error("Pocket48 repeated the legacy room cursor.");
-    return { items, boundary, observed: rows.length, nextCursor: `legacy:${roomId}:${next && next !== "0" && next !== "-1" ? next : "end"}` };
+    return this.scopedPage({ items, boundary, observed: rows.length, nextCursor: `legacy:${roomId}:${next && next !== "0" && next !== "-1" ? next : "end"}` });
   }
 
   // Reuse the album's real timestamps as seek points across empty history
@@ -311,6 +340,7 @@ export class Pocket48Source implements CollectorSource {
     const parts = cursor?.startsWith("archive:") ? cursor.split(":").slice(seek ? 2 : 1) : [cursor ?? "0", "0"];
     if (parts.length !== 2 || !parts.every(value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)))) throw new Error("Invalid historical room cursor.");
     let time = Number(parts[0]);
+    if (this.since && time > 0 && time < Date.parse(this.since)) return { message: [], nextTime: 0 };
     const catalogCursor = parts[1]!;
     const read = async (nextTime: number) => {
       const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime, limit: 50 };
@@ -335,9 +365,11 @@ export class Pocket48Source implements CollectorSource {
           let next: string | null = null;
           try {
             const album = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(catalogCursor) });
-            for (const row of contentList(album)) { const at = timestamp(object(row).createTime); if (at) times.push(Date.parse(at) + 1); }
+            const rows = contentList(album);
+            for (const row of rows) { const at = timestamp(object(row).createTime); if (at && this.inRange(at)) times.push(Date.parse(at) + 1); }
             const value = string(object(album).nextTime);
             next = value && value !== "0" && value !== "-1" ? value : null;
+            if (this.since && rows.length && rows.every(row => { const at = timestamp(object(row).createTime); return at && !this.inRange(at); })) next = null;
             if (next === catalogCursor && times.length) throw new Error("Pocket48 repeated the historical anchor cursor.");
           } catch (error) { if (!(error instanceof Error) || (object(error.cause).business !== "500" || object(error.cause).http !== 200)) throw error; }
           if (catalogCursor === "0") {
@@ -345,7 +377,7 @@ export class Pocket48Source implements CollectorSource {
               const essence = await this.post("/im/api/v1/team/essence/message/list", { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: 0, limit: 100 });
               for (const row of Object.keys(object(essence)).length ? contentList(essence) : []) {
                 const message = normalizeMessage(row, member, "essence", this.directory);
-                if (message?.memberId === member.id) times.push(Date.parse(message.occurredAt) + 1);
+                if (message?.memberId === member.id && this.inRange(message.occurredAt)) times.push(Date.parse(message.occurredAt) + 1);
               }
             } catch (error) {
               // Essence and album availability are independent. Authentication
@@ -358,7 +390,7 @@ export class Pocket48Source implements CollectorSource {
         this.archiveAnchors.set(key, anchors);
       }
       const page = await anchors;
-      const anchor = page.times.find(at => !time || at < time);
+      const anchor = page.times.find(at => (!this.since || at > Date.parse(this.since)) && (!time || at < time));
       if (anchor !== undefined) { time = anchor; content = await read(time); }
       else {
         if (anchor === undefined && !page.next) throw new Error("Historical room has no further anchors; history completeness remains unverified.", { cause: "history_anchors_exhausted" });
@@ -384,11 +416,13 @@ export class Pocket48Source implements CollectorSource {
   // Explicit local short-video command; daily text/image collection remains
   // independent. Album names and request ownership never establish authorship.
   async listRoomVideos(member: CollectorMember, cursor: string | null) {
+    if (this.since && /^\d{13}$/.test(cursor ?? "") && Number(cursor) < Date.parse(this.since)) return { videos: [], unverified: 0, observed: 0, nextCursor: null };
     const room = await this.resolveRoom(member);
     const content = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
     const videos: RoomVideo[] = [];
     let unverified = 0;
-    const rows = contentList(content).filter(value => string(object(value).sourceType)?.toUpperCase() === "VIDEO");
+    const allRows = contentList(content);
+    const rows = allRows.filter(value => string(object(value).sourceType)?.toUpperCase() === "VIDEO" && this.inRange(timestamp(object(value).createTime)));
     for (const value of rows) {
       const raw = object(value);
       const body = object(parsePocketJson(raw.bodys));
@@ -409,7 +443,9 @@ export class Pocket48Source implements CollectorSource {
     }
     const next = string(object(content).nextTime);
     if (contentList(content).length > 0 && next !== null && next === cursor) throw new Error("Pocket48 repeated the video catalog cursor.");
-    return { videos, unverified, observed: rows.length, nextCursor: next && next !== "0" && next !== "-1" ? next : null };
+    const times = allRows.map(value => timestamp(object(value).createTime));
+    const reachedSince = this.since && times.length > 0 && times.every((at, index) => at !== null && (index === 0 || Date.parse(at) <= Date.parse(times[index - 1]!))) && times.some(at => !this.inRange(at));
+    return { videos, unverified, observed: rows.length, nextCursor: !reachedSince && next && next !== "0" && next !== "-1" ? next : null };
   }
 
   async retryCatalog(member: CollectorMember, source: "album" | "post_images", entries: CatalogEntry[]) {
@@ -417,6 +453,7 @@ export class Pocket48Source implements CollectorSource {
   }
 
   async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null, retryEntries?: CatalogEntry[]): Promise<CollectorPage<CollectorMessage>> {
+    if (this.since && !["posts", "post_images"].includes(source) && /^\d{13}$/.test(cursor ?? "") && Number(cursor) < Date.parse(this.since)) return { items: [], boundary: [], observed: 0, reachedSince: true, nextCursor: null };
     // Reuse the private raw JSON queue for versioned lookup progress, keeping
     // the complete original catalog row and its stable identity intact.
     const retryRows = retryEntries?.map(entry => {
@@ -474,7 +511,11 @@ export class Pocket48Source implements CollectorSource {
     }
     // Live empty essence lists omit their optional list field entirely. This
     // endpoint is finite (no pagination cursor); other unknown shapes still fail.
-    const values = source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    const allValues = source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    const rawTime = (value: unknown) => { const item = object(value), post = postObject(item); return timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? item.createAt ?? post.createAt ?? post.ctime); };
+    // Discard old catalog entries BEFORE any original-message lookup or media
+    // request. Keep the original boundary solely to stop reverse pagination.
+    const values = allValues.filter(value => this.inRange(rawTime(value)));
     if (historicalRoom && source === "essence" && (!values.length || values.some(value => normalizeMessage(value, member, source, this.directory)?.memberId !== member.id))) {
       throw new Error("Pocket48 historical essence candidate could not be verified from target-member messages; source retained for retry.");
     }
@@ -632,12 +673,12 @@ export class Pocket48Source implements CollectorSource {
     // discovering an older message must not move the room pagination checkpoint.
     const retained = new Map(items.map(message => [message.id, message]));
     for (const message of originalsFound.values()) if (!retained.has(message.id)) retained.set(message.id, message);
-    const result = [...retained.values()];
+    const result = [...retained.values()].filter(message => this.inRange(message.occurredAt));
     console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: result.length, images: result.reduce((count, item) => count + (item.images?.length ?? 0), 0), videos: result.reduce((count, item) => count + (item.videos?.length ?? 0), 0), ownerMessages: result.filter(item => item.memberId === member.id).length }));
     const root = object(content);
     const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
     if (rawCursor !== null && rawCursor !== "0" && rawCursor !== "-1" && rawCursor === cursor) throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
-    const boundary = values.flatMap(value => {
+    const boundary = allValues.flatMap(value => {
       const item = object(value);
       const post = postObject(item);
       const id = string(item.imgId ?? post.postId ?? item.msgIdServer ?? item.msgIdClient ?? item.msgidClient ?? item.postId ?? item.id);
@@ -647,7 +688,7 @@ export class Pocket48Source implements CollectorSource {
       const assetId = id ?? (source === "album" ? string(object(parsePocketJson(item.bodys)).url) : null);
       return assetId && occurredAt ? [{ id: source === "album" ? createHash("sha256").update(assetId).digest("hex") : assetId, occurredAt }] : [];
     });
-    if (values.length > 0 && boundary.length !== values.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
+    if (allValues.length > 0 && boundary.length !== allValues.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
     const catalog = source === "album" || source === "post_images" ? values.map(value => {
       const raw = object(value);
       const url = source === "album" ? string(object(parsePocketJson(raw.bodys)).url) : imageUrl(raw.imgUrl);
@@ -657,6 +698,6 @@ export class Pocket48Source implements CollectorSource {
       const rawJson = !resolved && progress && Object.keys(progress).length ? JSON.stringify({ format: "pocket48-album-lookup-v1", item: value, originalCursors: progress }) : JSON.stringify(value);
       return { id: createHash("sha256").update(JSON.stringify([member.id, source, url, at])).digest("hex"), source, rawJson, status: resolved ? "resolved" as const : "pending" as const };
     }) : undefined;
-    return { items: result, unverified, catalog, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
+    return this.scopedPage({ items: result, unverified, catalog, observed: allValues.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null });
   }
 }

@@ -85,12 +85,16 @@ export class GalleryUploader {
       }
     } catch (error) { await reader.cancel(); throw error; }
     const bytes = Buffer.concat(chunks, size);
+    const brand = bytes.subarray(8, 12).toString("ascii");
+    const isoMedia = bytes.length >= 16 && bytes.subarray(4, 8).toString("ascii") === "ftyp";
     const imageFormat = bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) ? ["jpeg", "image/jpeg"]
       : bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? ["png", "image/png"]
         : /^GIF8[79]a$/.test(bytes.subarray(0, 6).toString("ascii")) ? ["gif", "image/gif"]
-          : bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP" ? ["webp", "image/webp"] : null;
-    const brand = bytes.subarray(8, 12).toString("ascii");
-    const videoFormat = bytes.length >= 16 && bytes.subarray(4, 8).toString("ascii") === "ftyp"
+          : bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP" ? ["webp", "image/webp"]
+            // Some historical photos are HEIC despite image/jpeg headers.
+            // Archive their original bytes with the actual container type.
+            : isoMedia && /^(?:heic|heix)$/.test(brand) ? ["heic", "image/heic"] : null;
+    const videoFormat = isoMedia
       ? brand === "qt  " ? ["mov", "video/quicktime"] : /^(?:isom|iso[2-9]|mp4[12]|avc1|M4V |dash)$/.test(brand) ? ["mp4", "video/mp4"] : null : null;
     const format = kind === "video" ? videoFormat : imageFormat;
     if (!format) throw new Error(`Downloaded resource is not a supported ${kind}.`);

@@ -4,10 +4,12 @@ import { GalleryUploader } from "./gallery";
 import { Pocket48Source } from "./pocket48-source";
 import { object, parsePocketJson, string } from "./pocket48-content";
 import { CREDENTIAL_PATH, createPocket48Pa, loadCredential } from "./pocket48-auth.mjs";
+import { collectionSince } from "./collection-scope";
 
 const memberId = process.env.COLLECTOR_MEMBER_ID?.trim();
 if (!memberId) throw new Error("Set COLLECTOR_MEMBER_ID to inspect that member's short videos.");
 const upload = process.argv.includes("--upload");
+const since = collectionSince();
 const maxMiB = Number(process.env.COLLECTOR_VIDEO_MAX_MIB ?? 50);
 const maxPages = Number(process.env.COLLECTOR_VIDEO_MAX_PAGES ?? 1);
 if (!Number.isFinite(maxMiB) || maxMiB <= 0 || maxMiB > 50) throw new Error("COLLECTOR_VIDEO_MAX_MIB must be greater than 0 and no more than 50.");
@@ -15,7 +17,7 @@ if (!Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100) throw new
 const maxBytes = Math.floor(maxMiB * 1024 * 1024);
 const credential = await loadCredential();
 if (!credential?.token) throw new Error("No local Pocket48 credential found. Run the login command first.");
-const source = new Pocket48Source({ token: credential.token, deviceId: credential.deviceId, paFactory: createPocket48Pa, memberScope: "all", minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000) });
+const source = new Pocket48Source({ token: credential.token, since, deviceId: credential.deviceId, paFactory: createPocket48Pa, memberScope: "all", minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000) });
 const member = (await source.listMembers()).find(member => member.id === memberId);
 if (!member) throw new Error("Selected member is not in the member directory.");
 const gallery = new GalleryUploader({ baseUrl: process.env.GALLERY_BASE_URL });
@@ -28,7 +30,7 @@ const entries = new Map<string, Record<string, unknown>>((Array.isArray(previous
   const url = string(row.sourceUrl);
   return url ? [[url, row] as const] : [];
 }));
-let cursor = process.env.COLLECTOR_VIDEO_CURSOR?.trim() || null;
+let cursor = previous.since === since ? process.env.COLLECTOR_VIDEO_CURSOR?.trim() || string(previous.albumNextCursor) : null;
 let observed = 0;
 let uploaded = 0;
 let cached = 0;
@@ -38,7 +40,7 @@ let totalBytes = 0;
 const persist = async () => {
   await mkdir(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
   const temporary = `${manifestPath}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ version: 1, checkedAt: new Date().toISOString(), memberId, maxBytes, albumNextCursor: cursor, videos: [...entries.values()] }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(temporary, `${JSON.stringify({ version: 1, since, checkedAt: new Date().toISOString(), memberId, maxBytes, albumNextCursor: cursor, videos: [...entries.values()] }, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, manifestPath);
 };
 for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {

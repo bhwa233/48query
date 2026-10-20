@@ -4,12 +4,14 @@ on:
   schedule:
     # 01:00 Asia/Shanghai. GitHub schedules use UTC.
     - cron: "0 17 * * *"
+    # Additional rotations are active only after the repository scope is all.
+    - cron: "0 5,11,23 * * *"
   workflow_dispatch:
     inputs:
       max_pages:
         description: "Maximum pages per member"
         required: false
-        default: "10"
+        default: ""
       history_pages:
         description: "History pages per source; 0 skips backfill, empty follows max_pages"
         required: false
@@ -41,16 +43,26 @@ on:
         description: "Comma-separated content sources; empty uses all seven"
         required: false
         default: ""
+      group_minutes:
+        description: "Group run time budget in minutes (1-300); current member finishes before stopping"
+        required: false
+        default: "240"
+      group_refresh:
+        description: "Rotate previously collected group members for incremental updates"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: 48query-production-collector${{ inputs.dry_run && '-dry-run' || '' }}
+  group: 48query-production-collector
   cancel-in-progress: false
 
 jobs:
   collect:
+    if: github.event_name != 'schedule' || github.event.schedule == '0 17 * * *' || vars.COLLECTOR_MEMBER_SCOPE == 'all'
     name: Collect Pocket48 data
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -58,10 +70,13 @@ jobs:
     env:
       POCKET48_LOG_SCHEMA: ${{ inputs.diagnostics && '1' || '0' }}
       COLLECTOR_SOURCE: pocket48
+      # Inclusive boundary: 2026-01-01 00:00 Asia/Shanghai. Never crawl earlier.
+      COLLECTOR_SINCE: "2026-01-01T00:00:00+08:00"
+      COLLECTOR_CHECKPOINT_STATE: ${{ runner.temp }}/48query-group/scoped-sync.json
       COLLECTOR_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       COLLECTOR_FAIL_ON_ERROR: "1"
-      COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || vars.COLLECTOR_MAX_PAGES || '10' }}
-      COLLECTOR_HISTORY_PAGES: ${{ inputs.history_pages || vars.COLLECTOR_HISTORY_PAGES || '' }}
+      COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && (vars.COLLECTOR_GROUP_MAX_PAGES || '1')) || vars.COLLECTOR_MAX_PAGES || '10' }}
+      COLLECTOR_HISTORY_PAGES: ${{ inputs.history_pages || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && (vars.COLLECTOR_GROUP_HISTORY_PAGES || '1')) || vars.COLLECTOR_HISTORY_PAGES || '' }}
       COLLECTOR_MAX_MEMBERS: ${{ inputs.max_members || vars.COLLECTOR_MAX_MEMBERS || '0' }}
       COLLECTOR_MEMBER_ID: ${{ inputs.member_id }}
       COLLECTOR_MEMBER_SCOPE: ${{ inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed' }}
@@ -76,6 +91,12 @@ jobs:
       COLLECTOR_CREDENTIAL_READ_TOKEN: ${{ secrets.COLLECTOR_CREDENTIAL_READ_TOKEN }}
       INGEST_API_URL: ${{ vars.INGEST_API_URL }}
       INGEST_KEY: ${{ secrets.INGEST_KEY }}
+      COLLECTOR_GROUP_STATE: ${{ runner.temp }}/48query-group/progress.json
+      COLLECTOR_GROUP_ARTIFACT: ${{ inputs.dry_run && 'group-state-2026-dry-run' || 'group-state-2026-live' }}
+      COLLECTOR_GROUP_LIMIT: ${{ (inputs.max_members != '0' && inputs.max_members) || vars.COLLECTOR_GROUP_LIMIT || '1000' }}
+      COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || vars.COLLECTOR_GROUP_MINUTES || '240' }}
+      COLLECTOR_GROUP_REFRESH: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
+      COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ (github.event_name == 'schedule' && github.event.schedule == '0 17 * * *') && '1' || '0' }}
     steps:
       - name: Check required configuration
         shell: bash
@@ -98,5 +119,40 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Restore collector progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/restore-group-state.mjs
       - name: Run collector
-        run: pnpm --filter @starter/collector run run
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$COLLECTOR_MEMBER_SCOPE" == "all" && -z "$COLLECTOR_MEMBER_ID" ]]; then
+            [[ "$COLLECTOR_GROUP_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] && (( COLLECTOR_GROUP_MINUTES <= 300 )) || { echo "Invalid group time budget"; exit 1; }
+            export COLLECTOR_GROUP_MAX_SECONDS="$((COLLECTOR_GROUP_MINUTES * 60))"
+            flags=(--collect --update-roster)
+            [[ "$COLLECTOR_DRY_RUN" == "1" ]] && flags+=(--dry-run)
+            [[ "$COLLECTOR_GROUP_REFRESH" == "1" ]] && flags+=(--refresh)
+            if [[ "$COLLECTOR_GROUP_WEEKLY_RECHECK" == "1" && "$(TZ=Asia/Shanghai date +%u)" == "7" ]]; then
+              flags+=(--retry-unverified)
+            fi
+            pnpm --filter @starter/collector group "${flags[@]}"
+          else
+            pnpm --filter @starter/collector run run
+          fi
+      - name: Save collector progress
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.COLLECTOR_GROUP_ARTIFACT }}
+          path: |
+            ${{ env.COLLECTOR_GROUP_STATE }}
+            ${{ env.COLLECTOR_CHECKPOINT_STATE }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Retry group media independently
+        if: always() && env.COLLECTOR_MEMBER_SCOPE == 'all' && env.COLLECTOR_MEMBER_ID == '' && env.COLLECTOR_DRY_RUN != '1' && env.INGEST_API_URL != '' && env.INGEST_KEY != ''
+        env:
+          COLLECTOR_IMAGE_RETRY_LIMIT: "100"
+          COLLECTOR_MEDIA_RETRY_BATCHES: "1"
+        run: pnpm --filter @starter/collector run run --retry-media

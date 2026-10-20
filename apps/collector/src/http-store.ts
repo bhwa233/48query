@@ -1,12 +1,14 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
 import type { ImageAttachment, VideoAttachment, CatalogEntry } from "@starter/shared";
+import { object, parsePocketJson, timestamp } from "./pocket48-content";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
 export class HttpIngestStore implements CollectorStore {
-  constructor(private readonly baseUrl: string, private readonly key: string) {}
+  private scopedMedia?: Promise<{ images: ImageAttachment[]; videos: VideoAttachment[] }>;
+  constructor(private readonly baseUrl: string, private readonly key: string, private readonly since?: string) {}
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(path: string, init?: RequestInit, envelope = false): Promise<T> {
     const headers = new Headers(init?.headers);
     headers.set("Accept", "application/json");
     headers.set("Content-Type", "application/json");
@@ -29,9 +31,37 @@ export class HttpIngestStore implements CollectorStore {
       }
       if (!payload || typeof payload.ok !== "boolean") throw new Error(`Invalid ingest response (HTTP ${response.status}).`);
       if (!response.ok || !payload.ok) throw new Error(payload.ok ? `Ingest request failed: ${response.status}` : `${payload.error.code}: ${payload.error.message}`);
-      return payload.data;
+      return (envelope ? payload : payload.data) as T;
     }
     throw new Error("Ingest request attempts exhausted.");
+  }
+
+  private async pendingScopedMedia(kind: "images" | "videos", limit: number, afterId?: string) {
+    // Existing public message search already filters Beijing calendar dates.
+    // Derive eligible attachments from dated originals, so an older deployed
+    // API cannot silently ignore a new queue filter and upload pre-2026 media.
+    this.scopedMedia ??= (async () => {
+      const images = new Map<string, ImageAttachment>(), videos = new Map<string, VideoAttachment>();
+      let before: string | null = null;
+      const seen = new Set<string>();
+      const from = new Date(Date.parse(this.since!) + 8 * 3600_000).toISOString().slice(0, 10);
+      for (let page = 0; page < 1000; page++) {
+        const query = new URLSearchParams({ from, limit: "100", ...(before ? { before } : {}) });
+        const result = await this.request<{ data: CollectorMessage[]; nextCursor: string | null }>(`/api/query/messages?${query}`, undefined, true);
+        if (!Array.isArray(result.data) || !(result.nextCursor === null || typeof result.nextCursor === "string")) throw new Error("Invalid dated message queue response.");
+        for (const message of result.data) {
+          if (Date.parse(message.occurredAt) < Date.parse(this.since!) || !Number.isFinite(Date.parse(message.occurredAt))) continue;
+          for (const image of message.images ?? []) if (!image.galleryUrl && image.status !== "uploaded") images.set(image.id, image);
+          for (const video of message.videos ?? []) if (!video.galleryUrl && !["uploaded", "skipped"].includes(video.status)) videos.set(video.id, video);
+        }
+        before = result.nextCursor;
+        if (before === null) return { images: [...images.values()], videos: [...videos.values()] };
+        if (seen.has(before)) throw new Error("Dated message queue cursor repeated.");
+        seen.add(before);
+      }
+      throw new Error("Dated message queue page budget reached; no unverified media will be uploaded.");
+    })();
+    return (await this.scopedMedia)[kind].filter(item => afterId === undefined || item.id > afterId).sort((a, b) => a.id.localeCompare(b.id)).slice(0, limit);
   }
 
   async getSyncState(memberId: string) {
@@ -39,15 +69,25 @@ export class HttpIngestStore implements CollectorStore {
   }
 
   async pendingCatalog(memberId: string, source: "album" | "post_images", limit: number) {
-    return this.request<CatalogEntry[]>(`/api/query/ingest/catalog?memberId=${encodeURIComponent(memberId)}&source=${source}&limit=${limit}`);
+    const entries = await this.request<CatalogEntry[]>(`/api/query/ingest/catalog?memberId=${encodeURIComponent(memberId)}&source=${source}&limit=${this.since ? 50 : limit}`);
+    if (!this.since) return entries;
+    const eligible = entries.filter(entry => {
+      const raw = object(parsePocketJson(entry.rawJson));
+      const item = raw.format === "pocket48-album-lookup-v1" ? object(raw.item) : raw;
+      const at = timestamp(source === "album" ? item.createTime : item.createAt);
+      if (!at) throw new Error("Catalog entry has no verifiable date; scoped verification remains incomplete.");
+      return Date.parse(at) >= Date.parse(this.since!);
+    });
+    if (entries.length === 50 && eligible.length === 0) throw new Error("Older catalog rows fill the queue window; scoped pending coverage remains unverified.");
+    return eligible.slice(0, limit);
   }
 
   async getImage(id: string) { return this.request<ImageAttachment | null>(`/api/query/ingest/images/${encodeURIComponent(id)}`); }
   async saveImage(image: ImageAttachment) { await this.request(`/api/query/ingest/images/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify(image) }); }
-  async pendingImages(limit: number, afterId?: string) { return this.request<ImageAttachment[]>(`/api/query/ingest/images?limit=${limit}${afterId === undefined ? "" : `&afterId=${encodeURIComponent(afterId)}`}`); }
+  async pendingImages(limit: number, afterId?: string): Promise<ImageAttachment[]> { return this.since ? this.pendingScopedMedia("images", limit, afterId) as Promise<ImageAttachment[]> : this.request<ImageAttachment[]>(`/api/query/ingest/images?limit=${limit}${afterId === undefined ? "" : `&afterId=${encodeURIComponent(afterId)}`}`); }
   async getVideo(id: string) { return this.request<VideoAttachment | null>(`/api/query/ingest/videos/${encodeURIComponent(id)}`); }
   async saveVideo(video: VideoAttachment) { await this.request(`/api/query/ingest/videos/${encodeURIComponent(video.id)}`, { method: "POST", body: JSON.stringify(video) }); }
-  async pendingVideos(limit: number, afterId?: string) { return this.request<VideoAttachment[]>(`/api/query/ingest/videos?limit=${limit}${afterId === undefined ? "" : `&afterId=${encodeURIComponent(afterId)}`}`); }
+  async pendingVideos(limit: number, afterId?: string): Promise<VideoAttachment[]> { return this.since ? this.pendingScopedMedia("videos", limit, afterId) : this.request<VideoAttachment[]>(`/api/query/ingest/videos?limit=${limit}${afterId === undefined ? "" : `&afterId=${encodeURIComponent(afterId)}`}`); }
   async verifiedRoomMedia(roomId: string, assets: { id: string; occurredAt: string }[]) {
     return this.request<CollectorMessage[]>("/api/query/ingest/verified-media", { method: "POST", body: JSON.stringify({ scope: "room", roomId, assets }) });
   }

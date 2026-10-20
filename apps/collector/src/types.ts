@@ -53,6 +53,7 @@ export type CollectorPage<T> = {
   nextCursor: string | null;
   boundary?: { id: string; occurredAt: string }[];
   observed?: number; unverified?: number;
+  reachedSince?: boolean;
   catalog?: CatalogEntry[];
 };
 
