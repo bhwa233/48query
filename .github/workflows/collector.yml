@@ -72,7 +72,6 @@ jobs:
       COLLECTOR_SOURCE: pocket48
       # Inclusive boundary: 2026-01-01 00:00 Asia/Shanghai. Never crawl earlier.
       COLLECTOR_SINCE: "2026-01-01T00:00:00+08:00"
-      COLLECTOR_CHECKPOINT_STATE: ${{ runner.temp }}/48query-group/scoped-sync.json
       COLLECTOR_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       COLLECTOR_FAIL_ON_ERROR: "1"
       COLLECTOR_MAX_PAGES: ${{ inputs.max_pages || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && (vars.COLLECTOR_GROUP_MAX_PAGES || '1')) || vars.COLLECTOR_MAX_PAGES || '10' }}
@@ -91,7 +90,6 @@ jobs:
       COLLECTOR_CREDENTIAL_READ_TOKEN: ${{ secrets.COLLECTOR_CREDENTIAL_READ_TOKEN }}
       INGEST_API_URL: ${{ vars.INGEST_API_URL }}
       INGEST_KEY: ${{ secrets.INGEST_KEY }}
-      COLLECTOR_GROUP_STATE: ${{ runner.temp }}/48query-group/progress.json
       COLLECTOR_GROUP_ARTIFACT: ${{ inputs.dry_run && 'group-state-2026-dry-run' || 'group-state-2026-live' }}
       COLLECTOR_GROUP_LIMIT: ${{ (inputs.max_members != '0' && inputs.max_members) || vars.COLLECTOR_GROUP_LIMIT || '1000' }}
       COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || vars.COLLECTOR_GROUP_MINUTES || '240' }}
@@ -119,6 +117,11 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Set collector progress paths
+        shell: bash
+        run: |
+          echo "COLLECTOR_GROUP_STATE=$RUNNER_TEMP/48query-group/progress.json" >> "$GITHUB_ENV"
+          echo "COLLECTOR_CHECKPOINT_STATE=$RUNNER_TEMP/48query-group/scoped-sync.json" >> "$GITHUB_ENV"
       - name: Restore collector progress
         env:
           GH_TOKEN: ${{ github.token }}

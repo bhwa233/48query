@@ -55,3 +55,5 @@ pnpm --filter @starter/collector run run
 2026-10-20 范围调整：工作流固定 `COLLECTOR_SINCE=2026-01-01T00:00:00+08:00`，不再向前补采。全团模式运行 `group --collect --update-roster`；定时运行还加 `--refresh`，每周日北京时间 01:00 才额外重查身份未验证项。全团默认每来源首页 1 页、历史 1 页，每次最多 240 分钟，当前成员完成后退出；手动 `group_minutes` 支持 1–300。只有仓库 scope 设置为 `all` 时，新增北京时间 07:00、13:00、19:00 三次轮转才生效。
 
 进度使用当前分支、同一 `collector.yml` 的最近已完成运行 artifact 恢复；真实写入与 dry-run 分别使用 `group-state-2026-live`、`group-state-2026-dry-run`。无旧 artifact 时从公开名单初始化，不伪造历史覆盖。进度即使本轮来源失败也保存 30 天，媒体补传在进度保存后单独执行，并遵守相同的时间下限。这里只描述配置；定时任务实际启用状态仍应以 GitHub API 为准，本地扩采期间保持暂停以避免同账号并发。
+
+2026-10-20 用户确认转为线上采集：本地任务在当前成员完成后停止，范围检查点另存备份；仓库 Variable `COLLECTOR_MEMBER_SCOPE` 改为 `all`。Actions 的临时进度路径在执行步骤中从 `$RUNNER_TEMP` 写入 `$GITHUB_ENV`，因为任务级 `env` 不支持 `runner` context。线上首次运行从公开名单建立自己的轮转进度，保留生产库已有正文并按稳定 ID 幂等写入；后续运行通过线上 artifact 续采。本地进度保留不删除，不表示已上传到 Actions。采集仍严格限制为北京时间 2026 年元旦起，来源失败或范围未扫完继续如实报告未验证。
