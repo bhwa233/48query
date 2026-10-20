@@ -105,7 +105,7 @@ test("recovers member-authored historical essence without treating the candidate
   const page = await source.listContent(member, "essence", null);
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0]?.memberId, member.id);
-  await assert.rejects(source.listMessages(member, null), /anchors|business 500/, "Ordinary history must independently verify original messages");
+  await assert.rejects(source.listMessages(member, null), /anchors|business 500|history.*unverified/, "Ordinary history must independently verify original messages");
   await assert.rejects(source.listContent({ ...member, id: "2" }, "essence", null), /historical essence.*verified/i, "Another sender cannot verify a candidate channel");
   empty = true;
   await assert.rejects(source.listContent({ ...member, id: "3" }, "essence", null), /historical essence.*verified/i, "An empty candidate must not mark unavailable history complete");
@@ -217,6 +217,29 @@ test("an empty room is reported as unverified without losing the batch", async (
   assert.equal(result.errorCount, 1);
   assert.equal(result.membersCovered, 0);
   assert.equal(store.units.at(-2)?.sync?.historyDone, false);
+});
+
+// Album lookups recovered genuine room text after the room feed had failed,
+// but that evidence was discarded from sync state and the room stayed unverified.
+test("retains room verification from an album without hiding a failed history lookup", async () => {
+  const store = new DryRunStore();
+  const source = {
+    sources: ["room", "album"] as const,
+    listMembers: async () => [{ id: "1", name: "Owner", groupName: "SNH48" }],
+    listMessages: async () => { throw new Error("History window unavailable"); },
+    listContent: async (_member: unknown, stream: string) => {
+      if (stream === "room") throw new Error("History window unavailable");
+      return { items: [{ id: "recovered-room-text", memberId: "1", occurredAt: "2022-08-01T00:00:00.000Z", type: "TEXT", kind: "text" as const, sourceFlags: 1 }], nextCursor: null };
+    },
+  };
+  const result = await runBatch(source, store, { maxHistoryPagesPerMember: 0 });
+  const sync = store.units.filter(unit => unit.sync?.source === "room").at(-1)?.sync;
+  assert.ok(sync?.lastNonemptyAt, "An attributable room original must remain recorded as verification evidence");
+  assert.equal(sync.status, "failed", "Recovering nearby content does not prove the failed history window is complete");
+  assert.equal(sync.lastError, "History window unavailable");
+  assert.equal(sync.historyCursor, null);
+  assert.equal(result.errorCount, 1);
+  assert.equal(result.membersCovered, 1);
 });
 
 // Historical rooms can require several empty anchor pages before any timestamp
@@ -590,4 +613,55 @@ test("reads legacy owner history without guessing room IDs or accepting fan auth
   assert.deepEqual(page.items.map(message => message.id), ["room:9911:old-owner"]);
   assert.equal(page.nextCursor, "legacy:9911:end");
   await assert.rejects(source.listMessages({ id: "1", name: "Owner", groupName: "SNH48" }, page.nextCursor), /completeness remains unverified/);
+});
+
+// Real historical images survived in the legacy IMAGE feed while both modern
+// message feeds returned empty. Different room namespaces must not hide them;
+// the exact asset, millisecond timestamp, type and actual sender remain required.
+test("verifies historical album media against legacy originals across room namespaces", async () => {
+  const at = 1661327674734;
+  const image = (name: string) => `https://source.48.cn/${name}.jpg`;
+  const rows = ["match", "fan", "wrong-time"].map((name, index) => ({ sourceType: "IMAGE", createTime: at - index * 1000, bodys: { url: image(name) } }));
+  rows.push({ sourceType: "VIDEO", createTime: at - 3000, bodys: { url: "https://source.48.cn/original.mp4" } });
+  const original = (id: string, time: number, sender = "1") => ({ ...(id === "match" ? { serverId: "9007199254740993" } : {}), msgidClient: id, msgTime: time, msgType: "IMAGE", bodys: { url: image(id) }, extInfo: { user: { userId: sender } } });
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const path = String(url), body = JSON.parse(String(init?.body));
+    if (path.endsWith("/jump")) return Response.json({ status: 200, content: {} });
+    if (path.endsWith("/im/search")) return Response.json({ status: 200, content: [{ ownerId: "1", targetType: 0, targetId: "9911" }] });
+    if (path.endsWith("/msg/list/img")) return Response.json({ status: 200, content: { imgAndVideoList: rows, nextTime: 0 } });
+    if (path.endsWith("/aim/type")) {
+      assert.equal(body.roomId, "9911");
+      const message = body.extMsgType === "VIDEO" ? [{ msgidClient: "video", msgTime: at - 3000, msgType: "VIDEO", bodys: { url: "https://source.48.cn/original.mp4" }, extInfo: { user: { userId: "1" } } }]
+        : body.nextTime === at + 1 ? [original("match", at)] : [original("fan", at - 1000, "999"), original("wrong-time", at - 9999)];
+      return Response.json({ status: 200, content: { message, nextTime: body.extMsgType === "IMAGE" && body.nextTime === at + 1 ? at : 0 } });
+    }
+    return Response.json({ status: 200, content: { message: [], nextTime: body.nextTime } });
+  } });
+  const page = await source.listContent({ id: "1", name: "Owner", groupName: "SNH48", channelId: "22", serverId: "33" }, "album", null);
+  assert.equal(page.unverified, 2);
+  assert.equal(page.catalog?.filter(entry => entry.status === "resolved").length, 2);
+  assert.ok(page.items.every(message => message.memberId === "1"));
+  assert.ok(page.items.some(message => message.id === "room:22:9007199254740993"), "Legacy and modern originals must use the same exact server message ID");
+  assert.deepEqual(page.items.filter(message => message.sourceFlags === 3).map(message => message.roomId), ["9911", "9911"]);
+  assert.equal(page.items.find(message => message.id.endsWith(":wrong-time"))?.sourceFlags, 1, "A different timestamp must not resolve the catalog row");
+});
+
+// Some historical owners disappear from search. The owner-only public media
+// feed still supplies sender IDs; neither a fan nor a guessed room is accepted.
+test("resumes owner-only legacy media without assigning an invented room", async () => {
+  const at = 1661327674734;
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const path = String(url), body = JSON.parse(String(init?.body));
+    if (path.endsWith("/jump")) return Response.json({ status: 200, content: {} });
+    if (path.endsWith("/im/search")) return Response.json({ status: 200, content: [{ targetId: "wrong", ownerId: "2", targetType: 0 }] });
+    assert.equal(body.roomId, ""); assert.equal(body.ownerId, "1");
+    return Response.json({ status: 200, content: { message: ["1", "999"].map(id => ({ msgidClient: id, msgTime: at, msgType: "IMAGE", bodys: { url: `https://source.48.cn/${id}.jpg` }, extInfo: { user: { userId: id } } })), nextTime: at - 1 } });
+  } });
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const page = await source.listMessages(member, null);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.roomId, null);
+  assert.equal(page.items[0]?.id, "legacy-owner:1:1");
+  assert.equal(page.nextCursor, `legacy-image:${at - 1}`);
+  await assert.rejects(source.listMessages(member, page.nextCursor), /legacy media cursor/);
 });

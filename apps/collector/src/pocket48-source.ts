@@ -175,15 +175,57 @@ export class Pocket48Source implements CollectorSource {
 
   async listMessages(member: CollectorMember, cursor: string | null) { return this.listContent(member, "room", cursor); }
 
-  private async legacyRoomPage(member: CollectorMember, cursor: string | null, originalError?: unknown): Promise<CollectorPage<CollectorMessage>> {
+  private async legacyMediaPage(member: CollectorMember, kind: "IMAGE" | "VIDEO", cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
+    if (cursor !== null && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) throw new Error("Legacy media history completeness remains unverified.");
     const roomId = await this.resolveLegacyRoom(member);
-    if (!roomId) throw originalError instanceof Error ? originalError : new Error("No verified legacy room is available.");
+    const content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: kind, ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
+    const rows = contentList(content);
+    const owner = { ...member, channelId: roomId || null, roomId: roomId || null };
+    const items = rows.flatMap(row => {
+      const raw = object(row);
+      // Legacy serverId is NIM's message server ID, not its room server ID.
+      // Keep the existing message namespace across API versions; roomId below
+      // still records the independently verified legacy room, or remains null.
+      const serverMessageId = string(raw.msgIdServer ?? raw.serverId);
+      const message = normalizeMessage({ ...raw, ...(serverMessageId ? { msgIdServer: serverMessageId } : {}) }, owner, "room", this.directory);
+      if (message?.memberId !== member.id || message.kind !== (kind === "IMAGE" ? "image" : "video")) return [];
+      const namespace = member.channelId && /^\d+$/.test(member.channelId) ? member.channelId : roomId;
+      if (serverMessageId && namespace) message.id = `room:${namespace}:${serverMessageId}`;
+      // An owner-only feed proves the sender, without inventing a room ID.
+      if (!roomId) message.id = message.id.replace(/^room:[^:]+:/, `legacy-owner:${member.id}:`);
+      return [message];
+    });
+    const boundary = rows.map(row => {
+      const raw = object(row);
+      const id = string(raw.msgIdServer ?? raw.serverId ?? raw.msgIdClient ?? raw.msgidClient);
+      const occurredAt = timestamp(raw.msgTime);
+      if (!id || !occurredAt) throw new Error("Legacy media has no stable pagination boundary.");
+      return { id, occurredAt };
+    });
+    const next = string(object(content).nextTime);
+    const nextCursor = next && next !== "0" && next !== "-1" ? next : null;
+    if (nextCursor && (!/^\d+$/.test(nextCursor) || !Number.isSafeInteger(Number(nextCursor)) || (Number(cursor) > 0 && Number(nextCursor) >= Number(cursor)))) throw new Error("Pocket48 repeated or invalidated the legacy media cursor.");
+    return { items, boundary, observed: rows.length, nextCursor };
+  }
+
+  private async legacyRoomMedia(member: CollectorMember, kind: "IMAGE" | "VIDEO", cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
+    const page = await this.legacyMediaPage(member, kind, cursor);
+    if (!page.items.length && page.nextCursor === null) {
+      if (kind === "IMAGE") return this.legacyRoomMedia(member, "VIDEO", null);
+      throw new Error("Legacy room returned no further attributable media; ordinary text history remains unverified.");
+    }
+    return { ...page, nextCursor: page.nextCursor ? `legacy-${kind.toLowerCase()}:${page.nextCursor}` : kind === "IMAGE" ? "legacy-video:0" : "legacy-video:end" };
+  }
+
+  private async legacyRoomPage(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
+    const roomId = await this.resolveLegacyRoom(member);
+    if (!roomId) return this.legacyRoomMedia(member, "IMAGE", null);
     const parts = cursor?.startsWith("legacy:") ? cursor.split(":") : null;
     if (parts && (parts[1] !== roomId || !/^\d+$/.test(parts[2] ?? ""))) throw new Error("Legacy room history completeness remains unverified.");
     const nextTime = parts?.[2] ?? "0";
     const content = await this.post("/im/api/v1/chatroom/msg/list/homeowner", { roomId, ownerId: member.id, needTop1Msg: "false", nextTime });
     const rows = contentList(content);
-    if (!rows.length) throw new Error("Legacy room returned no attributable history; completeness remains unverified.");
+    if (!rows.length) return this.legacyRoomMedia(member, "IMAGE", null);
     const owner = { ...member, channelId: roomId };
     const items = rows.flatMap(row => {
       const message = normalizeMessage(row, owner, "room", this.directory);
@@ -323,6 +365,12 @@ export class Pocket48Source implements CollectorSource {
     });
     const retryItems = retryRows?.map(row => row.value);
     const originalCursors = new Map<string, Partial<Record<"all" | "homeowner", number>>>();
+    const legacyOriginalIds = new Set<string>();
+    if (source === "room" && (cursor?.startsWith("legacy-image:") || cursor?.startsWith("legacy-video:"))) {
+      const [prefix, time, extra] = cursor.split(":");
+      if (!time || extra !== undefined) throw new Error("Invalid legacy media cursor.");
+      return this.legacyRoomMedia(member, prefix === "legacy-image" ? "IMAGE" : "VIDEO", time);
+    }
     if (source === "room" && cursor?.startsWith("legacy:")) return this.legacyRoomPage(member, cursor);
     let content: unknown;
     let historicalRoom: { channelId: string; serverId: string; roomId: null } | null = null;
@@ -342,7 +390,7 @@ export class Pocket48Source implements CollectorSource {
         if (!(error instanceof Error) || error.cause !== "missing_room_mapping"
           || !member.channelId || !member.serverId
           || ![member.channelId, member.serverId].every(id => /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
-          if (source === "room" && error instanceof Error && error.cause === "missing_room_mapping") return this.legacyRoomPage(member, cursor, error);
+          if (source === "room" && error instanceof Error && error.cause === "missing_room_mapping") return this.legacyRoomPage(member, cursor);
           throw error;
         }
         historicalRoom = { channelId: member.channelId, serverId: member.serverId, roomId: null };
@@ -355,7 +403,7 @@ export class Pocket48Source implements CollectorSource {
         try { content = historicalRoom || cursor?.startsWith("archive:") ? await this.historicalRoomPage(member, room, cursor) : await this.post("/im/api/v1/team/message/list/all", body); }
         catch (error) {
           if (!historicalRoom || !(error instanceof Error) || !(error.cause === "history_anchors_exhausted" || (object(error.cause).business === "500" && object(error.cause).http === 200))) throw error;
-          return this.legacyRoomPage(member, cursor, error);
+          return this.legacyRoomPage(member, cursor);
         }
       } else if (source === "album") {
         content = retryItems ? { list: retryItems, nextTime: 0 } : await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
@@ -384,13 +432,43 @@ export class Pocket48Source implements CollectorSource {
       for (const message of await this.options.readVerifiedMedia?.(room.channelId, assets) ?? []) {
         for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
       }
+      if (historicalRoom) {
+        // The legacy and modern APIs use different room namespaces. Resolve the
+        // legacy owner officially, then require the actual sender and exact
+        // asset URL/time; a directory name or candidate channel is not evidence.
+        for (const kind of ["IMAGE", "VIDEO"] as const) {
+          const wanted = values.flatMap(value => {
+            const raw = object(value), url = string(object(parsePocketJson(raw.bodys)).url), at = timestamp(raw.createTime);
+            const known = url ? this.verifiedMedia.get(url) : undefined;
+            return string(raw.sourceType)?.toUpperCase() === kind && url && at && !(known?.memberId === member.id && known.roomId === room.channelId && known.occurredAt === at) ? [{ url, at }] : [];
+          });
+          if (!wanted.length) continue;
+          let next: string | null = String(Math.max(...wanted.map(item => Date.parse(item.at))) + 1);
+          const oldest = Math.min(...wanted.map(item => Date.parse(item.at)));
+          try {
+            for (let page = 0; page < (this.options.albumOriginalPages ?? 3) && next !== null; page++) {
+              const originals = await this.legacyMediaPage(member, kind, next);
+              for (const message of originals.items) {
+                originalsFound.set(message.id, message); legacyOriginalIds.add(message.id);
+                for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
+              }
+              if (wanted.every(item => { const found = this.verifiedMedia.get(item.url); return found?.memberId === member.id && found.occurredAt === item.at && legacyOriginalIds.has(found.id); })) break;
+              next = originals.nextCursor;
+              if (next !== null && Number(next) < oldest) break;
+            }
+          } catch (error) {
+            if (error instanceof Error && ([401, 403].includes(Number(object(error.cause).http)) || [401, 403, 1001, 2001].includes(Number(object(error.cause).business)))) throw error;
+            console.error(JSON.stringify({ event: "legacy_media_lookup_failed", memberId: member.id, kind, error: error instanceof Error ? error.message : "Legacy media lookup failed." }));
+          }
+        }
+      }
       const groups = new Map<string, string[]>();
       for (const value of values) {
         const raw = object(value);
         const url = string(object(parsePocketJson(raw.bodys)).url);
         const at = timestamp(raw.createTime);
         const known = url ? this.verifiedMedia.get(url) : undefined;
-        if (!url || !at || (known?.occurredAt === at && known.roomId === room.channelId && (!historicalRoom || known.memberId === member.id))) continue;
+        if (!url || !at || (known?.occurredAt === at && (known.roomId === room.channelId || legacyOriginalIds.has(known.id)) && (!historicalRoom || known.memberId === member.id))) continue;
         const urls = groups.get(at) ?? [];
         urls.push(url);
         groups.set(at, urls);
@@ -480,7 +558,7 @@ export class Pocket48Source implements CollectorSource {
         // Catalogs omit sender IDs. Album attribution requires the original's
         // exact room, image URL and timestamp plus a verified sender ID. Display
         // names can carry group prefixes or change, so they are not identity.
-        if (verified && (!historicalRoom || verified.memberId === member.id) && (source === "album" ? verified.roomId === member.channelId && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
+        if (verified && (!historicalRoom || verified.memberId === member.id) && (source === "album" ? (verified.roomId === member.channelId || legacyOriginalIds.has(verified.id)) && timestamp(raw.createTime) === verified.occurredAt : verified.memberId === member.id)) {
           message = { ...verified, images: verified.images?.map(image => ({ ...image })), videos: verified.videos?.map(video => ({ ...video })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
         } else unverified += 1;
       }

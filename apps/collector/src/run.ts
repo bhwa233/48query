@@ -151,6 +151,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         lastError = error instanceof Error ? error.message : "Collection failed.";
         sync = { ...sync, status: "failed", lastError: lastError.slice(0, 1000) };
         await store.ingestUnit(unit([], sync));
+        if (stream === "room") roomSync = sync;
         console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: stream, error: lastError }));
       }
     }
@@ -158,8 +159,9 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     // fan chat. Record that evidence without changing newest/history boundaries.
     if (roomSync && !roomSync.lastNonemptyAt) {
       const now = new Date().toISOString();
-      if (verifiedRoomContent) await store.ingestUnit(unit([], { ...roomSync, status: "ok", lastError: null, lastNonemptyAt: now }));
-      else {
+      if (verifiedRoomContent) await store.ingestUnit(unit([], { ...roomSync,
+        ...(roomSync.status === "failed" ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now }));
+      else if (roomSync.status !== "failed") {
         errorCount += 1;
         lastError = "No attributable member room messages observed yet; collection is not verified.";
         await store.ingestUnit(unit([], { ...roomSync, status: "failed", lastError }));
