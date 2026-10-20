@@ -10,6 +10,8 @@ import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
 import { runBatch } from "./run";
 import type { CollectorStore, SourceSync } from "./types";
+import type { CollectorProgress } from "@starter/shared";
+import { CollectionBudget, CollectionStopped } from "./budget";
 const collect = process.argv.includes("--collect");
 const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_RUN === "1";
 const manifestOnly = process.argv.includes("--manifest-only");
@@ -22,16 +24,18 @@ const file = process.env.COLLECTOR_GROUP_STATE?.trim();
 if (!file) throw new Error("Set COLLECTOR_GROUP_STATE to an explicit local progress JSON path.");
 const statePath = resolve(file);
 let stopping = false;
-for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { stopping = true; });
 const limit = Number(process.env.COLLECTOR_GROUP_LIMIT ?? 20);
 const maxSeconds = Number(process.env.COLLECTOR_GROUP_MAX_SECONDS ?? 0);
 if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 18000) throw new Error("COLLECTOR_GROUP_MAX_SECONDS must be between 0 and 18000.");
 if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("COLLECTOR_GROUP_LIMIT must be between 1 and 1000.");
 if (collect && !dryRun && (!process.env.INGEST_API_URL || !process.env.INGEST_KEY)) throw new Error("Group writes require INGEST_API_URL and INGEST_KEY.");
+const budget = new CollectionBudget(maxSeconds ? Date.now() + maxSeconds * 1000 : Infinity);
+let activeBudget = budget;
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { stopping = true; budget.stop(); });
 await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
 const lockPath = `${statePath}.lock`;
 // The repo has no local resumable roster runner. Use a single-owner filesystem
-// lock and atomic progress rename; D1 source cursors remain the collection truth.
+// lock and atomic progress rename. Scoped D1 progress is authoritative across runners.
 const lock = await open(lockPath, "wx", 0o600);
 await lock.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
 await lock.close();
@@ -40,6 +44,7 @@ try {
   let processed = 0;
   let budgetReached = false;
   let initialized = false;
+  let failures = 0;
   let state: GroupProgress;
   const rosterOptions = { directoryUrl: process.env.POCKET48_DIRECTORY_URL, historicalUrl: process.env.POCKET48_HISTORY_DIRECTORY_URL };
   try {
@@ -68,7 +73,7 @@ try {
     failed: state.entries.filter(e => e.identity === "failed").length, pending: state.entries.filter(e => e.identity === "pending").length,
     collected: state.entries.filter(e => e.collectedAt).length, sourceFailures: state.entries.reduce((sum, e) => sum + (e.errorCount ?? 0), 0),
     inspected: state.entries.filter(e => e.inspectedAt).length, inspectionFailures: state.entries.reduce((sum, e) => sum + (e.inspectionErrorCount ?? 0), 0), dryRun,
-    processed, budgetReached, stopping, elapsedSeconds: Math.round((Date.now() - started) / 1000) });
+    processed, budgetReached, stopping, outcome: failures > 0 ? "failed" : budgetReached || stopping || state.entries.some(e => dryRun ? !e.inspectionScopeComplete : !e.scopeComplete) ? "pending" : "complete", elapsedSeconds: Math.round((Date.now() - started) / 1000) });
   await save();
   if (!manifestOnly) {
     const credential = await loadProductionCredential();
@@ -76,62 +81,118 @@ try {
     if (!token) throw new Error("Pocket48 credential not found.");
     const dryStore = dryRun ? new DryRunStore() : null;
     const store: CollectorStore | null = collect ? dryStore ?? new HttpIngestStore(process.env.INGEST_API_URL!, process.env.INGEST_KEY!, since) : null;
+    const remoteStore = store instanceof HttpIngestStore ? store : null;
+    const durable = remoteStore ? await remoteStore.collectionProgress() : new Map<string, CollectorProgress>();
+    const restore = (entry: typeof state.entries[number], progress: CollectorProgress) => {
+      entry.sources = structuredClone(progress.sources);
+      entry.lastAttemptAt = progress.lastAttemptAt ?? undefined;
+      entry.lastIncrementalAt = progress.lastIncrementalAt ?? undefined;
+      entry.lastHistoryAt = progress.lastHistoryAt ?? undefined;
+      entry.collectedAt = progress.collectedAt ?? undefined;
+      entry.errorCount = progress.errorCount;
+      entry.scopeComplete = progress.scopeComplete;
+    };
+    for (const entry of state.entries) {
+      const id = entry.member?.id;
+      if (id && durable.has(id)) restore(entry, durable.get(id)!);
+    }
+    const persist = async (entry: typeof state.entries[number]) => {
+      if (remoteStore && entry.member) {
+        const progress: CollectorProgress = { memberId: entry.member.id, since, revision: durable.get(entry.member.id)?.revision ?? 0,
+          sources: entry.sources ?? [], lastAttemptAt: entry.lastAttemptAt ?? null,
+          lastIncrementalAt: entry.lastIncrementalAt ?? null, lastHistoryAt: entry.lastHistoryAt ?? null,
+          collectedAt: entry.collectedAt ?? null, scopeComplete: entry.scopeComplete ?? false, errorCount: entry.errorCount ?? 0 };
+        await remoteStore.saveCollectionProgress(progress);
+        durable.set(progress.memberId, progress);
+      }
+      await save();
+    };
+    const sources = (process.env.COLLECTOR_SOURCES?.split(",").filter(Boolean) ?? [...COLLECTION_SOURCES]).map(value => {
+      if (!COLLECTION_SOURCES.includes(value as typeof COLLECTION_SOURCES[number])) throw new Error(`Unsupported source: ${value}`);
+      return value as typeof COLLECTION_SOURCES[number];
+    });
     const source = new Pocket48Source({ token, since, deviceId: process.env.POCKET48_DEVICE_ID ?? credential?.deviceId,
       pa: process.env.POCKET48_PA, paFactory: process.env.POCKET48_PA ? undefined : createPocket48Pa, apiBaseUrl: process.env.POCKET48_API_BASE_URL,
       memberScope: "all", directoryUrl: process.env.POCKET48_DIRECTORY_URL, historyDirectoryUrl: process.env.POCKET48_HISTORY_DIRECTORY_URL ?? HISTORICAL_DIRECTORY_URL,
       readVerifiedMedia: store?.verifiedRoomMedia?.bind(store), readVerifiedPostImages: store?.verifiedPostImages?.bind(store),
-      minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000), sources: [...COLLECTION_SOURCES] });
-    await source.prepareGroupDirectory(state.entries.flatMap(entry => entry.identity === "verified" && entry.member ? [entry.member] : []));
-    for (const { entry } of groupWork(state.entries, { collect, refresh, retryUnverified })) {
-      if (stopping) break;
-      if (processed >= limit || (maxSeconds > 0 && Date.now() - started >= maxSeconds * 1000)) { budgetReached = true; break; }
-      processed += 1;
-      entry.lastAttemptAt = new Date().toISOString();
-      await save();
-      try {
-        // Recheck a stored identity before writes, also filling this instance's
-        // verified author map. A changed account cannot inherit an old checkpoint.
-        entry.identity = "pending";
-        const member = await source.resolveGroupCandidate(entry.candidate);
-        entry.member = member; entry.checkedAt = new Date().toISOString();
-        entry.identity = member ? "verified" : "unverified"; delete entry.identityError;
-        await save();
-        if (member && store) {
-          if (dryStore) dryStore.units.length = 0;
-          const singleSource = { sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
-          const localSources = dryRun ? [] : entry.sources ?? [];
-          const checkpoints = {
-            read: () => localSources,
-            write: async (_id: string, sync: SourceSync) => {
-              const index = localSources.findIndex(item => item.source === sync.source);
-              if (index < 0) localSources.push(sync); else localSources[index] = sync;
-              if (!dryRun) { entry.sources = localSources; await save(); }
-            },
-          };
-          const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
-            since, checkpoints, maxHistoryPagesPerMember: Number(process.env.COLLECTOR_HISTORY_PAGES ?? 0), catalogRetryLimit: 0 });
-          if (dryStore) {
-            entry.inspectionSources = localSources; entry.inspectionErrorCount = result.errorCount; entry.inspectedAt = new Date().toISOString(); entry.inspectionScopeComplete = result.scopeComplete;
-          } else {
-            entry.sources = localSources; entry.scopeComplete = result.scopeComplete;
-            entry.errorCount = result.errorCount; entry.collectedAt = new Date().toISOString();
+      budget: () => activeBudget, maxOriginalLookups: 12,
+      minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000), sources });
+    try { await source.prepareGroupDirectory(state.entries.flatMap(entry => entry.identity === "verified" && entry.member ? [entry.member] : [])); }
+    catch (error) { if (!budget.stopped) throw error; }
+    const incrementalBudget = maxSeconds ? budget.slice(Math.max(0, (budget.deadline - Date.now()) / 1000) * 0.75) : budget;
+    for (const phase of ["incremental", "history"] as const) {
+      const phaseBudget = phase === "incremental" ? incrementalBudget : budget;
+      let phaseProcessed = 0;
+      for (const { entry } of groupWork(state.entries, { collect, refresh, retryUnverified, phase })) {
+        if (phaseBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
+        phaseProcessed += 1; processed += 1;
+        activeBudget = phaseBudget.slice(300);
+        const attemptedAt = new Date().toISOString();
+        entry.lastAttemptAt = attemptedAt;
+        if (phase === "incremental") entry.lastIncrementalAt = attemptedAt;
+        else entry.lastHistoryAt = attemptedAt;
+        await persist(entry);
+        console.log(JSON.stringify({ event: "group_member_started", phase, memberId: entry.member?.id ?? null, name: entry.candidate.name, elapsedSeconds: Math.round((Date.now() - started) / 1000) }));
+        try {
+          const previousMemberId = entry.member?.id;
+          entry.identity = "pending";
+          const member = await source.resolveGroupCandidate(entry.candidate);
+          entry.member = member; entry.checkedAt = new Date().toISOString();
+          entry.identity = member ? "verified" : "unverified"; delete entry.identityError;
+          if (member?.id !== previousMemberId || !member) {
+            delete entry.sources; delete entry.collectedAt; delete entry.lastHistoryAt;
+            entry.scopeComplete = false; entry.errorCount = 0;
           }
-          await save();
+          if (member && store) {
+            const previous = durable.get(member.id);
+            if (previous) restore(entry, previous);
+            entry.lastAttemptAt = attemptedAt;
+            if (phase === "incremental") entry.lastIncrementalAt = attemptedAt;
+            else entry.lastHistoryAt = attemptedAt;
+            await persist(entry);
+            if (dryStore) dryStore.units.length = 0;
+            const singleSource = { sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
+            const localSources = dryRun ? [] : entry.sources ?? [];
+            const checkpoints = {
+              read: () => localSources,
+              write: async (_id: string, sync: SourceSync) => {
+                const index = localSources.findIndex(item => item.source === sync.source);
+                if (index < 0) localSources.push(sync); else localSources[index] = sync;
+                if (!dryRun) { entry.sources = localSources; await persist(entry); }
+              },
+            };
+            const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
+              since, checkpoints, budget: activeBudget, historyOnly: phase === "history",
+              maxHistoryPagesPerMember: phase === "history" ? Number(process.env.COLLECTOR_HISTORY_PAGES ?? 1) : 0,
+              catalogRetryLimit: phase === "history" ? 2 : 0 });
+            failures += result.errorCount;
+            if (dryStore) {
+              entry.inspectionSources = localSources; entry.inspectionErrorCount = result.errorCount; entry.inspectedAt = new Date().toISOString(); entry.inspectionScopeComplete = result.scopeComplete;
+            } else {
+              entry.sources = localSources; entry.scopeComplete = result.scopeComplete;
+              entry.errorCount = result.errorCount; entry.collectedAt = new Date().toISOString();
+            }
+            budgetReached ||= result.budgetReached;
+          }
+        } catch (error) {
+          if (error instanceof CollectionStopped || activeBudget.stopped) { budgetReached = true; }
+          else {
+            failures += 1;
+            entry.identityError = error instanceof Error ? error.message : "Group member verification interrupted.";
+            if (entry.identity !== "verified") entry.identity = "failed";
+            const cause = error instanceof Error && error.cause && typeof error.cause === "object" ? error.cause as Record<string, unknown> : {};
+            if ([401, 403].includes(Number(cause.http)) || [401, 403, 1001, 2001].includes(Number(cause.business))) throw error;
+          }
         }
-      } catch (error) {
-        entry.identityError = error instanceof Error ? error.message : "Group member verification interrupted.";
-        if (entry.identity !== "verified") entry.identity = "failed";
-        await save();
-        const cause = error instanceof Error && error.cause && typeof error.cause === "object" ? error.cause as Record<string, unknown> : {};
-        if ([401, 403].includes(Number(cause.http)) || [401, 403, 1001, 2001].includes(Number(cause.business))) throw error;
+        await persist(entry);
+        console.log(JSON.stringify({ event: "group_member_finished", phase, name: entry.candidate.name, memberId: entry.member?.id ?? null,
+          identity: entry.identity, errorCount: entry.errorCount ?? 0, scopeComplete: entry.scopeComplete ?? false, budgetReached: activeBudget.stopped, dryRun }));
       }
-      console.log(JSON.stringify({ event: "group_member_finished", name: entry.candidate.name, memberId: entry.member?.id ?? null, identity: entry.identity,
-        collectedAt: entry.collectedAt ?? null, errorCount: entry.errorCount ?? null, inspectedAt: entry.inspectedAt ?? null, inspectionErrorCount: entry.inspectionErrorCount ?? null, dryRun }));
     }
   }
   console.log(JSON.stringify(summary()));
-  // Partial coverage and source errors are reported distinctly from success.
-  if (!manifestOnly && state.entries.some(e => e.identity !== "verified" || (collect && (dryRun ? !e.inspectedAt || e.inspectionErrorCount || !e.inspectionScopeComplete : !e.collectedAt || e.errorCount || !e.scopeComplete)))) process.exitCode = 1;
+  // A bounded batch can succeed with remaining work; actual request/write errors fail.
+  if (!manifestOnly && failures > 0) process.exitCode = 1;
 } finally {
   await unlink(lockPath);
 }

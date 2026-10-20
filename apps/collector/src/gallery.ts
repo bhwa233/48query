@@ -1,4 +1,5 @@
 import type { ImageAttachment, VideoAttachment } from "@starter/shared";
+import type { CollectionBudget } from "./budget";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const GALLERY_URL = "https://gallery233.pages.dev";
@@ -13,7 +14,7 @@ export class MediaSizeLimitError extends Error {
 export class GalleryUploader {
   private uploadTurn: Promise<void> = Promise.resolve();
   private lastUploadAt = 0;
-  constructor(private readonly options: { baseUrl?: string; fetchImpl?: typeof fetch } = {}) {}
+  constructor(private readonly options: { baseUrl?: string; fetchImpl?: typeof fetch; budget?: CollectionBudget } = {}) {}
 
   private async uploadResponse(url: string, form: FormData): Promise<{ uploaded: Response; payload: unknown }> {
     let release!: () => void;
@@ -24,9 +25,13 @@ export class GalleryUploader {
       // The gallery forwards files to Telegram. Its live logs confirmed 429s
       // hidden behind HTTP 200/[]; serialize uploads below 20 files/minute.
       const wait = 3100 - (Date.now() - this.lastUploadAt);
-      if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+      this.options.budget?.check();
+      if (wait > 0) {
+        if (this.options.budget) await this.options.budget.wait(wait);
+        else await new Promise(resolve => setTimeout(resolve, wait));
+      }
       this.lastUploadAt = Date.now();
-      const uploaded = await (this.options.fetchImpl ?? fetch)(url, { method: "POST", body: form, redirect: "error", signal: AbortSignal.timeout(60_000) });
+      const uploaded = await (this.options.fetchImpl ?? fetch)(url, { method: "POST", body: form, redirect: "error", signal: this.options.budget?.signal(60_000) ?? AbortSignal.timeout(60_000) });
       const payload: unknown = uploaded.ok ? await uploaded.json() : null;
       // Pause the shared queue, including other files already waiting. The
       // gallery strips Telegram's retry_after (observed live: 23–25 seconds).
@@ -41,7 +46,7 @@ export class GalleryUploader {
     let response: Response | undefined;
     for (let redirects = 0; redirects <= 3; redirects++) {
       if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.port || !allowedMediaHost(url.hostname)) throw new Error("Media source host is not supported.");
-      response = await fetchImpl(url, { method, redirect: "manual", signal: AbortSignal.timeout(60_000), headers });
+      response = await fetchImpl(url, { method, redirect: "manual", signal: this.options.budget?.signal(60_000) ?? AbortSignal.timeout(60_000), headers });
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get("Location");
       await response.body?.cancel();

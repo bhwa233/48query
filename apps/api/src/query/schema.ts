@@ -52,6 +52,11 @@ export const querySourceSync = sqliteTable("query_source_sync", {
   memberId: text("member_id").notNull(), source: text("source").notNull(), stateJson: text("state_json").notNull(), updatedAt: text("updated_at").notNull(),
 }, table => [primaryKey({ columns: [table.memberId, table.source] })]);
 
+export const queryCollectorProgress = sqliteTable("query_collector_progress", {
+  since: text("since").notNull(), memberId: text("member_id").notNull(),
+  revision: integer("revision").notNull(), stateJson: text("state_json").notNull(), updatedAt: text("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.since, table.memberId] })]);
+
 export const queryRecordings = sqliteTable("query_recordings", {
   id: text("id").primaryKey(),
   memberId: text("member_id").notNull(),

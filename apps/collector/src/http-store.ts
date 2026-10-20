@@ -1,12 +1,31 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
-import type { ImageAttachment, VideoAttachment, CatalogEntry } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress } from "@starter/shared";
 import { object, parsePocketJson, timestamp } from "./pocket48-content";
+import type { CollectionBudget } from "./budget";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
 export class HttpIngestStore implements CollectorStore {
-  private scopedMedia?: Promise<{ images: ImageAttachment[]; videos: VideoAttachment[] }>;
-  constructor(private readonly baseUrl: string, private readonly key: string, private readonly since?: string) {}
+  constructor(private readonly baseUrl: string, private readonly key: string, private readonly since?: string, private readonly budget?: CollectionBudget) {}
+
+  async collectionProgress(): Promise<Map<string, CollectorProgress>> {
+    if (!this.since) throw new Error("Durable collector progress requires an explicit date scope.");
+    const entries = new Map<string, CollectorProgress>();
+    let after: string | null = null;
+    do {
+      const query = new URLSearchParams({ since: this.since, ...(after ? { after } : {}) });
+      const page: { data: CollectorProgress[]; nextCursor: string | null } = await this.request(`/api/query/ingest/progress?${query}`, undefined, true);
+      for (const entry of page.data) entries.set(entry.memberId, entry);
+      if (page.nextCursor && after && page.nextCursor <= after) throw new Error("Collector progress cursor did not advance.");
+      after = page.nextCursor;
+    } while (after);
+    return entries;
+  }
+
+  async saveCollectionProgress(progress: CollectorProgress) {
+    const saved = await this.request<{ revision: number }>("/api/query/ingest/progress", { method: "POST", body: JSON.stringify(progress) });
+    progress.revision = saved.revision;
+  }
 
   private async request<T>(path: string, init?: RequestInit, envelope = false): Promise<T> {
     const headers = new Headers(init?.headers);
@@ -37,31 +56,13 @@ export class HttpIngestStore implements CollectorStore {
   }
 
   private async pendingScopedMedia(kind: "images" | "videos", limit: number, afterId?: string) {
-    // Existing public message search already filters Beijing calendar dates.
-    // Derive eligible attachments from dated originals, so an older deployed
-    // API cannot silently ignore a new queue filter and upload pre-2026 media.
-    this.scopedMedia ??= (async () => {
-      const images = new Map<string, ImageAttachment>(), videos = new Map<string, VideoAttachment>();
-      let before: string | null = null;
-      const seen = new Set<string>();
-      const from = new Date(Date.parse(this.since!) + 8 * 3600_000).toISOString().slice(0, 10);
-      for (let page = 0; page < 1000; page++) {
-        const query = new URLSearchParams({ from, limit: "100", ...(before ? { before } : {}) });
-        const result = await this.request<{ data: CollectorMessage[]; nextCursor: string | null }>(`/api/query/messages?${query}`, undefined, true);
-        if (!Array.isArray(result.data) || !(result.nextCursor === null || typeof result.nextCursor === "string")) throw new Error("Invalid dated message queue response.");
-        for (const message of result.data) {
-          if (Date.parse(message.occurredAt) < Date.parse(this.since!) || !Number.isFinite(Date.parse(message.occurredAt))) continue;
-          for (const image of message.images ?? []) if (!image.galleryUrl && image.status !== "uploaded") images.set(image.id, image);
-          for (const video of message.videos ?? []) if (!video.galleryUrl && !["uploaded", "skipped"].includes(video.status)) videos.set(video.id, video);
-        }
-        before = result.nextCursor;
-        if (before === null) return { images: [...images.values()], videos: [...videos.values()] };
-        if (seen.has(before)) throw new Error("Dated message queue cursor repeated.");
-        seen.add(before);
-      }
-      throw new Error("Dated message queue page budget reached; no unverified media will be uploaded.");
-    })();
-    return (await this.scopedMedia)[kind].filter(item => afterId === undefined || item.id > afterId).sort((a, b) => a.id.localeCompare(b.id)).slice(0, limit);
+    this.budget?.check();
+    const query = new URLSearchParams({ since: this.since!, limit: String(limit), ...(afterId === undefined ? {} : { afterId }) });
+    const page = await this.request<{ data: (ImageAttachment | VideoAttachment)[]; since?: string }>(`/api/query/ingest/${kind}?${query}`, undefined, true);
+    // An older API may ignore unknown query fields. Require its explicit scope
+    // confirmation before any external upload; never fall back to an unbounded queue.
+    if (page.since !== this.since) throw new Error("Media queue API did not confirm the requested date scope.");
+    return page.data;
   }
 
   async getSyncState(memberId: string) {

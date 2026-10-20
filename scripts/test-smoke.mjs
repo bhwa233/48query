@@ -167,6 +167,7 @@ try {
     (await request(origin, "/api/notes", 503)).json().error.code,
     "database_not_initialized",
   );
+  assert.equal((await request(origin, "/api/query/ingest/progress?since=2025-12-31T16%3A00%3A00.000Z", 503, { headers: { "X-Ingest-Key": "test-ingest-key" } })).json().error.code, "collector_progress_not_configured");
   await close(database);
   const migration = launch(
     [
@@ -225,6 +226,27 @@ try {
   assert.equal(ingest.response.headers.get("Cache-Control"), "no-store");
   await request(origin, "/api/query/ingest/unit", 400, { ...ingestOptions, body: JSON.stringify({ ...ingestUnit, recordings: [{ id: "excluded-recording" }] }) });
   const imageOptions = { headers: { "X-Ingest-Key": "test-ingest-key" } };
+  // A killed runner must resume scoped cursors from D1. A stale writer cannot
+  // rewind them, and a different date scope must never inherit completion.
+  const progressPath = "/api/query/ingest/progress";
+  const since = "2025-12-31T16:00:00.000Z";
+  const scoped = { memberId: "smoke-member", since, revision: 0,
+    sources: [{ source: "room", historyCursor: "older", historyDone: false, latestAt: "2026-10-17T00:00:00.000Z", latestIds: ["smoke-message"], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "ok", lastError: null, lastSuccessAt: "2026-10-18T00:00:00.000Z", lastNonemptyAt: "2026-10-18T00:00:00.000Z" }],
+    lastAttemptAt: "2026-10-18T00:00:00.000Z", lastIncrementalAt: "2026-10-18T00:00:00.000Z", lastHistoryAt: null, collectedAt: null, scopeComplete: false, errorCount: 0 };
+  const saveProgress = value => ({ ...post(value), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
+  assert.equal((await request(origin, progressPath, 200, saveProgress(scoped))).json().data.revision, 1);
+  await request(origin, progressPath, 409, saveProgress(scoped));
+  const readProgress = scope => `${progressPath}?since=${encodeURIComponent(scope)}`;
+  const restored = (await request(origin, readProgress(since), 200, imageOptions)).json().data[0];
+  assert.equal(restored.sources[0].historyCursor, "older");
+  assert.equal(restored.revision, 1);
+  assert.deepEqual((await request(origin, readProgress("2026-01-01T00:00:00.000Z"), 200, imageOptions)).json().data, []);
+  const advanced = { ...restored, sources: [{ ...restored.sources[0], historyCursor: "oldest" }] };
+  assert.equal((await request(origin, progressPath, 200, saveProgress(advanced))).json().data.revision, 2);
+  await request(origin, progressPath, 409, saveProgress(restored));
+  assert.equal((await request(origin, readProgress(since), 200, imageOptions)).json().data[0].sources[0].historyCursor, "oldest");
+  assert.deepEqual((await request(origin, "/api/query/ingest/state/smoke-member", 200, imageOptions)).json().data.sources, [], "Scoped progress must not replace all-history checkpoints");
+  console.log("PASS scoped collector progress: durable resume, scope isolation and stale writer rejection");
   const pendingEntry = { id: "a".repeat(64), source: "album", rawJson: JSON.stringify({ createTime: 1661327674734, bodys: { url: "https://source.48.cn/unverified.jpg" } }), status: "pending" };
   const catalogPath = "/api/query/ingest/catalog?memberId=smoke-member&source=album&limit=50";
   await request(origin, catalogPath, 401);
@@ -330,6 +352,12 @@ try {
   for (const range of ["from=2024-01-03&to=2024-01-02", "from=2024-01-01&to=2025-02-01", "from=2024-02-30&to=2024-03-01", "from=2099-01-01&to=2099-01-02"])
     await request(origin, `/api/query/rankings?${range}`, 400);
   console.log("PASS ranking ranges: Beijing midnight boundaries, image deduplication, active days, filter scope and invalid ranges");
+  const datedMedia = { ...ingestUnit, messages: [{ id: "dated-media", memberId: "smoke-member", senderId: "smoke-member", type: "IMAGE", kind: "image", occurredAt: "2025-12-31T16:00:00.000Z", images: [{ id: "dated-media-image", sourceUrl: "https://source.48.cn/dated.png" }] }] };
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify(datedMedia) });
+  const datedQueue = (await request(origin, `/api/query/ingest/images?since=${encodeURIComponent(since)}&afterId=`, 200, imageOptions)).json();
+  assert.equal(datedQueue.since, since);
+  assert.deepEqual(datedQueue.data.map(item => item.id), ["dated-media-image"], "Private queue includes the date boundary and excludes old ranking fixtures");
+  console.log("PASS bounded dated media queue: eligible originals only, without rescanning public history");
   console.log(
     "PASS D1 API: uninitialized database, local migration, creation/readback, validation, no-store",
   );

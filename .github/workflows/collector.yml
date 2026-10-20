@@ -2,10 +2,8 @@ name: Daily collector
 
 on:
   schedule:
-    # 01:00 Asia/Shanghai. GitHub schedules use UTC.
-    - cron: "0 17 * * *"
-    # Additional rotations are active only after the repository scope is all.
-    - cron: "0 5,11,23 * * *"
+    # Every two hours, at :17 to avoid the busiest start-of-hour queue.
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       max_pages:
@@ -44,9 +42,9 @@ on:
         required: false
         default: ""
       group_minutes:
-        description: "Group run time budget in minutes (1-300); current member finishes before stopping"
+        description: "Collection budget in minutes (1-60); checkpoints survive a bounded stop"
         required: false
-        default: "240"
+        default: "60"
       group_refresh:
         description: "Rotate previously collected group members for incremental updates"
         type: boolean
@@ -62,10 +60,9 @@ concurrency:
 
 jobs:
   collect:
-    if: github.event_name != 'schedule' || github.event.schedule == '0 17 * * *' || vars.COLLECTOR_MEMBER_SCOPE == 'all'
     name: Collect Pocket48 data
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 75
     environment: production
     env:
       POCKET48_LOG_SCHEMA: ${{ inputs.diagnostics && '1' || '0' }}
@@ -92,9 +89,11 @@ jobs:
       INGEST_KEY: ${{ secrets.INGEST_KEY }}
       COLLECTOR_GROUP_ARTIFACT: ${{ inputs.dry_run && 'group-state-2026-dry-run' || 'group-state-2026-live' }}
       COLLECTOR_GROUP_LIMIT: ${{ (inputs.max_members != '0' && inputs.max_members) || vars.COLLECTOR_GROUP_LIMIT || '1000' }}
-      COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || vars.COLLECTOR_GROUP_MINUTES || '240' }}
+      COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || '60' }}
+      COLLECTOR_MAX_SECONDS: "3600"
+      COLLECTOR_DEFER_MEDIA: ${{ (inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id && '1' || '0' }}
       COLLECTOR_GROUP_REFRESH: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
-      COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ (github.event_name == 'schedule' && github.event.schedule == '0 17 * * *') && '1' || '0' }}
+      COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ github.event_name == 'schedule' && '1' || '0' }}
     steps:
       - name: Check required configuration
         shell: bash
@@ -127,20 +126,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/restore-group-state.mjs
       - name: Run collector
+        timeout-minutes: 65
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$COLLECTOR_GROUP_MINUTES" =~ ^[1-9][0-9]?$ ]] && (( COLLECTOR_GROUP_MINUTES <= 60 )) || { echo "Invalid group time budget"; exit 1; }
           if [[ "$COLLECTOR_MEMBER_SCOPE" == "all" && -z "$COLLECTOR_MEMBER_ID" ]]; then
-            [[ "$COLLECTOR_GROUP_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] && (( COLLECTOR_GROUP_MINUTES <= 300 )) || { echo "Invalid group time budget"; exit 1; }
             export COLLECTOR_GROUP_MAX_SECONDS="$((COLLECTOR_GROUP_MINUTES * 60))"
             flags=(--collect --update-roster)
             [[ "$COLLECTOR_DRY_RUN" == "1" ]] && flags+=(--dry-run)
             [[ "$COLLECTOR_GROUP_REFRESH" == "1" ]] && flags+=(--refresh)
-            if [[ "$COLLECTOR_GROUP_WEEKLY_RECHECK" == "1" && "$(TZ=Asia/Shanghai date +%u)" == "7" ]]; then
+            if [[ "$COLLECTOR_GROUP_WEEKLY_RECHECK" == "1" && "$(TZ=Asia/Shanghai date +%u)" == "7" && "$(TZ=Asia/Shanghai date +%H)" == "00" ]]; then
               flags+=(--retry-unverified)
             fi
             pnpm --filter @starter/collector group "${flags[@]}"
           else
+            export COLLECTOR_MAX_SECONDS="$((COLLECTOR_GROUP_MINUTES * 60))"
             pnpm --filter @starter/collector run run
           fi
       - name: Save collector progress
@@ -153,9 +154,30 @@ jobs:
             ${{ env.COLLECTOR_CHECKPOINT_STATE }}
           if-no-files-found: warn
           retention-days: 30
-      - name: Retry group media independently
-        if: always() && env.COLLECTOR_MEMBER_SCOPE == 'all' && env.COLLECTOR_MEMBER_ID == '' && env.COLLECTOR_DRY_RUN != '1' && env.INGEST_API_URL != '' && env.INGEST_KEY != ''
-        env:
-          COLLECTOR_IMAGE_RETRY_LIMIT: "100"
-          COLLECTOR_MEDIA_RETRY_BATCHES: "1"
+  media:
+    name: Retry verified media
+    if: inputs.dry_run != true && (inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    env:
+      COLLECTOR_SOURCE: pocket48
+      COLLECTOR_SINCE: "2026-01-01T00:00:00+08:00"
+      COLLECTOR_MAX_SECONDS: "900"
+      COLLECTOR_IMAGE_RETRY_LIMIT: "100"
+      COLLECTOR_MEDIA_RETRY_BATCHES: "100"
+      COLLECTOR_VIDEO_MAX_MIB: ${{ vars.COLLECTOR_VIDEO_MAX_MIB || '50' }}
+      GALLERY_BASE_URL: ${{ vars.GALLERY_BASE_URL || 'https://gallery233.pages.dev' }}
+      INGEST_API_URL: ${{ vars.INGEST_API_URL }}
+      INGEST_KEY: ${{ secrets.INGEST_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Retry media within its own budget
+        timeout-minutes: 20
         run: pnpm --filter @starter/collector run run --retry-media

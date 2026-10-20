@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import type { IngestUnit } from "../../apps/collector/src/types";
+import { collectionSince, openScopedCheckpoints } from "../../apps/collector/src/collection-scope";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // A real Pocket48 page exceeded the API's 128 KiB body limit. Keep real HTTP/D1
 // writes, inject a transport failure after the first chunk, and verify resume.
@@ -68,3 +72,23 @@ const catalogOnly = Array.from({ length: 51 }, (_, i) => ({ id: i.toString(16).p
 await store.ingestUnit({ ...unit, messages: [], catalog: catalogOnly });
 assert.equal((await store.pendingCatalog(unit.member.id, "album", 50)).length, 50, "Catalog-only pages must respect the per-request row limit as well as bytes");
 console.log("PASS stable media retry pagination and catalog-only request partitioning");
+
+// Simulate a new runner with no artifact/local file: the collector transport
+// must recover the same source cursor from the actual private D1 API.
+const progressDirectory = await mkdtemp(join(tmpdir(), "collector-resume-"));
+try {
+  const since = collectionSince();
+  const legacyBefore = await store.getSyncState(unit.member.id);
+  const scopedStore = new HttpIngestStore(endpoint, key, since);
+  const first = await openScopedCheckpoints(join(progressDirectory, "first.json"), since, scopedStore);
+  await first.write(unit.member.id, { source: "posts", historyCursor: "durable-older", historyDone: false,
+    latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [],
+    status: "ok", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
+  const resumed = await openScopedCheckpoints(join(progressDirectory, "new-runner.json"), since, new HttpIngestStore(endpoint, key, since));
+  assert.equal(resumed.read(unit.member.id)[0]?.historyCursor, "durable-older");
+  assert.equal((await store.getSyncState(unit.member.id)).messageCursor, legacyBefore.messageCursor);
+  const otherSince = collectionSince("2026-02-01T00:00:00+08:00");
+  const other = await openScopedCheckpoints(join(progressDirectory, "other-scope.json"), otherSince, new HttpIngestStore(endpoint, key, otherSince));
+  assert.deepEqual(other.read(unit.member.id), []);
+  console.log("PASS collector transport: fresh runner restores D1 cursor without touching all-history state");
+} finally { await rm(progressDirectory, { recursive: true, force: true }); }

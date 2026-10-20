@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
 import { drizzle } from "drizzle-orm/d1";
 import type { AppEnv } from "../env";
-import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema } from "@starter/shared/schemas";
+import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema, CollectorSinceSchema, CollectorProgressSchema } from "@starter/shared/schemas";
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
@@ -21,11 +21,31 @@ app.use("*", async (c, next) => {
   await next();
 });
 app.onError((error, c) => {
+  if (/no such table:.*query_collector_progress/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "collector_progress_not_configured", message: "Apply the collector progress migration before enabling scheduled collection." } }, 503);
   if (error instanceof HTTPException) return c.json({ ok: false, error: { code: "http_error", message: error.message } }, error.status);
   console.error(JSON.stringify({ event: "ingest_failed", name: error.name }));
   return c.json({ ok: false, error: { code: "internal_error", message: "Unexpected ingestion error." } }, 500);
 });
 function database(c: { env: AppEnv["Bindings"] }) { if (!c.env.APP_DB) throw new Error("APP_DB binding is missing"); return c.env.APP_DB; }
+
+app.openapi(createRoute({ method: "get", path: "/progress", request: { query: z.object({ since: CollectorSinceSchema, after: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) }, responses: { 200: { description: "Private, date-scoped resumable collector progress.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CollectorProgressSchema), nextCursor: z.string().nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
+  const { since: rawSince, after, limit } = c.req.valid("query");
+  const since = new Date(rawSince).toISOString();
+  const rows = await database(c).prepare("SELECT member_id, revision, state_json FROM query_collector_progress WHERE since = ? AND member_id > ? ORDER BY member_id LIMIT ?").bind(since, after ?? "", limit + 1).all<{ member_id: string; revision: number; state_json: string }>();
+  const data = rows.results.slice(0, limit).map(row => CollectorProgressSchema.parse({ ...JSON.parse(row.state_json), revision: row.revision }));
+  return c.json({ ok: true as const, data, nextCursor: rows.results.length > limit ? data.at(-1)!.memberId : null }, 200);
+});
+app.openapi(createRoute({ method: "post", path: "/progress", request: { body: { required: true, content: { "application/json": { schema: CollectorProgressSchema } } } }, responses: { 200: { description: "Saved only after content ingestion; revision prevents stale collectors overwriting newer cursors.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.object({ revision: z.number().int() }) }) } } }, 400: unavailable, 401: unavailable, 409: unavailable, 503: unavailable } }), async c => {
+  const submitted = c.req.valid("json");
+  const input = { ...submitted, since: new Date(submitted.since).toISOString() };
+  const row = await database(c).prepare(`INSERT INTO query_collector_progress (since, member_id, revision, state_json, updated_at)
+    SELECT ?, ?, 1, ?, ? WHERE ? = 0 OR EXISTS (SELECT 1 FROM query_collector_progress WHERE since = ? AND member_id = ?)
+    ON CONFLICT(since, member_id) DO UPDATE SET revision = query_collector_progress.revision + 1, state_json = excluded.state_json, updated_at = excluded.updated_at
+    WHERE query_collector_progress.revision = ? RETURNING revision`)
+    .bind(input.since, input.memberId, JSON.stringify(input), new Date().toISOString(), input.revision, input.since, input.memberId, input.revision).first<{ revision: number }>();
+  if (!row) return c.json({ ok: false as const, error: { code: "progress_conflict", message: "Collector progress changed; reload before resuming." } }, 409);
+  return c.json({ ok: true as const, data: row }, 200);
+});
 
 type Member = z.infer<typeof QueryIngestUnitSchema>["member"];
 function memberStatement(db: D1Database, member: Member, now: string) {
@@ -120,12 +140,17 @@ app.openapi(createRoute({ method: "get", path: "/catalog", request: { query: z.o
 
 const ImageResult = z.object({ ok: z.literal(true), data: ImageAttachmentSchema.nullable() });
 const imageParams = z.object({ id: z.string().min(1).max(100) });
-const MediaQueueQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25), afterId: z.string().max(100).optional() });
-app.openapi(createRoute({ method: "get", path: "/images", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed image uploads; afterId enables stable batch pagination.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(ImageAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
-  const { limit, afterId } = c.req.valid("query");
-  const query = database(c).prepare(`SELECT ${imageProjection} FROM query_images WHERE gallery_url IS NULL ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`);
-  const rows = await (afterId === undefined ? query.bind(limit) : query.bind(afterId, limit)).all();
-  return c.json({ ok: true as const, data: rows.results.map(readImage) }, 200);
+const MediaQueueQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25), afterId: z.string().max(100).optional(), since: CollectorSinceSchema.optional() });
+app.openapi(createRoute({ method: "get", path: "/images", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed image uploads; afterId enables stable batch pagination.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(ImageAttachmentSchema), since: z.string().nullable() }) } } }, 401: unavailable } }), async c => {
+  const { limit, afterId, since: rawSince } = c.req.valid("query");
+  const since = rawSince ? new Date(rawSince).toISOString() : null;
+  const params: (string | number)[] = [];
+  const scope = since ? "AND EXISTS (SELECT 1 FROM query_message_images link JOIN query_messages q ON q.id = link.message_id WHERE link.image_id = query_images.id AND q.occurred_at >= ? AND q.kind IN ('text', 'image', 'video', 'reply', 'post'))" : "";
+  if (since) params.push(since);
+  if (afterId !== undefined) params.push(afterId);
+  params.push(limit);
+  const rows = await database(c).prepare(`SELECT ${imageProjection} FROM query_images WHERE gallery_url IS NULL ${scope} ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`).bind(...params).all();
+  return c.json({ ok: true as const, data: rows.results.map(readImage), since }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/images/{id}", request: { params: imageParams }, responses: { 200: { description: "Image upload cache.", content: { "application/json": { schema: ImageResult } } }, 401: unavailable } }), async c => {
   const row = await database(c).prepare(`SELECT ${imageProjection} FROM query_images WHERE id = ?`).bind(c.req.valid("param").id).first();
@@ -139,11 +164,16 @@ app.openapi(createRoute({ method: "post", path: "/images/{id}", request: { param
 });
 
 const VideoResult = z.object({ ok: z.literal(true), data: VideoAttachmentSchema.nullable() });
-app.openapi(createRoute({ method: "get", path: "/videos", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed video uploads; oversized videos are not retried.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(VideoAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
-  const { limit, afterId } = c.req.valid("query");
-  const query = database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE gallery_url IS NULL AND status IN ('pending', 'failed') ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`);
-  const rows = await (afterId === undefined ? query.bind(limit) : query.bind(afterId, limit)).all();
-  return c.json({ ok: true as const, data: rows.results.map(readVideo) }, 200);
+app.openapi(createRoute({ method: "get", path: "/videos", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed video uploads; oversized videos are not retried.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(VideoAttachmentSchema), since: z.string().nullable() }) } } }, 401: unavailable } }), async c => {
+  const { limit, afterId, since: rawSince } = c.req.valid("query");
+  const since = rawSince ? new Date(rawSince).toISOString() : null;
+  const params: (string | number)[] = [];
+  const scope = since ? "AND EXISTS (SELECT 1 FROM query_message_videos link JOIN query_messages q ON q.id = link.message_id WHERE link.video_id = query_videos.id AND q.occurred_at >= ? AND q.kind IN ('text', 'image', 'video', 'reply', 'post'))" : "";
+  if (since) params.push(since);
+  if (afterId !== undefined) params.push(afterId);
+  params.push(limit);
+  const rows = await database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE gallery_url IS NULL AND status IN ('pending', 'failed') ${scope} ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`).bind(...params).all();
+  return c.json({ ok: true as const, data: rows.results.map(readVideo), since }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/videos/{id}", request: { params: imageParams }, responses: { 200: { description: "Video upload cache.", content: { "application/json": { schema: VideoResult } } }, 401: unavailable } }), async c => {
   const row = await database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE id = ?`).bind(c.req.valid("param").id).first();

@@ -4,15 +4,18 @@ import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
 import { directoryEntries, readHistoricalDirectory, rosterName, type RosterCandidate } from "./group-roster";
 import { collectionSince } from "./collection-scope";
+import type { CollectionBudget } from "./budget";
 
 type Pocket48Options = {
   token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
   apiBaseUrl?: string; directoryUrl?: string; historyDirectoryUrl?: string; minIntervalMs?: number; memberScope?: "followed" | "all";
   requestedMemberId?: string;
   since?: string | null;
+  budget?: () => CollectionBudget;
   readVerifiedPostImages?: (memberId: string, imageIds: string[]) => Promise<CollectorMessage[]>;
   readVerifiedMedia?: (roomId: string, assets: { id: string; occurredAt: string }[]) => Promise<CollectorMessage[]>;
   albumOriginalPages?: number;
+  maxOriginalLookups?: number;
   sources?: CollectionSource[]; fetchImpl?: typeof fetch;
 };
 const DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
@@ -63,7 +66,11 @@ export class Pocket48Source implements CollectorSource {
     await previous;
     try {
       const wait = Math.max(0, this.options.minIntervalMs ?? 5000) - (Date.now() - this.lastRequestAt);
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      this.options.budget?.().check();
+      if (wait > 0) {
+        if (this.options.budget) await this.options.budget().wait(wait);
+        else await new Promise((resolve) => setTimeout(resolve, wait));
+      }
       this.lastRequestAt = Date.now();
     } finally { release(); }
   }
@@ -87,7 +94,9 @@ export class Pocket48Source implements CollectorSource {
     if (pa) headers.pa = pa;
     // Signer latency must not consume the delay and bunch actual requests.
     await this.rateLimit();
-    const response = await this.fetchImpl(`${this.baseUrl}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    let response: Response;
+    try { response = await this.fetchImpl(`${this.baseUrl}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: this.options.budget?.().signal(30_000) ?? AbortSignal.timeout(30_000) }); }
+    catch (error) { this.options.budget?.().check(); throw error; }
     const payload = object(parsePocketJson(await response.text()));
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
       // Do not include upstream free-form error text, which can contain user data.
@@ -518,6 +527,8 @@ export class Pocket48Source implements CollectorSource {
       throw new Error("Pocket48 historical essence candidate could not be verified from target-member messages; source retained for retry.");
     }
     const originalsFound = new Map<string, CollectorMessage>();
+    let originalLookups = 0;
+    const canLookup = () => !this.options.budget?.().stopped && originalLookups < (this.options.maxOriginalLookups ?? Infinity);
     if (source === "album") {
       const room = historicalRoom ?? await this.resolveRoom(member);
       if (historicalRoom && !values.length) throw new Error("Pocket48 historical album candidate has no verifiable originals; source retained for retry.");
@@ -547,6 +558,8 @@ export class Pocket48Source implements CollectorSource {
           const oldest = Math.min(...wanted.map(item => Date.parse(item.at)));
           try {
             for (let page = 0; page < (this.options.albumOriginalPages ?? 3) && next !== null; page++) {
+              if (!canLookup()) break;
+              originalLookups += 1;
               const originals = await this.legacyMediaPage(member, kind, next);
               for (const message of originals.items) {
                 originalsFound.set(message.id, message); legacyOriginalIds.add(message.id);
@@ -588,6 +601,8 @@ export class Pocket48Source implements CollectorSource {
           const start = Date.parse(at) + 1;
           let nextTime = hints?.length ? Math.max(...hints.map(value => typeof value === "number" && Number.isSafeInteger(value) && value >= start - 1 && value <= start ? value : start)) : start;
           for (let page = 0; page < (this.options.albumOriginalPages ?? 3); page++) {
+            if (!canLookup()) break;
+            originalLookups += 1;
             let originals: unknown;
             try { originals = await this.post(`/im/api/v1/team/message/list/${endpoint}`, { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime, limit: 50 }); }
             catch (error) {
@@ -607,7 +622,7 @@ export class Pocket48Source implements CollectorSource {
             if (!rows.length || !Number.isSafeInteger(next) || next <= 0 || next < Date.parse(at)) break;
             if (next >= nextTime) throw new Error("Pocket48 repeated the album original cursor.");
             nextTime = next;
-            if (page === (this.options.albumOriginalPages ?? 3) - 1) progress[endpoint] = next;
+            progress[endpoint] = next;
           }
           if (matched()) break;
         }
@@ -638,6 +653,8 @@ export class Pocket48Source implements CollectorSource {
       }
       for (const group of groups.values()) {
         if (group.urls.every(url => this.verifiedMedia.get(url)?.memberId === member.id)) continue;
+        if (!canLookup()) break;
+        originalLookups += 1;
         const originals = await this.post("/posts/api/v1/posts/timeline/home/new", { userId: Number(member.id), nextId: String(BigInt(group.anchor) + 1n) });
         for (const original of contentList(originals)) {
           const message = normalizeMessage(original, member, "posts", this.directory);

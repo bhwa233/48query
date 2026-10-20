@@ -21,7 +21,7 @@ import type {
   EchoSchema,
   QueryOverviewSchema,
   QueryRankingsSchema,
-  QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema, CatalogEntrySchema,
+  QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema, CatalogEntrySchema, CollectorProgressSchema,
 } from "./schemas";
 
 export type ApiErrorResponse = z.infer<typeof ErrorSchema>;
@@ -40,5 +40,6 @@ export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
 export type VideoAttachment = z.infer<typeof VideoAttachmentSchema>;
 export type CollectionSource = z.infer<typeof CollectionSourceSchema>;
 export type SourceSync = z.infer<typeof SourceSyncSchema>;
+export type CollectorProgress = z.infer<typeof CollectorProgressSchema>;
 
 export type CatalogEntry = z.infer<typeof CatalogEntrySchema>;

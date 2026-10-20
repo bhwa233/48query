@@ -8,6 +8,8 @@ export type GroupEntry = {
   identityError?: string;
   checkedAt?: string;
   lastAttemptAt?: string;
+  lastIncrementalAt?: string;
+  lastHistoryAt?: string;
   collectedAt?: string;
   errorCount?: number;
   sources?: SourceSync[];
@@ -26,6 +28,7 @@ export function applyGroupScope(state: GroupProgress, since: string) {
     delete entry.collectedAt; delete entry.sources; delete entry.errorCount; delete entry.lastAttemptAt;
     delete entry.inspectedAt; delete entry.inspectionSources; delete entry.inspectionErrorCount;
     delete entry.scopeComplete; delete entry.inspectionScopeComplete;
+    delete entry.lastIncrementalAt; delete entry.lastHistoryAt;
   }
 }
 
@@ -53,12 +56,16 @@ export function reconcileGroupEntries(previous: GroupEntry[], roster: ReturnType
 // The existing source cursors resume pages; they do not choose which member
 // runs next. Rotate this persisted group queue by attempts, including failures,
 // so a bounded recurring run cannot keep retrying only its first members.
-export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean }) {
+export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean; phase?: "incremental" | "history" }) {
   return entries.map((entry, index) => {
     const identity = entry.identity === "pending" || (options.retryUnverified && entry.identity !== "verified");
     const collect = options.collect && entry.identity === "verified" && (options.refresh || !entry.collectedAt || entry.scopeComplete === false);
     return { entry, index, identity, collect };
-  }).filter(item => item.identity || item.collect).sort((a, b) => {
+  }).filter(item => options.phase === "history" ? options.collect && item.entry.identity === "verified" && item.entry.scopeComplete !== true && Boolean(item.entry.sources?.length) : item.identity || item.collect).sort((a, b) => {
+    if (options.phase) {
+      const key = options.phase === "history" ? "lastHistoryAt" : "lastIncrementalAt";
+      return (a.entry[key] ?? "").localeCompare(b.entry[key] ?? "") || a.index - b.index;
+    }
     const first = Number(Boolean(a.entry.collectedAt)) - Number(Boolean(b.entry.collectedAt));
     return first || (a.entry.lastAttemptAt ?? "").localeCompare(b.entry.lastAttemptAt ?? "") || a.index - b.index;
   });

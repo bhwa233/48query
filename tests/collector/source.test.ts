@@ -12,8 +12,47 @@ import { buildGroupRoster, directoryEntries, HISTORICAL_DIRECTORY_URL, readHisto
 import { applyGroupScope, groupWork, reconcileGroupEntries, type GroupEntry, type GroupProgress } from "../../apps/collector/src/group-progress";
 import { collectionSince } from "../../apps/collector/src/collection-scope";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
+import { CollectionBudget } from "../../apps/collector/src/budget";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
+
+// The previous job only stopped between members. A page committed just before
+// the budget expires must survive, without failure or a false completion flag.
+test("budget stops between committed pages and the next batch resumes its cursor", async () => {
+  const budget = new CollectionBudget();
+  let saved: SourceSync[] = [];
+  const scope = { read: () => saved, write: async (_id: string, sync: SourceSync) => { saved = [sync]; budget.stop(); } };
+  const store = new DryRunStore();
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const reads: (string | null)[] = [];
+  const source = { sources: ["posts"] as const, listMembers: async () => [member], listMessages: async (_member: typeof member, cursor: string | null) => {
+    reads.push(cursor);
+    return { items: [{ id: cursor ?? "new", memberId: member.id, type: "POST", occurredAt: cursor ? "2026-01-01T00:00:00.000Z" : "2026-10-01T00:00:00.000Z" }], nextCursor: cursor ? null : "older" };
+  } };
+  const first = await runBatch(source, store, { since: collectionSince(), checkpoints: scope, budget, maxHistoryPagesPerMember: 20 });
+  assert.deepEqual(reads, [null]);
+  assert.equal(first.budgetReached, true);
+  assert.equal(first.errorCount, 0);
+  assert.equal(first.scopeComplete, false);
+  assert.equal(saved[0]?.historyCursor, "older");
+  const second = await runBatch(source, store, { since: collectionSince(), checkpoints: scope, budget: new CollectionBudget(), historyOnly: true, maxHistoryPagesPerMember: 1 });
+  assert.deepEqual(reads, [null, "older"]);
+  assert.equal(second.scopeComplete, true);
+});
+
+test("a budget ending during a media upload leaves that item retryable", async () => {
+  const budget = new CollectionBudget();
+  const image: ImageAttachment = { id: "pending", sourceUrl: "https://source.48.cn/pending.jpg", status: "pending" };
+  const saved: string[] = [];
+  const result = await retryMedia({ ...new DryRunStore(), getSyncState: async () => null, ingestUnit: async () => {}, completeBatch: async () => {},
+    pendingImages: async () => [image], saveImage: async item => { saved.push(item.id); } }, {
+    budget, mediaOnly: true, archiveImage: async () => { budget.stop(); throw new Error("Interrupted upload"); },
+  });
+  assert.equal(result.budgetReached, true);
+  assert.equal(result.failures, 0);
+  assert.equal(image.status, "pending");
+  assert.deepEqual(saved, []);
+});
 
 // GitHub-hosted collection failed before its first member because the public
 // historical directory rejects runner IPs with 403. A dated candidate snapshot
@@ -75,18 +114,18 @@ test("pre-2026 album entries stop pagination before original lookup and remain o
   assert.equal(requests.length, 2);
 });
 
-test("media retries select dated originals instead of the unbounded upload queue", async context => {
+test("media retries require the private queue to confirm its date scope", async context => {
   const image = (id: string): ImageAttachment => ({ id, sourceUrl: `https://source.48.cn/${id}.jpg`, status: "pending" });
   context.mock.method(globalThis, "fetch", async (url: string | URL | Request) => {
-    assert.equal(new URL(String(url)).pathname, "/api/query/messages", "Never fall back to the unbounded pending-media endpoint");
+    const query = new URL(String(url));
+    assert.equal(query.pathname, "/api/query/ingest/images");
+    assert.equal(query.searchParams.get("since"), collectionSince());
     return Response.json({ ok: true, data: [
-      { occurredAt: "2025-12-31T15:59:59.999Z", images: [image("old")] },
-      { occurredAt: "2025-12-31T16:00:00.000Z", images: [image("inclusive")] },
-    ], nextCursor: null });
+      image("old"),
+    ] });
   });
   const store = new HttpIngestStore("http://synthetic.invalid", "synthetic", collectionSince());
-  assert.deepEqual((await store.pendingImages(10)).map(item => item.id), ["inclusive"]);
-  assert.deepEqual(await store.pendingImages(10, "inclusive"), []);
+  await assert.rejects(store.pendingImages(10), /did not confirm/, "An older deployed API that ignores the date filter must not expose pre-2026 uploads");
 });
 
 // A daily member/page budget used to stop at the same first members. Rotation
@@ -107,6 +146,32 @@ test("bounded group runs rotate completed attempts and keep unverified identitie
   assert.deepEqual(groupWork(entries, options).map(item => entries.indexOf(item.entry)), [1, 0, 3], "A failed attempt still yields to older members in the next run");
   assert.deepEqual(groupWork(entries, { ...options, refresh: false }), [], "First coverage does not automatically recollect an already attempted member");
   assert.deepEqual(groupWork(entries, { collect: false, refresh: false, retryUnverified: true }).map(item => entries.indexOf(item.entry)), [2]);
+  entries[0]!.lastIncrementalAt = "2026-10-19T00:00:00Z";
+  entries[1]!.lastIncrementalAt = "2026-10-18T00:00:00Z";
+  entries[3]!.lastIncrementalAt = "2026-10-20T00:00:00Z";
+  assert.deepEqual(groupWork(entries, { ...options, phase: "incremental" }).map(item => entries.indexOf(item.entry)), [1, 0, 3], "Frequent updates rotate independently of historical completion");
+});
+
+// One directory page expands into many original-message requests. Cap that
+// expansion while retaining every unresolved item for private verification.
+test("bounded album lookups retain untouched directory rows instead of stalling a member", async () => {
+  let originalReads = 0;
+  const at = Date.parse("2026-10-01T00:00:00.000Z");
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, maxOriginalLookups: 1, fetchImpl: async url => {
+    const path = new URL(String(url)).pathname;
+    if (path.endsWith("/jump")) return Response.json({ status: 200, content: { channelId: 22, serverId: 33 } });
+    if (path.endsWith("/msg/list/img")) return Response.json({ status: 200, content: { imgAndVideoList: [0, 1, 2].map(index => ({ createTime: at - index * 1000, bodys: { url: `https://source.48.cn/${index}.jpg` } })), nextTime: 123 } });
+    originalReads++;
+    return Response.json({ status: 200, content: { message: [{ msgIdServer: "fan", msgTime: at, msgType: "TEXT", bodys: "fan", extInfo: { user: { userId: "999" } } }], nextTime: at } });
+  } });
+  const page = await source.listContent({ id: "1", name: "Owner", groupName: "SNH48" }, "album", null);
+  assert.equal(originalReads, 1);
+  assert.equal(page.nextCursor, "123");
+  assert.equal(page.unverified, 3);
+  assert.equal(page.catalog?.filter(item => item.status === "pending").length, 3);
+  const lookup = JSON.parse(page.catalog![0]!.rawJson);
+  assert.equal(lookup.originalCursors.all, at, "Stopping before the ordinary page cap must retain the original lookup cursor");
+  assert.deepEqual(page.items, [], "Unverified directory rows must never become attributed messages");
 });
 
 test("roster refresh retains missing graduates and retries newly discovered identity mappings", () => {
@@ -721,7 +786,8 @@ test("retains unresolved catalog entries independently of discovery cursors", as
   } };
   const result = await runBatch(source, store, { maxPagesPerMember: 1, maxHistoryPagesPerMember: 0 });
   assert.equal(pages, 1);
-  assert.equal(result.errorCount, 1, "Pending verification must remain visible as an error");
+  assert.equal(result.errorCount, 0, "Durably queued work is pending coverage, not a failed batch");
+  assert.equal(result.scopeComplete, false);
   assert.equal(store.units.filter(unit => unit.sync).at(-1)?.sync?.historyCursor, "older");
   assert.equal(store.queue.get(entry.id)?.status, "pending");
   store.saved = { ...store.saved!, historyDone: true, historyCursor: null };

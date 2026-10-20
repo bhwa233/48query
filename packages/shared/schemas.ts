@@ -87,6 +87,15 @@ export const SourceSyncSchema = z.object({
   lastSuccessAt: z.string().nullable(), lastNonemptyAt: z.string().nullable(),
 });
 
+export const CollectorSinceSchema = z.string().datetime().refine(value => Date.parse(value) >= Date.parse("2025-12-31T16:00:00.000Z"), "Collection starts no earlier than Beijing New Year 2026.");
+export const CollectorProgressSchema = z.object({
+  memberId: z.string().min(1).max(100), since: CollectorSinceSchema,
+  revision: z.number().int().nonnegative(),
+  sources: z.array(SourceSyncSchema).max(7).refine(values => new Set(values.map(value => value.source)).size === values.length, "Duplicate source checkpoints."),
+  lastAttemptAt: z.string().datetime().nullable(), lastIncrementalAt: z.string().datetime().nullable(), lastHistoryAt: z.string().datetime().nullable(),
+  collectedAt: z.string().datetime().nullable(), scopeComplete: z.boolean(), errorCount: z.number().int().nonnegative(),
+});
+
 export const QueryMessageSchema = z.object({
   id: z.string(),
   memberId: z.string(),

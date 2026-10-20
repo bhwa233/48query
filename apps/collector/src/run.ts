@@ -1,11 +1,12 @@
 import type { CatalogEntry } from "@starter/shared";
 import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStore, IngestUnit, SourceSync } from "./types";
 import type { ScopedCheckpoints } from "./collection-scope";
+import { CollectionStopped, type CollectionBudget } from "./budget";
 
 const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
@@ -26,9 +27,11 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   let imageFailures = 0;
   let videoFailures = 0;
   let sourcesPending = 0;
+  let budgetReached = false;
   const streams = source.sources ?? ["room"];
 
   for (const member of members) {
+    if (options.budget?.stopped) { budgetReached = true; break; }
     const state = await store.getSyncState(member.id);
     if (state && options.checkpoints) state.sources = options.checkpoints.read(member.id);
     let covered = false;
@@ -42,9 +45,13 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     // Register before any source can fail, preserving the original error on completion.
     await store.ingestUnit(unit([]));
     for (const stream of streams) {
+      if (options.budget?.stopped) { budgetReached = true; break; }
       let sync = structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream));
+      let catalogPending = false;
       try {
         const readPage = async (cursor: string | null) => {
+          options.budget?.check();
+          console.log(JSON.stringify({ event: "source_page_started", memberId: member.id, source: stream, phase: options.historyOnly ? "history" : "incremental" }));
           const page = await (source.listContent ? source.listContent(member, stream, cursor) : source.listMessages(member, cursor));
           if (!options.since) return page;
           const boundary = page.boundary ?? page.items.map(item => ({ id: item.id, occurredAt: item.occurredAt }));
@@ -72,7 +79,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
               else if (options.archiveImage) {
                 await store.saveImage?.(image);
                 try { await options.archiveImage(image); }
-                catch { image.status = "failed"; imageFailures += 1; }
+                catch { options.budget?.check(); image.status = "failed"; imageFailures += 1; }
                 await store.saveImage?.(image);
               }
             }));
@@ -86,7 +93,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             else if (options.archiveVideo) {
               await store.saveVideo?.(video);
               try { await options.archiveVideo(video); }
-              catch { video.status = "failed"; videoFailures += 1; }
+              catch { options.budget?.check(); video.status = "failed"; videoFailures += 1; }
               await store.saveVideo?.(video);
             }
           }
@@ -103,9 +110,10 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             try {
               const retried = await source.retryCatalog(member, stream, pending);
               const now = new Date().toISOString();
-              await write(retried.items, { ...sync, status: retried.unverified ? "failed" : "ok", lastError: retried.unverified ? sync.lastError : null,
+              await write(retried.items, { ...sync, status: retried.unverified ? "pending" : "ok", lastError: retried.unverified ? sync.lastError : null,
                 lastSuccessAt: now, lastNonemptyAt: retried.items.length ? now : sync.lastNonemptyAt }, retried.catalog);
             } catch (error) {
+              options.budget?.check();
               // Rotate failed lookups without letting one old item block new
               // discovery. Originals remain private and the source stays failed.
               await store.ingestUnit(unit([], undefined, pending));
@@ -139,6 +147,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             ...(initial && (options.since || observed > 0 || page.nextCursor !== null) ? { historyCursor: page.nextCursor, historyDone: page.nextCursor === null } : {}),
           };
           await write(page.items, next, page.catalog);
+          console.log(JSON.stringify({ event: "source_page_committed", memberId: member.id, source: stream, messages: page.items.length, historyDone: next.historyDone }));
           if (finished) break;
           cursor = page.nextCursor;
         }
@@ -160,9 +169,13 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             if (sync.historyDone) break;
           }
         }
-        if ((stream === "album" || stream === "post_images") && store.pendingCatalog && (await store.pendingCatalog(member.id, stream, 1)).length) throw new Error("Catalog discovery checkpoint saved; unverified entries retained in the private retry queue.");
+        if ((stream === "album" || stream === "post_images") && store.pendingCatalog && (await store.pendingCatalog(member.id, stream, 1)).length) {
+          catalogPending = true;
+          console.log(JSON.stringify({ event: "catalog_pending", memberId: member.id, source: stream }));
+        }
         if (stream === "room") roomSync = sync;
       } catch (error) {
+        if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
         errorCount += 1;
         lastError = error instanceof Error ? error.message : "Collection failed.";
         sync = { ...sync, status: "failed", lastError: lastError.slice(0, 1000) };
@@ -170,11 +183,11 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         if (stream === "room") roomSync = sync;
         console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: stream, error: lastError }));
       }
-      if (!sync.historyDone || sync.incrementalCursor !== null || sync.status === "failed") sourcesPending += 1;
+      if (catalogPending || !sync.historyDone || sync.incrementalCursor !== null || sync.status === "failed") sourcesPending += 1;
     }
     // Album verification can find genuine older member messages beyond pages of
     // fan chat. Record that evidence without changing newest/history boundaries.
-    if (roomSync && !roomSync.lastNonemptyAt) {
+    if (!budgetReached && roomSync && !roomSync.lastNonemptyAt) {
       const now = new Date().toISOString();
       if (verifiedRoomContent) await persist([], { ...roomSync,
         ...(roomSync.status === "failed" ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now });
@@ -187,9 +200,10 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     }
     if (covered) membersCovered += 1;
     await store.ingestUnit(unit([]));
+    if (budgetReached) break;
   }
   if (imageFailures > 0) { errorCount += imageFailures; lastError = `${imageFailures} image uploads failed; retained for retry.`; }
   if (videoFailures > 0) { errorCount += videoFailures; lastError = `${videoFailures} video uploads failed; retained for retry.`; }
   await store.completeBatch({ batchId, completedAt: new Date().toISOString(), membersCovered, totalMembers: members.length, errorCount, errorMessage: lastError });
-  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, scopeComplete: sourcesPending === 0 && errorCount === 0 };
+  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, budgetReached, scopeComplete: !budgetReached && sourcesPending === 0 && errorCount === 0 };
 }
