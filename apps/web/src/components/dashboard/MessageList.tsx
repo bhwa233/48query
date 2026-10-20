@@ -5,6 +5,12 @@ import type { ArchiveMessage } from "@starter/shared";
 import { Badge } from "@/components/ui/badge";
 import { ArchiveImage, archiveLabels, formatTime } from "./ArchiveData";
 
+// The shared UI and installed Web dependencies have no Pocket48 text formatter.
+// Only unwrap this legacy mention format; keep all content as React text, without an HTML parser.
+function displayMessageText(value: string | null) {
+  return value?.replace(/<a\s+href\s*=\s*(["'])snh48:\/\/\d+\1\s*>([\s\S]*?)<\/a\s*>/gi, "$2") ?? null;
+}
+
 export function MessageList({ messages, locale, emptyText }: { messages: ArchiveMessage[]; locale: string; emptyText?: string }) {
   const t = archiveLabels(locale);
   const language = locale === "zh" ? "zh-CN" : "en";
@@ -28,7 +34,7 @@ export function MessageList({ messages, locale, emptyText }: { messages: Archive
             <span>{t.beijingTime}</span>
           </h3>
           {group.messages.map(message => {
-            const content = message.answer ?? message.text;
+            const content = displayMessageText(message.answer ?? message.text);
             const visiting = message.roomOwnerName && (message.roomOwnerId ? message.roomOwnerId !== message.memberId : message.roomOwnerName !== message.memberName);
             return (
               <article key={message.id} className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 rounded-md px-2 py-1.5 text-sm leading-[22px] hover:bg-muted/50 sm:grid-cols-[4rem_minmax(0,1fr)]">
@@ -45,7 +51,7 @@ export function MessageList({ messages, locale, emptyText }: { messages: Archive
                     {message.sourceFlags & 4 ? <Badge variant="secondary" className="ml-2 align-middle">{t.essence}</Badge> : null}
                   </p>
                   {visiting ? <p className="text-xs text-muted-foreground">{t.room}: {message.roomOwnerName} · {t.visitor}</p> : null}
-                  {message.question ? <blockquote className="mt-1 border-l-2 border-border pl-2 text-xs leading-5 text-muted-foreground"><p className="font-medium">{t.question}</p><p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.question}</p></blockquote> : null}
+                  {message.question ? <blockquote className="mt-1 border-l-2 border-border pl-2 text-xs leading-5 text-muted-foreground"><p className="font-medium">{t.question}</p><p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{displayMessageText(message.question)}</p></blockquote> : null}
                   {message.kind === "excluded" || message.kind === "unknown" ? <p className="text-xs text-muted-foreground">{message.kind === "excluded" ? t.excluded : t.unsupported}</p> : null}
                 </div>
                 {message.images.length ? <div className="col-span-2 mt-1.5 flex min-w-0 flex-wrap gap-2 pb-1.5 sm:col-span-1 sm:col-start-2">{message.images.map(image => <ArchiveImage key={image.id} image={image} locale={locale} />)}</div> : null}

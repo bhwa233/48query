@@ -29,23 +29,18 @@ export default async function ArticlePage({ params }: Props) {
   if (!article) notFound();
   const { Content } = article;
   return (
-    <AppPageContainer width="narrow">
-      <Link
-        className="text-sm text-muted-foreground underline underline-offset-4"
-        href={`/${locale}/articles`}
-      >
-        {messages[locale].content.back}
-      </Link>
+    <AppPageContainer variant="workspace" width="narrow" className="gap-3 py-3 sm:py-4">
       <article className="mx-auto w-full max-w-3xl">
-        <header className="mb-8 space-y-3">
-          <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
+        <header className="mb-6 flex flex-col gap-2">
+          <Link className="w-fit text-xs text-muted-foreground underline underline-offset-4" href={`/${locale}/articles`}>{messages[locale].content.back}</Link>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             {article.title}
           </h1>
-          <p className="text-lg leading-7 text-muted-foreground">
+          <p className="text-sm leading-6 text-muted-foreground">
             {article.description}
           </p>
           <time
-            className="text-sm text-muted-foreground"
+            className="text-xs text-muted-foreground"
             dateTime={article.publishedAt}
           >
             {article.publishedAt}

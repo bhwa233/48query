@@ -69,14 +69,41 @@ test("dashboard search and archive navigation work", async ({ page }) => {
   await page.getByRole("link", { name: "成员", exact: true }).click();
   await expect(page).toHaveURL(/\/zh\/members$/);
   await expect(page.getByRole("heading", { name: "成员", exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "全部团体", exact: true }).click();
+  await page.getByRole("option", { name: "GNZ48", exact: true }).click();
+  await expect(page.getByRole("link", { name: /验证成员/ })).toHaveCount(0);
+  await page.getByRole("combobox", { name: "全部团体", exact: true }).click();
+  await page.getByRole("option", { name: "全部团体", exact: true }).click();
+  await page.getByRole("textbox", { name: "搜索姓名或拼音" }).fill("syntheticmember");
+  await expect(page.getByRole("link", { name: /对照成员/ })).toHaveCount(0);
   await page.getByRole("link", { name: /验证成员/ }).first().click();
   await expect(page).toHaveURL(/\/zh\/members\/e2e-member$/);
-  await expect(page.getByText("统计概览", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "统计概览", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "消息", exact: true }).click();
   await page.getByRole("textbox", { name: "搜索消息或提问内容" }).fill("验证公开提问");
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
   await expect(page.getByText("验证文字归档", { exact: true })).toHaveCount(0);
+  const advanced = page.getByRole("button", { name: "更多筛选", exact: true });
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await advanced.click();
+  await page.getByRole("combobox", { name: "全部来源", exact: true }).click();
+  await page.getByRole("option", { name: "房间相册", exact: true }).click();
+  await expect(page.getByText("暂无符合条件的内容。", { exact: true })).toBeVisible();
+  await advanced.click();
+  await expect(page.getByRole("combobox", { name: "全部来源", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "消息筛选" }).getByRole("paragraph")).toHaveText("房间相册");
+  await page.getByRole("button", { name: "清除更多筛选", exact: true }).click();
+  await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "搜索消息或提问内容" })).toHaveValue("验证公开提问");
+  await advanced.click();
+  await page.getByLabel("开始日期", { exact: true }).fill("2020-01-01");
+  await page.getByLabel("结束日期", { exact: true }).fill("2020-01-02");
+  await expect(page.getByText("暂无符合条件的内容。", { exact: true })).toBeVisible();
+  await advanced.click();
+  await expect(page.getByText(/开始日期: 2020-01-01/)).toBeVisible();
+  await page.getByRole("button", { name: "清除更多筛选", exact: true }).click();
+  await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
   await page.goto("/zh/images");
   await page.getByRole("button", { name: "查看原图", exact: true }).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -87,7 +114,7 @@ test("mobile pages fit the viewport and expose navigation and theme controls", a
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const path of ["/en", "/zh", "/zh/members", "/zh/messages", "/zh/images", "/zh/recordings"]) {
+  for (const path of ["/en", "/zh", "/zh/members", "/zh/members/e2e-member", "/zh/messages", "/zh/images", "/zh/recordings", "/en/articles", "/zh/articles/welcome"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     expect(
@@ -205,4 +232,33 @@ test("member history keeps messages on failure, resumes its cursor and resets fo
   await expect(page.getByRole("heading", { level: 1, name: "验证成员" })).toBeVisible();
   await expect(rows).toHaveCount(3);
   await expect(page.getByText("分页消息001", { exact: true })).toHaveCount(0);
+});
+
+// Pocket48 birthday messages were displaying the literal <a href="snh48://..."> wrapper.
+test("stored Pocket48 mentions display their labels in text, answers and quoted questions", async ({ page, request }) => {
+  const apiOrigin = process.env.STARTER_E2E_API_URL;
+  if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
+  const occurredAt = new Date(Date.now() - 86400_000).toISOString();
+  const birthday = "破壳日快乐！特此为你发送祝福，希望新的一年里一切顺利！谢谢一直以来对SNH48和对我的支持，以后的日子我们也一起加油吧！";
+  const plainSuffix = ' 收到，1 < 2。<img src=x onerror="window.untrustedMessage=true">';
+  const seed = await request.post(`${apiOrigin}/api/query/ingest/unit`, {
+    headers: { "X-Ingest-Key": "test-e2e-ingest" },
+    data: {
+      batchId: "e2e-mentions", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+      member: { id: "e2e-mentions", name: "提及验证成员", groupName: "SNH48" },
+      messages: [
+        { id: "mention-text", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "TEXT", occurredAt,
+          text: `<a href="snh48://8672772264">@🍫坏大儿_tyt</a>${birthday}` },
+        { id: "mention-reply", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "REPLY", kind: "reply", occurredAt,
+          question: '<a href="snh48://2">@提问对象</a> 晚上好！', answer: `<a href='snh48://1'>@回答对象</a>${plainSuffix}` },
+      ],
+      recordings: [], totalMembers: 4, membersCovered: 4, errorCount: 0,
+    },
+  });
+  expect(seed.ok(), await seed.text()).toBe(true);
+  await page.goto("/zh/members/e2e-mentions");
+  await expect(page.getByText(`@🍫坏大儿_tyt${birthday}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`@回答对象${plainSuffix}`, { exact: true })).toBeVisible();
+  await expect(page.getByText("@提问对象 晚上好！", { exact: true })).toBeVisible();
+  await expect(page.locator("article img")).toHaveCount(0);
 });

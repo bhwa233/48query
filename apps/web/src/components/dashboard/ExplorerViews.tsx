@@ -1,24 +1,57 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { ArrowLeft, SlidersHorizontal } from "lucide-react";
+import { useId, useMemo, useState } from "react";
 import type { ArchiveMemberDetail, ArchiveMembers, ArchiveMessages } from "@starter/shared";
-import { AppPageContainer } from "@/components/app-page-shell";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
 import { MessageList } from "./MessageList";
 import { MemberMessageHistory } from "./MemberMessageHistory";
 
 export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl?: string }) {
   const t = archiveLabels(locale);
+  const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en");
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("");
   const state = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
   const groups = [...new Set(state.data?.data.map(member => member.groupName) ?? [])];
   const members = useMemo(() => state.data?.data.filter(member => (!group || member.groupName === group) && `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) ?? [], [state.data, group, query]);
-  return <ExplorerLayout title={t.members!} description={t.memberDescription!} locale={locale}><QueryStatus state={state} locale={locale} />{state.data ? <><div className="flex flex-col gap-3 sm:flex-row"><Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t.searchMembers} aria-label={t.searchMembers} /><select aria-label={t.allGroups} value={group} onChange={event => setGroup(event.target.value)} className="h-10 rounded-lg border border-input bg-background px-3 text-sm"><option value="">{t.allGroups}</option>{groups.map(value => <option key={value}>{value}</option>)}</select></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{members.map(member => <Link key={member.id} href={`/${locale}/members/${encodeURIComponent(member.id)}`} className="min-w-0 rounded-xl border border-border bg-card p-5 hover:border-foreground/30"><p className="text-lg font-semibold">{member.name}</p><p className="mt-1 text-sm text-muted-foreground">{member.groupName} · {member.team ?? ""}</p><div className="mt-5 grid grid-cols-3 gap-3"><Metric label={t.messages!} value={member.messages} /><Metric label={t.images!} value={member.images} /><Metric label={t.activeDays!} value={member.activeDays} /></div></Link>)}</div>{!members.length ? <Empty text={t.empty!} /> : null}</> : null}</ExplorerLayout>;
+  const metrics = [
+    { key: "messages", label: t.messageCount!, mobileLabel: t.messages! }, { key: "images", label: t.imageCount!, mobileLabel: t.images! },
+    { key: "replies", label: t.replyCount!, mobileLabel: t.shortReplies! }, { key: "activeDays", label: t.activeDayCount!, mobileLabel: t.shortActiveDays! },
+  ] as const;
+
+  return <>
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] items-center gap-2 sm:grid-cols-[minmax(0,24rem)_10rem_1fr]">
+      <Input className="h-11 sm:h-9" disabled={!state.data} value={query} onChange={event => setQuery(event.target.value)} placeholder={t.searchMembers} aria-label={t.searchMembers} />
+      <ArchiveFilter label={t.allGroups!} value={group} onChange={setGroup} options={groups.map(value => ({ value, label: value }))} />
+      {state.data ? <p role="status" className="col-span-2 text-xs text-muted-foreground sm:col-span-1 sm:text-right">{number.format(members.length)} {t.membersShown}</p> : null}
+    </div>
+    <QueryStatus state={state} locale={locale} />
+    {state.data ? <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <table className="w-full text-sm" aria-label={t.members}>
+        <thead className="hidden bg-muted/40 text-xs text-muted-foreground md:table-header-group">
+          <tr><th scope="col" className="px-3 py-2 text-left font-medium">{t.memberColumn}</th><th scope="col" className="px-3 py-2 text-left font-medium">{t.memberAffiliation}</th>{metrics.map(metric => <th key={metric.key} scope="col" className="px-3 py-2 text-right font-medium">{metric.label}</th>)}</tr>
+        </thead>
+        <tbody className="divide-y divide-border/60">
+          {members.map(member => <tr key={member.id} className="hover:bg-muted/40">
+            <td className="min-w-0">
+              <Link href={`/${locale}/members/${encodeURIComponent(member.id)}`} className="block px-3 py-2.5 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:py-3">
+                <span className="flex items-baseline justify-between gap-2"><span className="font-medium text-brand">{member.name}</span><span className="text-xs text-muted-foreground md:hidden">{[member.groupName, member.team].filter(Boolean).join(" · ")}</span></span>
+                <span className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground md:hidden">{metrics.map(metric => <span key={metric.key}><span className="font-mono tabular-nums text-foreground">{number.format(member[metric.key])}</span> {metric.mobileLabel}</span>)}</span>
+              </Link>
+            </td>
+            <td className="hidden px-3 py-2 text-xs text-muted-foreground md:table-cell">{[member.groupName, member.team].filter(Boolean).join(" · ")}</td>
+            {metrics.map(metric => <td key={metric.key} className="hidden px-3 py-2 text-right font-mono tabular-nums md:table-cell">{number.format(member[metric.key])}</td>)}
+          </tr>)}
+          {!members.length ? <tr><td colSpan={6}><Empty text={t.empty!} /></td></tr> : null}
+        </tbody>
+      </table>
+    </div> : null}
+  </>;
 }
 
 export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale: string; apiBaseUrl?: string; initialKind?: string }) {
@@ -30,26 +63,75 @@ export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale:
   const [source, setSource] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedId = useId();
   const [cursors, setCursors] = useState<string[]>([]);
   const params = new URLSearchParams({ limit: "30" });
   for (const [key, value] of Object.entries({ q: query, memberId: member, kind, source, from, to, before: cursors.at(-1) })) if (value) params.set(key, value);
   const state = useArchiveQuery<ArchiveMessages>(apiBaseUrl, `/api/query/messages?${params}`);
   const members = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
-  const selectClass = "h-10 min-w-0 rounded-lg border border-input bg-background px-3 text-sm";
   const sources = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
-  return <ExplorerLayout title={initialKind === "image" ? t.images! : t.messages!} description={initialKind === "image" ? t.imageDescription! : t.messageDescription!} locale={locale}><form className="grid gap-3 sm:grid-cols-[1fr_auto]" onSubmit={event => { event.preventDefault(); setQuery(draft); setCursors([]); }}><Input disabled={!state.data} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} /><Button disabled={!state.data} type="submit">{t.search}</Button></form><div className="grid gap-3 sm:grid-cols-3"><select className={selectClass} aria-label={t.allMembers} value={member} onChange={event => { setMember(event.target.value); setCursors([]); }}><option value="">{t.allMembers}</option>{members.data?.data.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><select className={selectClass} aria-label={t.allTypes} value={kind} onChange={event => { setKind(event.target.value); setCursors([]); }}><option value="">{t.allTypes}</option>{["text", "image", "reply", "post"].map(value => <option key={value} value={value}>{t[`kind_${value}`]}</option>)}</select><select className={selectClass} aria-label={t.allSources} value={source} onChange={event => { setSource(event.target.value); setCursors([]); }}><option value="">{t.allSources}</option>{sources.map(value => <option key={value} value={value}>{t[`source_${value}`]}</option>)}</select><label className="text-xs text-muted-foreground">{t.from}<Input type="date" value={from} onChange={event => { setFrom(event.target.value); setCursors([]); }} /></label><label className="text-xs text-muted-foreground">{t.to}<Input type="date" value={to} onChange={event => { setTo(event.target.value); setCursors([]); }} /></label></div><QueryStatus state={state} locale={locale} />{state.data ? <><MessageList messages={state.data.data} locale={locale} emptyText={t.empty} /><div className="flex items-center justify-between gap-3"><Button variant="outline" disabled={!cursors.length} onClick={() => setCursors(values => values.slice(0, -1))}>{t.previous}</Button><span className="text-xs text-muted-foreground">{cursors.length + 1} {t.page}</span><Button variant="outline" disabled={!state.data.nextCursor} onClick={() => { if (state.data?.nextCursor) setCursors(values => [...values, state.data!.nextCursor!]); }}>{t.next}</Button></div></> : null}</ExplorerLayout>;
+  const summary = [source ? t[`source_${source}`] : "", from ? `${t.from}: ${from}` : "", to ? `${t.to}: ${to}` : ""].filter(Boolean).join(" · ");
+
+  return <>
+    <section aria-label={t.messageFilters} className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2 sm:p-3">
+      <div className="flex min-w-0 flex-col gap-2 md:flex-row">
+        <form className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 md:flex-1" onSubmit={event => { event.preventDefault(); setQuery(draft); setCursors([]); }}>
+          <Input className="h-11 sm:h-9" disabled={!state.data} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
+          <Button className="h-11 sm:h-9" disabled={!state.data} type="submit" size="sm">{t.search}</Button>
+        </form>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 md:flex-1">
+          <ArchiveFilter label={t.allMembers!} value={member} onChange={value => { setMember(value); setCursors([]); }} options={members.data?.data.map(item => ({ value: item.id, label: item.name })) ?? []} />
+          <ArchiveFilter label={t.allTypes!} value={kind} onChange={value => { setKind(value); setCursors([]); }} options={["text", "image", "reply", "post"].map(value => ({ value, label: t[`kind_${value}`]! }))} />
+          <Button type="button" variant={summary ? "secondary" : "outline"} size="sm" className="h-11 sm:h-9" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal data-icon="inline-start" />{t.moreFilters}</Button>
+        </div>
+      </div>
+      <fieldset id={advancedId} hidden={!advancedOpen} className={advancedOpen ? "grid min-w-0 grid-cols-1 items-end gap-2 border-t border-border pt-2 sm:grid-cols-3" : "hidden"}>
+        <legend className="sr-only">{t.moreFilters}</legend>
+        <ArchiveFilter label={t.allSources!} value={source} onChange={value => { setSource(value); setCursors([]); }} options={sources.map(value => ({ value, label: t[`source_${value}`]! }))} />
+        <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">{t.from}<Input className="h-11 sm:h-9" type="date" max={to || undefined} value={from} onChange={event => { setFrom(event.target.value); setCursors([]); }} /></label>
+        <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">{t.to}<Input className="h-11 sm:h-9" type="date" min={from || undefined} value={to} onChange={event => { setTo(event.target.value); setCursors([]); }} /></label>
+      </fieldset>
+      {summary ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><p className="min-w-0 break-words">{summary}</p><Button type="button" variant="ghost" size="xs" onClick={() => { setSource(""); setFrom(""); setTo(""); setCursors([]); }}>{t.clearExtraFilters}</Button></div> : null}
+    </section>
+    <QueryStatus state={state} locale={locale} />
+    {state.data ? <>
+      <MessageList messages={state.data.data} locale={locale} emptyText={t.empty} />
+      <div className="flex items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={!cursors.length} onClick={() => setCursors(values => values.slice(0, -1))}>{t.previous}</Button><span className="text-xs text-muted-foreground">{cursors.length + 1} {t.page}</span><Button variant="outline" size="sm" disabled={!state.data.nextCursor} onClick={() => { if (state.data?.nextCursor) setCursors(values => [...values, state.data!.nextCursor!]); }}>{t.next}</Button></div>
+    </> : null}
+  </>;
 }
 
 export function MemberDetailView({ locale, id, apiBaseUrl }: { locale: string; id: string; apiBaseUrl?: string }) {
   const t = archiveLabels(locale);
   const state = useArchiveQuery<ArchiveMemberDetail>(apiBaseUrl, `/api/query/members/${encodeURIComponent(id)}`);
   const data = state.data?.data;
-  return <ExplorerLayout title={data?.name ?? t.members!} description={data ? `${data.groupName} · ${data.team ?? ""}` : t.memberDescription!} locale={locale} backHref={`/${locale}/members`}><QueryStatus state={state} locale={locale} />{data && state.data ? <><section className="rounded-xl border border-border bg-card p-5"><h2 className="mb-5 font-medium">{t.stats}</h2><div className="grid grid-cols-2 gap-5 sm:grid-cols-4"><Metric label={t.messages!} value={data.messages} /><Metric label={t.images!} value={data.images} /><Metric label={t.replies!} value={data.replies} /><Metric label={t.activeDays!} value={data.activeDays} /></div></section><section><h2 className="mb-4 font-medium">{t.latestMessages}</h2><MemberMessageHistory key={`${apiBaseUrl}:${id}`} memberId={id} initialMessages={data.recentMessages} totalMessages={data.messages} locale={locale} apiBaseUrl={apiBaseUrl} /></section></> : null}</ExplorerLayout>;
+  return <>
+    <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <Button asChild variant="ghost" size="icon-lg" className="sm:size-8"><Link href={`/${locale}/members`} aria-label={t.back}><ArrowLeft /></Link></Button>
+      <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{data?.name ?? t.members}</h1>
+      {data ? <p className="text-xs text-muted-foreground sm:ml-1 sm:text-sm">{[data.groupName, data.team].filter(Boolean).join(" · ")}</p> : null}
+    </header>
+    <QueryStatus state={state} locale={locale} />
+    {data ? <>
+      <section aria-labelledby="member-stats-title" className="rounded-lg border border-border bg-card px-3 py-2.5">
+        <h2 id="member-stats-title" className="sr-only">{t.stats}</h2>
+        <div className="grid grid-cols-4 gap-3"><Metric label={t.messages!} value={data.messages} locale={locale} /><Metric label={t.images!} value={data.images} locale={locale} /><Metric label={t.replies!} value={data.replies} locale={locale} /><Metric label={t.activeDays!} value={data.activeDays} locale={locale} /></div>
+      </section>
+      <section aria-labelledby="member-messages-title" className="flex min-w-0 flex-col gap-2"><h2 id="member-messages-title" className="text-sm font-medium">{t.latestMessages}</h2><MemberMessageHistory key={`${apiBaseUrl}:${id}`} memberId={id} initialMessages={data.recentMessages} totalMessages={data.messages} locale={locale} apiBaseUrl={apiBaseUrl} /></section>
+    </> : null}
+  </>;
 }
 
-function ExplorerLayout({ title, description, locale, children, backHref }: { title: string; description: string; locale: string; children: ReactNode; backHref?: string }) {
-  const t = archiveLabels(locale);
-  return <AppPageContainer width="content" className="gap-6"><header>{backHref ? <Link href={backHref} className="mb-4 inline-block text-sm text-muted-foreground hover:underline">← {t.back}</Link> : null}<p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">48query / archive</p><h1 className="mt-3 text-4xl font-semibold tracking-tight">{title}</h1><p className="mt-3 text-base leading-7 text-muted-foreground">{description}</p></header>{children}</AppPageContainer>;
+// Compose the installed Select once for the archive's common "all" option and labels.
+function ArchiveFilter({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[] }) {
+  return <Select value={value || "all"} onValueChange={next => onChange(next === "all" ? "" : next)}>
+    <SelectTrigger aria-label={label} className="h-11 min-w-0 sm:h-9"><SelectValue /></SelectTrigger>
+    <SelectContent><SelectGroup><SelectItem value="all">{label}</SelectItem>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
+  </Select>;
 }
-function Metric({ label, value }: { label: string; value: number }) { return <div><p className="text-2xl font-semibold">{value.toLocaleString()}</p><p className="mt-1 text-xs text-muted-foreground">{label}</p></div>; }
-function Empty({ text }: { text: string }) { return <p role="status" className="p-8 text-center text-sm text-muted-foreground">{text}</p>; }
+
+function Metric({ label, value, locale }: { label: string; value: number; locale: string }) {
+  return <dl className="flex min-w-0 flex-col-reverse gap-0.5"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-all font-mono text-base font-semibold leading-6 tabular-nums sm:text-lg">{new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en").format(value)}</dd></dl>;
+}
+function Empty({ text }: { text: string }) { return <p role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">{text}</p>; }
