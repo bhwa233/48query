@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import Image from "next/image";
 import type { ImageAttachment } from "@starter/shared";
 import { messages } from "@/i18n/messages";
 import { isLocale } from "@/i18n/config";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
 export const archiveLabels = (locale: string): Record<string, string> => messages[isLocale(locale) ? locale : "en"].archive;
 export const formatTime = (value: string | null | undefined, locale: string) => value ? new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : archiveLabels(locale).unknown;
@@ -35,7 +37,16 @@ export function useArchiveQuery<T>(apiBaseUrl: string | undefined, path: string)
 
 export function QueryStatus({ state, locale }: { state: { loading: boolean; failed: boolean; configured: boolean; retry: () => void }; locale: string }) {
   const t = archiveLabels(locale);
-  return !state.configured || state.loading || state.failed ? <div role="status" className="rounded-xl border border-border p-6 text-sm text-muted-foreground">{!state.configured ? t.unavailable : state.loading ? t.loading : t.failure}{state.failed ? <Button variant="outline" className="ml-3" onClick={state.retry}>{t.retry}</Button> : null}</div> : null;
+  return !state.configured || state.failed ? <div role="status" className="rounded-xl border border-border p-6 text-sm text-muted-foreground">{!state.configured ? t.unavailable : t.failure}{state.failed ? <Button variant="outline" className="ml-3" onClick={state.retry}>{t.retry}</Button> : null}</div> : null;
+}
+
+// Keep the last result's geometry during filter requests without displaying or
+// announcing stale data. CSS grid reserves its size; no measurement hook is needed.
+export function ArchiveDataRegion({ loading, fallback, children }: { loading: boolean; fallback: ReactNode; children: ReactNode }) {
+  return <div className="grid min-w-0" aria-busy={loading}>
+    <div className={cn("col-start-1 row-start-1 min-w-0", loading && "invisible")} aria-hidden={loading || undefined} inert={loading || undefined}>{children}</div>
+    {loading ? <div className="col-start-1 row-start-1 min-w-0">{fallback}</div> : null}
+  </div>;
 }
 
 export function ArchiveImage({ image, locale }: { image: ImageAttachment; locale: string }) {

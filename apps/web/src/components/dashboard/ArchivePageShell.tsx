@@ -7,3 +7,9 @@ export function ArchivePageShell({ title, children }: { title?: string; children
     {children}
   </AppPageContainer>;
 }
+
+export function ArticlePageShell({ children }: { children: ReactNode }) {
+  return <AppPageContainer variant="workspace" width="narrow" className="gap-3 py-3 sm:py-4">
+    <article className="mx-auto w-full max-w-3xl">{children}</article>
+  </AppPageContainer>;
+}

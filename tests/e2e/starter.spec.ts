@@ -22,6 +22,62 @@ test.afterEach(({ page }) => {
   expect(errors.get(page)).toEqual([]);
 });
 
+// Loading used a wider shell than the finished page, and filter requests
+// removed the result/pagination layout. Hold real local API requests to inspect
+// the transition, including hidden stale content and mobile overflow.
+test("archive loading keeps content width and filter geometry across slow requests", async ({ page }, testInfo) => {
+  test.setTimeout(90000);
+  let gate: Promise<void> | null = null;
+  let release = () => {};
+  const hold = () => { gate = new Promise<void>(resolve => { release = resolve; }); };
+  const resume = () => { release(); gate = null; };
+  await page.route("**/api/query/**", async route => {
+    const pending = gate;
+    if (pending) await pending;
+    await route.continue();
+  });
+  try {
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const path of ["/zh", "/zh/members", "/zh/members/e2e-member", "/zh/images", "/zh/messages"]) {
+        hold();
+        await page.goto(path);
+        await expect(page.locator('main [role="status"][aria-busy="true"]').first()).toBeVisible();
+        const before = await page.locator("main:visible").boundingBox();
+        const header = await page.locator("body > header > div").boundingBox();
+        expect(before).not.toBeNull();
+        expect(header).not.toBeNull();
+        expect(before!.width).toBeCloseTo(header!.width, 0);
+        expect(before!.x).toBeCloseTo(header!.x, 0);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        if (path === "/zh/messages") await page.screenshot({ path: testInfo.outputPath(`messages-loading-${width}.png`), fullPage: true });
+        resume();
+        await expect(page.locator('main:visible [aria-busy="true"]:visible')).toHaveCount(0);
+        const after = await page.locator("main:visible").boundingBox();
+        expect(after!.width).toBeCloseTo(before!.width, 0);
+        expect(after!.x).toBeCloseTo(before!.x, 0);
+      }
+      const filters = page.getByRole("region", { name: "消息筛选" });
+      const before = await filters.boundingBox();
+      await page.getByRole("textbox", { name: "搜索消息或提问内容" }).fill("验证公开提问");
+      hold();
+      await page.getByRole("button", { name: "搜索", exact: true }).click();
+      await expect(page.locator('main [role="status"][aria-busy="true"]')).toBeVisible();
+      await expect(page.getByText("验证文字归档", { exact: true })).toBeHidden();
+      await expect(page.getByRole("textbox", { name: "搜索消息或提问内容" })).toBeEnabled();
+      const during = await filters.boundingBox();
+      expect(during).toEqual(before);
+      await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeVisible();
+      resume();
+      await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
+      await expect(page.getByRole("textbox", { name: "搜索消息或提问内容" })).toHaveValue("验证公开提问");
+      expect(await filters.boundingBox()).toEqual(before);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`messages-loaded-${width}.png`), fullPage: true });
+    }
+  } finally { resume(); }
+});
+
 test("language navigation preserves the article, and archive routes render", async ({
   page,
 }) => {

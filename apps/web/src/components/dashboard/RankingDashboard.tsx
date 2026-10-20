@@ -13,7 +13,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { archiveLabels, useArchiveQuery } from "./ArchiveData";
+import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
+import { ActivitySkeleton, MessageListSkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
 
 type Metric = "messages" | "images" | "replies" | "activeDays";
@@ -44,7 +45,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   const groups = [...new Set(directory.map(item => item.groupName))];
   const teams = [...new Set(directory.filter(item => group === "all" || item.groupName === group).flatMap(item => item.team ? [item.team] : []))];
   const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en");
-  const sorted = (data?.members ?? []).filter(member => member[metric] > 0)
+  const sorted = (data?.members ?? state.previousData?.data.members ?? []).filter(member => member[metric] > 0)
     .toSorted((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name, locale) || a.id.localeCompare(b.id));
   const positions = new Map<number, number>();
   const ranked = sorted.map((member, index) => {
@@ -160,9 +161,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
               <span>{t.rankPosition}</span><span>{t.memberColumn}</span>
               {metrics.map(key => <span key={key} className={cn("ranking-metric justify-self-end", key !== metric ? "hidden sm:block" : "sm:block")} data-selected={key === metric}>{t[columnLabels[key]]}{key === metric ? <ArrowDown className="ml-1 inline size-3" /> : null}</span>)}
             </div>
-            {pending ? (
-              <div role="status" aria-label={t.rankingLoading} className="divide-y divide-border">{Array.from({ length: 5 }, (_, index) => <div key={index} className="flex items-center gap-3 px-3 py-2"><Skeleton className="size-8 rounded-full" /><Skeleton className="h-5 w-28" /><Skeleton className="ml-auto h-5 w-14" /></div>)}</div>
-            ) : state.failed || !state.configured ? (
+            <ArchiveDataRegion loading={pending} fallback={<RankingRowsSkeleton label={t.rankingLoading} rows={state.previousData ? Math.max(1, visible.length) : 5} />}>
+            {state.failed || !state.configured ? (
               <div className="p-5 sm:p-8"><Alert variant={state.failed ? "destructive" : "default"}><ShieldCheck aria-hidden="true" /><AlertTitle>{state.failed ? t.rankingFailed : t.dataNotReady}</AlertTitle>{state.failed ? <AlertDescription>{t.failure}<Button variant="outline" size="sm" className="mt-3" onClick={state.retry}>{t.retry}</Button></AlertDescription> : null}</Alert></div>
             ) : visible.length ? (
               <ol aria-label={t.rankings} className="divide-y divide-border">
@@ -181,6 +181,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
             ) : (
               <div role="status" className="flex flex-col items-center gap-3 px-5 py-12 text-center"><Trophy className="size-7 text-muted-foreground" aria-hidden="true" /><p className="font-medium">{t.rankingEmpty}</p>{group !== "all" || team !== "all" || search ? <Button variant="outline" size="sm" onClick={resetFilters}>{t.clearFilters}</Button> : null}</div>
             )}
+            </ArchiveDataRegion>
             <div className="flex items-center justify-between gap-3 border-t px-3 py-2">
               <Select value={String(pageSize)} onValueChange={value => { setPageSize(Number(value)); setPage(1); }}>
                 <SelectTrigger className="h-8 w-28" aria-label={t.perPage}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{[20, 50, 100].map(size => <SelectItem key={size} value={String(size)}>{size} / {t.page}</SelectItem>)}</SelectGroup></SelectContent>
@@ -195,19 +196,19 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
         <Card className="min-w-0 gap-3 rounded-lg py-3">
           <CardHeader className="px-3"><CardTitle><h2>{t.activity}</h2></CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-2 px-3">
-            {pending ? <Skeleton className="h-24 w-full" /> : data?.dailyActivity.length ? <div role="img" aria-label={t.activityDescription} className="flex h-24 items-end justify-around gap-1 overflow-hidden border-b border-border pb-1">{days.map(({ date, count }) => <div key={date} className={cn("min-w-0 max-w-8 flex-1 rounded-t-sm", count ? "bg-brand/80" : "border-b border-dashed border-border")} style={{ height: count ? `${Math.max(2, count / peak * 100)}%` : "3px" }} title={`${date}: ${count === undefined ? t.noActivityDay : number.format(count)}`} />)}</div> : <div className="flex h-24 items-center justify-center border-b border-dashed border-border text-xs text-muted-foreground">{t.noActivity}</div>}
+            {pending ? <ActivitySkeleton /> : data?.dailyActivity.length ? <div role="img" aria-label={t.activityDescription} className="flex h-24 items-end justify-around gap-1 overflow-hidden border-b border-border pb-1">{days.map(({ date, count }) => <div key={date} className={cn("min-w-0 max-w-8 flex-1 rounded-t-sm", count ? "bg-brand/80" : "border-b border-dashed border-border")} style={{ height: count ? `${Math.max(2, count / peak * 100)}%` : "3px" }} title={`${date}: ${count === undefined ? t.noActivityDay : number.format(count)}`} />)}</div> : <div className="flex h-24 items-center justify-center border-b border-dashed border-border text-xs text-muted-foreground">{t.noActivity}</div>}
             <div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span>{range.from}</span><span>{t.beijingTime}</span><span>{range.to}</span></div>
           </CardContent>
         </Card>
         <Card className="min-w-0 gap-3 rounded-lg py-3">
           <CardHeader className="px-3"><CardTitle><h2>{t.types}</h2></CardTitle></CardHeader>
-          <CardContent className="flex flex-col gap-2 px-3">{pending ? <Skeleton className="h-24 w-full" /> : data?.typeBreakdown.length ? data.typeBreakdown.map(item => <div key={item.type} className="flex flex-col gap-1.5"><div className="flex justify-between gap-3 text-xs"><span>{t[`type_${item.type}`] ?? item.type}</span><span className="font-mono tabular-nums">{number.format(item.count)}</span></div><div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-brand/70" style={{ width: `${item.count / data.totals.messages * 100}%` }} /></div></div>) : <p className="flex h-24 items-center justify-center text-xs text-muted-foreground">{t.noMessages}</p>}</CardContent>
+          <CardContent className="flex flex-col gap-2 px-3">{pending ? <TypeBreakdownSkeleton /> : data?.typeBreakdown.length ? data.typeBreakdown.map(item => <div key={item.type} className="flex flex-col gap-1.5"><div className="flex justify-between gap-3 text-xs"><span>{t[`type_${item.type}`] ?? item.type}</span><span className="font-mono tabular-nums">{number.format(item.count)}</span></div><div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-brand/70" style={{ width: `${item.count / data.totals.messages * 100}%` }} /></div></div>) : <p className="flex h-24 items-center justify-center text-xs text-muted-foreground">{t.noMessages}</p>}</CardContent>
         </Card>
       </div>
 
       <section className="flex flex-col gap-2" aria-labelledby="rank-recent-title">
         <div className="flex items-center justify-between gap-3"><h2 id="rank-recent-title" className="font-medium">{t.latestMessages}</h2><Button asChild variant="ghost" size="sm"><Link href={`/${locale}/messages`}>{t.viewAll}<ArrowRight data-icon="inline-end" /></Link></Button></div>
-        {pending ? <Skeleton className="h-24 w-full" /> : <MessageList messages={data?.recentMessages ?? []} locale={locale} />}
+        <ArchiveDataRegion loading={pending} fallback={<MessageListSkeleton label={t.loading} rows={state.previousData?.data.recentMessages.length || 4} />}><MessageList messages={(data ?? state.previousData?.data)?.recentMessages ?? []} locale={locale} /></ArchiveDataRegion>
       </section>
 
 

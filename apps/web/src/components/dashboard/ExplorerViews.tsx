@@ -7,7 +7,8 @@ import type { ArchiveMemberDetail, ArchiveMembers, ArchiveMessages } from "@star
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
+import { ArchiveDataRegion, archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
+import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton, MessageListSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
 import { MemberMessageHistory } from "./MemberMessageHistory";
 
@@ -26,11 +27,12 @@ export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl
 
   return <>
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] items-center gap-2 sm:grid-cols-[minmax(0,24rem)_10rem_1fr]">
-      <Input className="h-11 sm:h-9" disabled={!state.data} value={query} onChange={event => setQuery(event.target.value)} placeholder={t.searchMembers} aria-label={t.searchMembers} />
+      <Input className="h-11 sm:h-9" disabled={!state.configured} value={query} onChange={event => setQuery(event.target.value)} placeholder={t.searchMembers} aria-label={t.searchMembers} />
       <ArchiveFilter label={t.allGroups!} value={group} onChange={setGroup} options={groups.map(value => ({ value, label: value }))} />
       {state.data ? <p role="status" className="col-span-2 text-xs text-muted-foreground sm:col-span-1 sm:text-right">{number.format(members.length)} {t.membersShown}</p> : null}
     </div>
     <QueryStatus state={state} locale={locale} />
+    {state.loading ? <MembersTableSkeleton label={t.loading} /> : null}
     {state.data ? <div className="overflow-hidden rounded-lg border border-border bg-card">
       <table className="w-full text-sm" aria-label={t.members}>
         <thead className="hidden bg-muted/40 text-xs text-muted-foreground md:table-header-group">
@@ -71,14 +73,15 @@ export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale:
   const state = useArchiveQuery<ArchiveMessages>(apiBaseUrl, `/api/query/messages?${params}`);
   const members = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
   const sources = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
+  const displayed = state.data ?? state.previousData;
   const summary = [source ? t[`source_${source}`] : "", from ? `${t.from}: ${from}` : "", to ? `${t.to}: ${to}` : ""].filter(Boolean).join(" · ");
 
   return <>
     <section aria-label={t.messageFilters} className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2 sm:p-3">
       <div className="flex min-w-0 flex-col gap-2 md:flex-row">
         <form className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 md:flex-1" onSubmit={event => { event.preventDefault(); setQuery(draft); setCursors([]); }}>
-          <Input className="h-11 sm:h-9" disabled={!state.data} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
-          <Button className="h-11 sm:h-9" disabled={!state.data} type="submit" size="sm">{t.search}</Button>
+          <Input className="h-11 sm:h-9" disabled={!state.configured} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
+          <Button className="h-11 sm:h-9" disabled={!state.configured} type="submit" size="sm">{t.search}</Button>
         </form>
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 md:flex-1">
           <ArchiveFilter label={t.allMembers!} value={member} onChange={value => { setMember(value); setCursors([]); }} options={members.data?.data.map(item => ({ value: item.id, label: item.name })) ?? []} />
@@ -95,9 +98,11 @@ export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale:
       {summary ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><p className="min-w-0 break-words">{summary}</p><Button type="button" variant="ghost" size="xs" onClick={() => { setSource(""); setFrom(""); setTo(""); setCursors([]); }}>{t.clearExtraFilters}</Button></div> : null}
     </section>
     <QueryStatus state={state} locale={locale} />
-    {state.data ? <>
-      <MessageList messages={state.data.data} locale={locale} emptyText={t.empty} />
-      <div className="flex items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={!cursors.length} onClick={() => setCursors(values => values.slice(0, -1))}>{t.previous}</Button><span className="text-xs text-muted-foreground">{cursors.length + 1} {t.page}</span><Button variant="outline" size="sm" disabled={!state.data.nextCursor} onClick={() => { if (state.data?.nextCursor) setCursors(values => [...values, state.data!.nextCursor!]); }}>{t.next}</Button></div>
+    {state.loading || state.data ? <>
+      <ArchiveDataRegion loading={state.loading} fallback={<MessageListSkeleton label={t.loading} images={kind === "image"} rows={state.previousData?.data.length || (kind === "image" ? 2 : 4)} />}>
+        {displayed ? <MessageList messages={displayed.data} locale={locale} emptyText={t.empty} /> : null}
+      </ArchiveDataRegion>
+      <div className="flex items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={state.loading || !cursors.length} onClick={() => setCursors(values => values.slice(0, -1))}>{t.previous}</Button><span className="text-xs text-muted-foreground">{cursors.length + 1} {t.page}</span><Button variant="outline" size="sm" disabled={state.loading || !state.data?.nextCursor} onClick={() => { if (state.data?.nextCursor) setCursors(values => [...values, state.data!.nextCursor!]); }}>{t.next}</Button></div>
     </> : null}
   </>;
 }
@@ -109,10 +114,11 @@ export function MemberDetailView({ locale, id, apiBaseUrl }: { locale: string; i
   return <>
     <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <Button asChild variant="ghost" size="icon-lg" className="sm:size-8"><Link href={`/${locale}/members`} aria-label={t.back}><ArrowLeft /></Link></Button>
-      <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{data?.name ?? t.members}</h1>
+      {state.loading ? <HeadingSkeleton /> : <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{data?.name ?? t.members}</h1>}
       {data ? <p className="text-xs text-muted-foreground sm:ml-1 sm:text-sm">{[data.groupName, data.team].filter(Boolean).join(" · ")}</p> : null}
     </header>
     <QueryStatus state={state} locale={locale} />
+    {state.loading ? <MemberDetailSkeleton label={t.loading} /> : null}
     {data ? <>
       <section aria-labelledby="member-stats-title" className="rounded-lg border border-border bg-card px-3 py-2.5">
         <h2 id="member-stats-title" className="sr-only">{t.stats}</h2>

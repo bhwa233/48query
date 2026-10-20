@@ -1,6 +1,6 @@
 import { ArrowUpRight } from "lucide-react";
 import Link from "next/link";
-import { AppPageContainer } from "@/components/app-page-shell";
+import { ArchivePageShell } from "./ArchivePageShell";
 import { Button } from "@/components/ui/button";
 import { messages } from "@/i18n/messages";
 import { isLocale } from "@/i18n/config";
@@ -10,7 +10,7 @@ export function DashboardHome({ locale, apiBaseUrl, yesterday }: { locale: strin
   const t = messages[isLocale(locale) ? locale : "en"].archive;
 
   return (
-    <AppPageContainer variant="workspace" width="content" className="gap-3 py-3 sm:gap-4 sm:py-4">
+    <ArchivePageShell>
       <header className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{t.rankingTitle}</h1>
         <Button asChild variant="outline" size="sm" className="hidden shrink-0 sm:inline-flex">
@@ -18,6 +18,6 @@ export function DashboardHome({ locale, apiBaseUrl, yesterday }: { locale: strin
         </Button>
       </header>
       <RankingDashboard locale={locale} apiBaseUrl={apiBaseUrl} yesterday={yesterday} />
-    </AppPageContainer>
+    </ArchivePageShell>
   );
 }

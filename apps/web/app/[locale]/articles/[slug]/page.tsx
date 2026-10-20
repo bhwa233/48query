@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AppPageContainer } from "@/components/app-page-shell";
+import { ArticlePageShell } from "@/components/dashboard/ArchivePageShell";
 import { getArticle, getArticles } from "@/content";
 import { ALL_LOCALES, isLocale } from "@/i18n/config";
 import { messages } from "@/i18n/messages";
@@ -29,8 +29,7 @@ export default async function ArticlePage({ params }: Props) {
   if (!article) notFound();
   const { Content } = article;
   return (
-    <AppPageContainer variant="workspace" width="narrow" className="gap-3 py-3 sm:py-4">
-      <article className="mx-auto w-full max-w-3xl">
+    <ArticlePageShell>
         <header className="mb-6 flex flex-col gap-2">
           <Link className="w-fit text-xs text-muted-foreground underline underline-offset-4" href={`/${locale}/articles`}>{messages[locale].content.back}</Link>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
@@ -49,7 +48,6 @@ export default async function ArticlePage({ params }: Props) {
         <div className="article-body">
           <Content />
         </div>
-      </article>
-    </AppPageContainer>
+    </ArticlePageShell>
   );
 }
