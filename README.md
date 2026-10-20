@@ -123,7 +123,7 @@ docs/                     架构、初始化和验证说明
 
 ## 部署
 
-GitHub Actions 的 CI 负责检查。Web 已通过 Cloudflare Workers Builds 连接本仓库，推送到 `main` 会自动构建并发布 `48query-web`；构建触发器保存在 Cloudflare 控制台，而非 GitHub Actions 工作流中。
+GitHub Actions 的 CI 负责检查。Web 和 API 通过 Cloudflare Workers Builds 连接本仓库，推送到 `main` 会自动构建并分别发布 `48query-web`、`48query-api`；构建触发器保存在 Cloudflare 控制台，而非 GitHub Actions 工作流中。正常发布不再逐次请求部署确认，推送后需核对云端构建结果及线上行为。
 
 发布前使用 `pnpm verify:deploy-config web`、`api` 或 `api:db`。这些检查**故意拒绝**模板 Worker 名称、本地地址及 D1 占位 ID；它们不属于本地 `pnpm check`。
 
@@ -131,7 +131,7 @@ GitHub Actions 的 CI 负责检查。Web 已通过 Cloudflare Workers Builds 连
 - 无数据库 API：修改 `apps/api/wrangler.jsonc` 后，使用 `pnpm deploy:api`。
 - D1 API：创建新项目自己的 D1，在 `wrangler.d1.jsonc` 填入 ID，明确选择远程数据库并完成迁移后，使用 `pnpm deploy:api:db`。部署脚本不会自动执行远程迁移。
 
-Web 的 Workers Builds 配置：仓库 `bhwa233/48query`、生产分支 `main`、根目录 `/`，构建命令 `pnpm verify:deploy-config web && pnpm build:web`，部署命令 `pnpm --filter @starter/web run deploy`。构建环境固定 `NODE_VERSION=24.22.0`、`PNPM_VERSION=12.14.0`，依赖从仓库根目录安装。可在 Worker 的 Settings > Builds 查看配置和构建记录；API 继续使用上面的显式发布命令。新项目需要自行设置分支和发布授权，不继承本项目的触发器。
+Workers Builds 的两个触发器均使用仓库 `bhwa233/48query`、生产分支 `main`、根目录 `/`。Web 构建命令为 `pnpm verify:deploy-config web && pnpm build:web`，部署命令为 `pnpm --filter @starter/web run deploy`；API 构建命令为 `pnpm verify:deploy-config api:db && pnpm build:api:db`，部署命令为 `pnpm deploy:api:db`。构建环境固定 `NODE_VERSION=24.22.0`、`PNPM_VERSION=12.14.0`，依赖从仓库根目录安装。可在各 Worker 的 Settings > Builds 查看配置和构建记录；数据库结构变更须先经授权应用远程迁移，自动部署命令不隐式迁移。新项目需要自行设置分支和发布授权，不继承本项目的触发器。
 
 生产网站为 <https://48.bhwa233.com/zh>。Web Wrangler 配置通过 `custom_domain` 绑定 `48.bhwa233.com`，构建时的站点 URL 同步用于 canonical 和 sitemap；API 的 CORS 允许该来源。发布域名配置时需部署 Web 和 D1 API（`pnpm deploy:web`、`pnpm deploy:api:db`），无需重新执行数据库迁移。
 

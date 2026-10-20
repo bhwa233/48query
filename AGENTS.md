@@ -8,7 +8,8 @@
 - API endpoints use OpenAPIHono, Zod validation, and `{ ok, error: { code, message } }` errors.
 - Shared transport contracts belong in `packages/shared`; Web never imports backend implementation.
 - D1 is optional. Missing bindings must yield a clear 503 for data endpoints only.
-- Use local migrations for verification; never run remote migrations or deploy without explicit authorization.
+- Use local migrations for verification. Remote D1 migrations require explicit user authorization.
+- Pushing approved changes to `main` is authorized to trigger automatic production deployment of Web and API through Cloudflare Workers Builds. Do not ask again for deployment approval. Verify the remote build results and deployed behavior after pushing; keep the Git integration working rather than relying on manual releases.
 - Secrets go in `.dev.vars` / Cloudflare secrets. Never copy credentials from the source project.
 - Default scripts never kill occupied ports or connect to remote resources.
 - Verify with `pnpm check`. Use `pnpm check:web` for a frontend-only change.
