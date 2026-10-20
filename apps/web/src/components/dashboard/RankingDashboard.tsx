@@ -13,7 +13,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { archiveLabels, MessageCard, useArchiveQuery } from "./ArchiveData";
+import { archiveLabels, useArchiveQuery } from "./ArchiveData";
+import { MessageList } from "./MessageList";
 
 type Metric = "messages" | "images" | "replies" | "activeDays";
 const metrics = ["messages", "images", "replies", "activeDays"] as const;
@@ -206,7 +207,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
 
       <section className="flex flex-col gap-2" aria-labelledby="rank-recent-title">
         <div className="flex items-center justify-between gap-3"><h2 id="rank-recent-title" className="font-medium">{t.latestMessages}</h2><Button asChild variant="ghost" size="sm"><Link href={`/${locale}/messages`}>{t.viewAll}<ArrowRight data-icon="inline-end" /></Link></Button></div>
-        {pending ? <Skeleton className="h-24 w-full" /> : data?.recentMessages.length ? <div className="grid gap-2 md:grid-cols-2 [&_article]:rounded-lg [&_article]:border [&_article]:border-border [&_article]:p-3 [&_article]:space-y-2 [&_figure]:max-w-20 [&_p]:leading-5">{data.recentMessages.map(message => <MessageCard key={message.id} message={message} locale={locale} />)}</div> : <p className="rounded-xl border border-dashed border-border px-5 py-8 text-center text-sm text-muted-foreground">{t.noMessages}</p>}
+        {pending ? <Skeleton className="h-24 w-full" /> : <MessageList messages={data?.recentMessages ?? []} locale={locale} />}
       </section>
 
 

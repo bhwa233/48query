@@ -153,3 +153,56 @@ test("rankings change metric, period and scope while preserving shared ranks", a
   await expect(page.getByRole("link", { name: "图片", exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("rankings-mobile-dark.png"), fullPage: true });
 });
+
+test("member history keeps messages on failure, resumes its cursor and resets for another member", async ({ page, request }) => {
+  const apiOrigin = process.env.STARTER_E2E_API_URL;
+  if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
+  const occurredAt = new Date(Date.now() - 86400_000).toISOString();
+  // Equal timestamps put the boundary inside an ID tie, where timestamp-only cursors lose rows.
+  const messages = Array.from({ length: 43 }, (_, index) => {
+    const number = String(index + 1).padStart(3, "0");
+    return { id: `pagination-${number}`, memberId: "e2e-pagination", senderId: "e2e-pagination", type: "TEXT", text: `分页消息${number}`, occurredAt };
+  });
+  for (let offset = 0; offset < messages.length; offset += 25) {
+    const seed = await request.post(`${apiOrigin}/api/query/ingest/unit`, {
+      headers: { "X-Ingest-Key": "test-e2e-ingest" },
+      data: {
+        batchId: `e2e-pagination-${offset}`, statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+        member: { id: "e2e-pagination", name: "分页成员", groupName: "SNH48" },
+        messages: messages.slice(offset, offset + 25),
+        recordings: [], totalMembers: 3, membersCovered: 3, errorCount: 0,
+      },
+    });
+    expect(seed.ok(), await seed.text()).toBe(true);
+  }
+  await page.goto("/zh/members/e2e-pagination");
+  const rows = page.locator("article");
+  await expect(rows).toHaveCount(20);
+  await expect(page.getByText("分页消息001", { exact: true })).toHaveCount(0);
+  let rejectNext = true;
+  await page.route("**/api/query/messages?**", async route => {
+    if (rejectNext) {
+      rejectNext = false;
+      // An invalid success response must also preserve the list and allow a retry.
+      await route.fulfill({ json: { ok: false, error: { code: "unavailable", message: "Archive unavailable" } } });
+    } else await route.continue();
+  });
+  await page.getByRole("button", { name: "加载更早的消息", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("暂时无法读取图文档案。");
+  await expect(rows).toHaveCount(20);
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(rows).toHaveCount(40);
+  await expect(rows.last()).toContainText("分页消息004");
+  await page.getByRole("button", { name: "加载更早的消息", exact: true }).click();
+  await expect(rows).toHaveCount(messages.length);
+  await expect(rows.first()).toContainText("分页消息043");
+  await expect(rows.last()).toContainText("分页消息001");
+  await expect(page.getByText("分页消息043", { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("status")).toHaveText("已加载全部消息。");
+  await expect(page.getByRole("button", { name: "加载更早的消息", exact: true })).toHaveCount(0);
+  await page.getByRole("link", { name: "成员", exact: true }).click();
+  await page.getByRole("link", { name: /验证成员/ }).first().click();
+  await expect(page.getByRole("heading", { level: 1, name: "验证成员" })).toBeVisible();
+  await expect(rows).toHaveCount(3);
+  await expect(page.getByText("分页消息001", { exact: true })).toHaveCount(0);
+});
