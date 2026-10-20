@@ -66,8 +66,8 @@ export function RankingRowsSkeleton({ label, rows = 5 }: { label?: string; rows?
       <Skeleton className="h-4 w-5 max-w-full" />
       <div className="flex min-w-0 items-center gap-2"><Skeleton className="size-8 shrink-0 rounded-full" /><div className="flex min-w-0 flex-col gap-0.5"><Skeleton className="h-5 w-20 max-w-full" /><Skeleton className="h-4 w-24 max-w-full" /></div></div>
       <Skeleton className="h-4 w-10 justify-self-end" />
-      {Array.from({ length: 3 }, (_, key) => <Skeleton key={key} className="hidden h-4 w-10 justify-self-end sm:block" />)}
-      <div className="col-start-2 col-end-4 flex gap-3 sm:hidden">{Array.from({ length: 3 }, (_, key) => <Skeleton key={key} className="h-4 w-12" />)}</div>
+      {Array.from({ length: 4 }, (_, key) => <Skeleton key={key} className="hidden h-4 w-10 justify-self-end sm:block" />)}
+      <div className="col-start-2 col-end-4 flex flex-wrap gap-3 sm:hidden">{Array.from({ length: 4 }, (_, key) => <Skeleton key={key} className="h-4 w-12" />)}</div>
     </div>)}</div>
   </LoadingRegion>;
 }

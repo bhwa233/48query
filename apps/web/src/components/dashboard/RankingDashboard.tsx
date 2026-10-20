@@ -16,12 +16,13 @@ import { cn } from "@/lib/utils";
 import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
 import { ActivitySkeleton, MessageListSkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
+import { MeleeRankingDashboard } from "./MeleeRankingDashboard";
 
-type Metric = "messages" | "images" | "replies" | "activeDays";
-const metrics = ["messages", "images", "replies", "activeDays"] as const;
-const metricLabels = { messages: "messageRank", images: "imageRank", replies: "replyRank", activeDays: "activityRank" };
-const columnLabels = { messages: "messageCount", images: "imageCount", replies: "replyCount", activeDays: "activeDayCount" };
-const metricIcons = { messages: FileText, images: ImageIcon, replies: MessageCircle, activeDays: CalendarDays };
+const metrics = ["followers", "messages", "images", "replies", "activeDays"] as const;
+type Metric = typeof metrics[number];
+const metricLabels = { followers: "followerRank", messages: "messageRank", images: "imageRank", replies: "replyRank", activeDays: "activityRank" };
+const columnLabels = { followers: "followerCount", messages: "messageCount", images: "imageCount", replies: "replyCount", activeDays: "activeDayCount" };
+const metricIcons = { followers: Users, messages: FileText, images: ImageIcon, replies: MessageCircle, activeDays: CalendarDays };
 
 export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: string; apiBaseUrl?: string; yesterday: string }) {
   const t = archiveLabels(locale);
@@ -45,12 +46,13 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   const groups = [...new Set(directory.map(item => item.groupName))];
   const teams = [...new Set(directory.filter(item => group === "all" || item.groupName === group).flatMap(item => item.team ? [item.team] : []))];
   const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en");
-  const sorted = (data?.members ?? state.previousData?.data.members ?? []).filter(member => member[metric] > 0)
-    .toSorted((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name, locale) || a.id.localeCompare(b.id));
+  const sorted = (data?.members ?? state.previousData?.data.members ?? []).filter(member => metric === "followers" ? member.followers != null : member[metric] > 0)
+    .toSorted((a, b) => (b[metric] ?? 0) - (a[metric] ?? 0) || a.name.localeCompare(b.name, locale) || a.id.localeCompare(b.id));
   const positions = new Map<number, number>();
   const ranked = sorted.map((member, index) => {
-    const rank = positions.get(member[metric]) ?? index + 1;
-    positions.set(member[metric], rank);
+    const value = member[metric] ?? 0;
+    const rank = positions.get(value) ?? index + 1;
+    positions.set(value, rank);
     return { member, rank };
   }).filter(({ member }) => `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
   const pages = Math.max(1, Math.ceil(ranked.length / pageSize));
@@ -71,6 +73,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
     return { date, count: daily.get(date) };
   });
   const rangeLabel = range.from === range.to ? range.to : `${range.from} — ${range.to}`;
+  const observationTime = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const followerCoverage = data?.followersCoverage;
 
   function choosePeriod(value: string) {
     setPeriod(value);
@@ -95,7 +99,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
             </CardHeader>
             <CardContent className="px-3">
               <div className="font-mono text-2xl font-semibold leading-7 tracking-tight tabular-nums">
-                {pending ? <Skeleton className="h-7 w-20" /> : data?.members.length ? number.format(data.totals[key]) : <span className="text-muted-foreground">—</span>}
+                {pending ? <Skeleton className="h-7 w-20" /> : data?.totals.activeMembers ? number.format(data.totals[key]) : <span className="text-muted-foreground">—</span>}
               </div>
             </CardContent>
           </Card>
@@ -105,10 +109,10 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
       <section id="rankings" aria-label={t.rankings} className="flex min-w-0 flex-col rounded-lg border border-border">
         <Tabs value={metric} onValueChange={value => { setMetric(value as Metric); setPage(1); }} className="flex-col gap-0">
           <div className="flex items-center justify-between gap-2 border-b px-2 pt-1 sm:px-3">
-            <TabsList variant="line" aria-label={t.rankMetric} className="rank-tabs h-10 min-w-0 flex-1 justify-between gap-0 sm:flex-none sm:gap-1">
+            <TabsList variant="line" aria-label={t.rankMetric} className="rank-tabs h-10 w-0 min-w-0 flex-1 justify-between gap-0 sm:w-auto sm:flex-none sm:gap-1">
               {metrics.map(key => {
                 const Icon = metricIcons[key];
-                return <TabsTrigger value={key} key={key} className="gap-2 px-1 sm:px-4"><Icon className="rank-tab-icon hidden sm:block" aria-hidden="true" />{t[metricLabels[key]]}</TabsTrigger>;
+                return <TabsTrigger value={key} key={key} className="min-w-0 gap-1 px-0 text-xs sm:gap-2 sm:px-4 sm:text-sm"><Icon className="rank-tab-icon hidden sm:block" aria-hidden="true" />{t[metricLabels[key]]}</TabsTrigger>;
               })}
             </TabsList>
             <Button variant="ghost" size="icon-sm" aria-label={t.refreshRanking} disabled={pending || !state.configured} onClick={state.retry}>
@@ -155,8 +159,12 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
           <TabsContent value={metric} className="m-0">
             <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs text-muted-foreground">
               <span aria-live="polite">{pending ? t.rankingLoading : `${number.format(ranked.length)} ${t.rankedMembers}`}</span>
-              <span className="flex items-center gap-1.5"><CalendarDays className="size-3.5" aria-hidden="true" />{rangeLabel}</span>
+              <span className="flex items-center gap-1.5"><CalendarDays className="size-3.5" aria-hidden="true" />{metric === "followers" ? t.latestFollowerSnapshot : rangeLabel}</span>
             </div>
+            <p className="px-3 pb-2 text-[11px] leading-relaxed text-muted-foreground">
+              {t.followerSnapshotNote}{!pending && followerCoverage ? ` ${t.followersCovered}: ${number.format(followerCoverage.membersCovered)}` : ""}
+              {!pending && followerCoverage?.latestObservedAt ? <> · {t.followersObservedAt}: <time dateTime={followerCoverage.latestObservedAt}>{followerCoverage.earliestObservedAt !== followerCoverage.latestObservedAt && followerCoverage.earliestObservedAt ? `${observationTime.format(new Date(followerCoverage.earliestObservedAt))} — ` : ""}{observationTime.format(new Date(followerCoverage.latestObservedAt))}</time> ({t.beijingTime})</> : null}
+            </p>
             <div className="rank-columns border-y bg-muted/30 px-3 py-2 text-xs text-muted-foreground" aria-hidden="true">
               <span>{t.rankPosition}</span><span>{t.memberColumn}</span>
               {metrics.map(key => <span key={key} className={cn("ranking-metric justify-self-end", key !== metric ? "hidden sm:block" : "sm:block")} data-selected={key === metric}>{t[columnLabels[key]]}{key === metric ? <ArrowDown className="ml-1 inline size-3" /> : null}</span>)}
@@ -173,13 +181,13 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
                       <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-muted/50 text-sm font-medium">{member.name.slice(-1)}</span>
                       <span className="flex min-w-0 flex-col gap-0.5"><span className="truncate font-medium group-hover:text-brand">{member.name}</span><span className="truncate text-[11px] text-muted-foreground">{member.groupName}{member.team ? ` · ${member.team}` : ""}</span></span>
                     </Link>
-                    {metrics.map(key => <span key={key} data-selected={key === metric} className={cn("ranking-metric justify-self-end font-mono text-sm tabular-nums", key !== metric ? "hidden sm:block" : "sm:block")}><span className="sr-only">{t[columnLabels[key]]}: </span>{number.format(member[key])}</span>)}
-                    <div className="col-start-2 col-end-4 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground sm:hidden">{metrics.filter(key => key !== metric).map(key => <span key={key}>{t[columnLabels[key]]} <span className="font-mono tabular-nums">{number.format(member[key])}</span></span>)}</div>
+                    {metrics.map(key => <span key={key} data-selected={key === metric} title={key === "followers" && member.followersObservedAt ? `${t.followersObservedAt}: ${observationTime.format(new Date(member.followersObservedAt))} (${t.beijingTime})` : undefined} className={cn("ranking-metric justify-self-end font-mono text-sm tabular-nums", key !== metric ? "hidden sm:block" : "sm:block")}><span className="sr-only">{t[columnLabels[key]]}: </span>{member[key] == null ? <span className="text-muted-foreground" aria-label={t.followersUnknown}>—</span> : number.format(member[key])}</span>)}
+                    <div className="col-start-2 col-end-4 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground sm:hidden">{metrics.filter(key => key !== metric).map(key => <span key={key}>{t[columnLabels[key]]} <span className="font-mono tabular-nums">{member[key] == null ? <span aria-label={t.followersUnknown}>—</span> : number.format(member[key])}</span></span>)}</div>
                   </li>
                 ))}
               </ol>
             ) : (
-              <div role="status" className="flex flex-col items-center gap-3 px-5 py-12 text-center"><Trophy className="size-7 text-muted-foreground" aria-hidden="true" /><p className="font-medium">{t.rankingEmpty}</p>{group !== "all" || team !== "all" || search ? <Button variant="outline" size="sm" onClick={resetFilters}>{t.clearFilters}</Button> : null}</div>
+              <div role="status" className="flex flex-col items-center gap-3 px-5 py-12 text-center"><Trophy className="size-7 text-muted-foreground" aria-hidden="true" /><p className="font-medium">{metric === "followers" && group === "all" && team === "all" && !search ? t.followersEmpty : t.rankingEmpty}</p>{group !== "all" || team !== "all" || search ? <Button variant="outline" size="sm" onClick={resetFilters}>{t.clearFilters}</Button> : null}</div>
             )}
             </ArchiveDataRegion>
             <div className="flex items-center justify-between gap-3 border-t px-3 py-2">
@@ -191,6 +199,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
           </TabsContent>
         </Tabs>
       </section>
+
+      <MeleeRankingDashboard locale={locale} apiBaseUrl={apiBaseUrl} />
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-[1.5fr_1fr]">
         <Card className="min-w-0 gap-3 rounded-lg py-3">

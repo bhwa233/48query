@@ -10,7 +10,7 @@ function HomeSkeleton() {
       <section aria-hidden="true" className="grid grid-cols-2 gap-2 sm:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Card key={index} className="gap-1 rounded-lg py-2.5"><CardHeader className="flex flex-row items-center justify-between gap-2 px-3"><Skeleton className="h-4 w-16" /><Skeleton className="size-4" /></CardHeader><CardContent className="px-3"><Skeleton className="h-7 w-20" /></CardContent></Card>)}</section>
       <section className="overflow-hidden rounded-lg border border-border">
         <div aria-hidden="true" className="flex flex-col gap-3 border-b px-3 py-2"><div className="flex h-8 justify-between gap-2">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-5 w-16 max-w-full" />)}</div><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-8 w-full" />)}</div></div>
-        <div aria-hidden="true" className="rank-columns border-b px-3 py-2"><Skeleton className="h-4 w-5" /><Skeleton className="h-4 w-16" /><Skeleton className="h-4 w-10 justify-self-end" />{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="hidden h-4 w-10 justify-self-end sm:block" />)}</div>
+        <div aria-hidden="true" className="rank-columns border-b px-3 py-2"><Skeleton className="h-4 w-5" /><Skeleton className="h-4 w-16" /><Skeleton className="h-4 w-10 justify-self-end" />{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="hidden h-4 w-10 justify-self-end sm:block" />)}</div>
         <RankingRowsSkeleton />
         <div aria-hidden="true" className="flex justify-between border-t px-3 py-2"><Skeleton className="h-8 w-28" /><Skeleton className="h-8 w-32" /></div>
       </section>

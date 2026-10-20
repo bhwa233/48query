@@ -141,12 +141,34 @@ export const QueryMemberSchema = z.object({
 
 export const QueryMembersSchema = z.object({ ok: z.literal(true), data: z.array(QueryMemberSchema), coverage: QueryCoverageSchema });
 
+export const FollowerSnapshotSchema = z.object({
+  count: z.number().int().nonnegative(), observedAt: z.string().datetime(),
+});
+
+export const MeleePeriodSchema = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(100) });
+export const MeleeEntrySchema = z.object({ memberId: z.string().regex(/^\d+$/).max(100), name: z.string().min(1).max(100), rank: z.number().int().positive(), score: z.number().int().nonnegative() });
+export const MeleeProgressSchema = z.object({
+  snapshotId: z.string().uuid(), periodId: z.number().int().positive(), periodLabel: z.string().min(1).max(100),
+  observedAt: z.string().datetime(), updatedAt: z.string().datetime(), nextCursor: z.string().regex(/^\d+$/).max(100).nullable(), complete: z.boolean(), limited: z.boolean(),
+});
+export const MeleePageSchema = MeleeProgressSchema.omit({ updatedAt: true, complete: true }).extend({
+  cursor: z.string().regex(/^\d+$/).max(100).nullable(), entries: z.array(MeleeEntrySchema).max(25), limited: z.boolean().default(false),
+}).refine(value => value.nextCursor === null || value.nextCursor !== value.cursor && value.entries.length > 0, "Melee pagination must advance with entries.")
+  .refine(value => !value.limited || value.nextCursor === null, "Limited ranking scans must stop without claiming another page.")
+  .refine(value => new Set(value.entries.map(entry => entry.memberId)).size === value.entries.length, "Duplicate members in a melee page.");
+export const MeleeSnapshotSchema = MeleeProgressSchema.omit({ snapshotId: true, nextCursor: true });
+export const QueryMeleeSchema = z.object({ ok: z.literal(true), data: z.object({
+  periods: z.array(MeleePeriodSchema), snapshot: MeleeSnapshotSchema.nullable(),
+  entries: z.array(MeleeEntrySchema.extend({ memberAvailable: z.boolean() })),
+}) });
+
 export const QueryRankingsSchema = z.object({
   ok: z.literal(true),
   data: z.object({
     from: z.string(), to: z.string(),
     totals: z.object({ messages: z.number().int().nonnegative(), activeMembers: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() }),
-    members: z.array(QueryMemberSchema),
+    members: z.array(QueryMemberSchema.extend({ followers: z.number().int().nonnegative().nullable(), followersObservedAt: z.string().nullable() })),
+    followersCoverage: z.object({ membersCovered: z.number().int().nonnegative(), earliestObservedAt: z.string().nullable(), latestObservedAt: z.string().nullable() }),
     directory: z.array(z.object({ groupName: z.string(), team: z.string().nullable() })),
     dailyActivity: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() })),
     typeBreakdown: z.array(z.object({ type: z.string(), count: z.number().int().nonnegative() })),
@@ -197,6 +219,7 @@ export const CatalogEntrySchema = z.object({
 export const QueryIngestUnitSchema = z.object({
   batchId: z.string().min(1).max(100), statDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), startedAt: z.string().max(80),
   member: IngestMemberSchema, messages: z.array(IngestMessageSchema).max(25), recordings: z.array(z.unknown()).max(0),
+  followerSnapshot: FollowerSnapshotSchema.optional(),
   sync: SourceSyncSchema.optional(),
   catalog: z.array(CatalogEntrySchema).max(50).default([]),
   messageCursor: z.string().max(500).nullable().optional(), recordingCursor: z.string().max(500).nullable().optional(),

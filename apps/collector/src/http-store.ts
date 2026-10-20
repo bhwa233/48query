@@ -1,5 +1,5 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
-import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, MeleePage, MeleeProgress } from "@starter/shared";
 import { object, parsePocketJson, timestamp } from "./pocket48-content";
 import type { CollectionBudget } from "./budget";
 
@@ -7,6 +7,9 @@ type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string
 
 export class HttpIngestStore implements CollectorStore {
   constructor(private readonly baseUrl: string, private readonly key: string, private readonly since?: string, private readonly budget?: CollectionBudget) {}
+
+  async meleeProgress(periodId: number) { return this.request<MeleeProgress | null>(`/api/query/ingest/melee/${periodId}`); }
+  async saveMeleePage(page: MeleePage) { return this.request<MeleeProgress>("/api/query/ingest/melee", { method: "POST", body: JSON.stringify(page) }); }
 
   async collectionProgress(): Promise<Map<string, CollectorProgress>> {
     if (!this.since) throw new Error("Durable collector progress requires an explicit date scope.");

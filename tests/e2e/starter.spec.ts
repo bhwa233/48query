@@ -195,6 +195,13 @@ test("rankings change metric, period and scope while preserving shared ranks", a
   await page.goto("/zh");
   const list = page.getByRole("list", { name: "成员排行", exact: true });
   await expect(list.getByRole("link").first()).toHaveText(/验证成员/);
+  await page.getByRole("tab", { name: "粉丝榜", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await page.getByRole("combobox", { name: "时间范围", exact: true }).click();
+  await page.getByRole("option", { name: "近 30 天", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await page.getByRole("combobox", { name: "时间范围", exact: true }).click();
+  await page.getByRole("option", { name: "昨日", exact: true }).click();
   await page.getByRole("tab", { name: "图片榜", exact: true }).click();
   await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
   await page.getByRole("tab", { name: "活跃榜", exact: true }).click();
@@ -234,6 +241,19 @@ test("rankings change metric, period and scope while preserving shared ranks", a
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(page.getByRole("link", { name: "图片", exact: true })).toBeVisible();
+  const melee = page.getByRole("region", { name: "鸡腿周榜", exact: true });
+  const meleeList = melee.getByRole("list", { name: "鸡腿周榜", exact: true });
+  await expect(meleeList.locator("li").first()).toContainText("鸡腿验证一");
+  await melee.getByRole("combobox", { name: "官方榜单期次", exact: true }).click();
+  await page.getByRole("option", { name: "#425 · 测试上一期", exact: true }).click();
+  await expect(meleeList.locator("li").first()).toContainText("鸡腿验证二");
+  await expect(melee.getByText(/接口返回范围待确认/)).toBeVisible();
+  await melee.getByRole("textbox", { name: "搜索榜单成员", exact: true }).fill("鸡腿验证一");
+  await expect(meleeList.locator("li")).toHaveCount(1);
+  await expect(meleeList.locator('li > [aria-label="排名 2"]')).toHaveCount(1);
+  await page.getByRole("tab", { name: "粉丝榜", exact: true }).click();
+  await expect(page.getByRole("button", { name: "刷新排行", exact: true })).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("rankings-mobile-dark.png"), fullPage: true });
 });
 

@@ -44,6 +44,18 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     };
     // Register before any source can fail, preserving the original error on completion.
     await store.ingestUnit(unit([]));
+    if (source.readFollowers) {
+      try {
+        const followerSnapshot = await source.readFollowers(member);
+        if (followerSnapshot) await store.ingestUnit({ ...unit([]), followerSnapshot });
+        console.log(JSON.stringify({ event: followerSnapshot ? "followers_collected" : "followers_unavailable", memberId: member.id }));
+      } catch (error) {
+        if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
+        errorCount += 1;
+        lastError = error instanceof Error ? error.message : "Follower collection failed.";
+        console.error(JSON.stringify({ event: "followers_failed", memberId: member.id, error: lastError }));
+      }
+    }
     for (const stream of streams) {
       if (options.budget?.stopped) { budgetReached = true; break; }
       let sync = structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream));

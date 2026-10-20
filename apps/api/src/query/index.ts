@@ -7,6 +7,7 @@ import { CollectionSourceSchema, ErrorSchema, QueryMemberDetailSchema, QueryMemb
 import type { AppEnv } from "../env";
 import ingest from "./ingest";
 import { readMessages as messages } from "./messages";
+import { registerMeleeQuery } from "./melee";
 
 const DateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
 const RankingQuery = z.object({
@@ -34,6 +35,7 @@ app.onError((error, c) => {
   return c.json({ ok: false, error: { code: "internal_error", message: "Unexpected server error." } }, 500);
 });
 app.route("/ingest", ingest);
+registerMeleeQuery(app);
 function database(env: AppEnv["Bindings"]) { if (!env.APP_DB) throw new Error("APP_DB binding is missing"); return drizzle(env.APP_DB); }
 type Database = ReturnType<typeof database>;
 type Row = Record<string, unknown>;
@@ -94,18 +96,23 @@ app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: Ra
   const start = new Date(`${from}T00:00:00+08:00`).toISOString();
   const end = new Date(Date.parse(`${to}T00:00:00+08:00`) + 86400_000).toISOString();
   const inRange = sql`${publicKinds} AND q.occurred_at >= ${start} AND q.occurred_at < ${end}`;
-  const conditions = [inRange, sql`m.status = 'active'`];
+  const conditions = [sql`m.status = 'active'`];
   if (group) conditions.push(sql`m.group_name = ${group}`);
   if (team) conditions.push(sql`m.team = ${team}`);
-  const scope = sql.join(conditions, sql` AND `);
+  const memberScope = sql.join(conditions, sql` AND `);
+  const scope = sql`${inRange} AND ${memberScope}`;
   const [rows, imageRows, activity, breakdown, recent, directory, cover] = await Promise.all([
-    db.all<Row>(sql`SELECT m.id, m.name, m.pinyin, m.group_name, m.team, COUNT(*) AS messages,
+    db.all<Row>(sql`SELECT m.id, m.name, m.pinyin, m.group_name, m.team, COUNT(q.id) AS messages,
+      f.followers, f.observed_at AS followers_observed_at,
       COUNT(DISTINCT date(q.occurred_at, '+8 hours')) AS active_days,
       SUM(CASE WHEN q.kind = 'reply' THEN 1 ELSE 0 END) AS replies, MAX(q.occurred_at) AS latest_message_at,
       (SELECT COUNT(DISTINCT link.image_id) FROM query_message_images link JOIN query_messages q ON q.id = link.message_id
         WHERE q.member_id = m.id AND ${inRange}) AS images
-      FROM query_messages q JOIN query_members m ON m.id = q.member_id WHERE ${scope}
-      GROUP BY m.id ORDER BY messages DESC, m.name, m.id`),
+      FROM query_members m LEFT JOIN query_messages q ON m.id = q.member_id AND ${inRange}
+      LEFT JOIN query_follower_snapshots f ON f.member_id = m.id AND f.observed_at =
+        (SELECT MAX(latest.observed_at) FROM query_follower_snapshots latest WHERE latest.member_id = m.id)
+      WHERE ${memberScope} GROUP BY m.id HAVING COUNT(q.id) > 0 OR f.followers IS NOT NULL
+      ORDER BY messages DESC, m.name, m.id`),
     db.all<Row>(sql`SELECT COUNT(DISTINCT link.image_id) AS images FROM query_message_images link
       JOIN query_messages q ON q.id = link.message_id JOIN query_members m ON m.id = q.member_id WHERE ${scope}`),
     db.all<Row>(sql`SELECT date(q.occurred_at, '+8 hours') AS date, COUNT(*) AS count FROM query_messages q
@@ -116,12 +123,14 @@ app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: Ra
     db.all<Row>(sql`SELECT DISTINCT group_name, team FROM query_members WHERE status = 'active' ORDER BY group_name, team`),
     coverage(db),
   ]);
-  const members = rows.map(memberData);
+  const members = rows.map(row => ({ ...memberData(row), followers: row.followers == null ? null : Number(row.followers), followersObservedAt: row.followers_observed_at as string | null }));
+  const observations = members.flatMap(member => member.followersObservedAt ? [member.followersObservedAt] : []).toSorted();
   return c.json({ ok: true as const, data: {
     from, to,
-    totals: { messages: members.reduce((sum, member) => sum + member.messages, 0), activeMembers: members.length,
+    totals: { messages: members.reduce((sum, member) => sum + member.messages, 0), activeMembers: members.filter(member => member.messages > 0).length,
       images: Number(imageRows[0]?.images ?? 0), replies: members.reduce((sum, member) => sum + member.replies, 0) },
     members, directory: directory.map(row => ({ groupName: String(row.group_name), team: row.team as string | null })),
+    followersCoverage: { membersCovered: observations.length, earliestObservedAt: observations[0] ?? null, latestObservedAt: observations.at(-1) ?? null },
     dailyActivity: activity.map(row => ({ date: String(row.date), count: Number(row.count) })),
     typeBreakdown: breakdown.map(row => ({ type: String(row.type), count: Number(row.count) })),
     recentMessages: await messages(db, recent),

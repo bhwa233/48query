@@ -20,7 +20,7 @@ import type {
   NoteResponseSchema,
   EchoSchema,
   QueryOverviewSchema,
-  QueryRankingsSchema,
+  QueryRankingsSchema, FollowerSnapshotSchema, MeleePeriodSchema, MeleeEntrySchema, MeleeProgressSchema, MeleePageSchema, QueryMeleeSchema,
   QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema, CatalogEntrySchema, CollectorProgressSchema,
 } from "./schemas";
 
@@ -32,6 +32,12 @@ export type NoteResponse = z.infer<typeof NoteResponseSchema>;
 export type EchoResponse = z.infer<typeof EchoSchema>;
 export type QueryOverview = z.infer<typeof QueryOverviewSchema>;
 export type QueryRankings = z.infer<typeof QueryRankingsSchema>;
+export type FollowerSnapshot = z.infer<typeof FollowerSnapshotSchema>;
+export type MeleePeriod = z.infer<typeof MeleePeriodSchema>;
+export type MeleeEntry = z.infer<typeof MeleeEntrySchema>;
+export type MeleeProgress = z.infer<typeof MeleeProgressSchema>;
+export type MeleePage = z.infer<typeof MeleePageSchema>;
+export type QueryMelee = z.infer<typeof QueryMeleeSchema>;
 export type ArchiveMessage = z.infer<typeof QueryMessageSchema>;
 export type ArchiveMembers = z.infer<typeof QueryMembersSchema>;
 export type ArchiveMemberDetail = z.infer<typeof QueryMemberDetailSchema>;

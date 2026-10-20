@@ -71,6 +71,7 @@ try {
     headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
     body: JSON.stringify({ batchId: "e2e-archive", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
       member: { id: "e2e-member", name: "验证成员", pinyin: "syntheticmember", groupName: "SNH48", team: "Team SII" },
+      followerSnapshot: { count: 300, observedAt: new Date().toISOString() },
       messages: [
         { id: "e2e-text", memberId: "e2e-member", senderId: "e2e-member", type: "TEXT", text: "验证文字归档", occurredAt },
         { id: "e2e-image", memberId: "e2e-member", senderId: "e2e-member", type: "IMAGE", kind: "image", occurredAt, images: [{ id: "e2e-image-asset", sourceUrl: `${webOrigin}/favicon.svg`, galleryUrl: `${webOrigin}/favicon.svg`, status: "uploaded" }] },
@@ -83,6 +84,7 @@ try {
     headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
     body: JSON.stringify({ batchId: "e2e-comparison", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
       member: { id: "e2e-comparison", name: "对照成员", pinyin: "picturemember", groupName: "GNZ48", team: "Team G" },
+      followerSnapshot: { count: 500, observedAt: new Date().toISOString() },
       messages: [
         ...[1, 2].map(index => ({ id: `comparison-image-${index}`, memberId: "e2e-comparison", senderId: "e2e-comparison", type: "IMAGE", kind: "image", occurredAt,
           images: [{ id: `comparison-asset-${index}`, sourceUrl: `${webOrigin}/favicon.svg?image=${index}`, galleryUrl: `${webOrigin}/favicon.svg?image=${index}`, status: "uploaded" }] })),
@@ -90,6 +92,17 @@ try {
       ], recordings: [], totalMembers: 2, membersCovered: 2, errorCount: 0 }),
   });
   if (!comparison.ok) throw new Error(`E2E comparison seed failed: ${comparison.status}`);
+  for (const [index, periodId] of [426, 425].entries()) {
+    const melee = await fetch(`${apiOrigin}/api/query/ingest/melee`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
+      body: JSON.stringify({ snapshotId: `20000000-0000-4000-8000-00000000000${index + 1}`, periodId, periodLabel: index ? "测试上一期" : "测试最新一期", observedAt: new Date().toISOString(), cursor: null, nextCursor: null, limited: index === 1,
+        entries: [
+          { memberId: "607515", name: "鸡腿验证一", rank: index ? 2 : 1, score: index ? 1000 : 1500 },
+          { memberId: "63566", name: "鸡腿验证二", rank: index ? 1 : 2, score: index ? 2000 : 1000 },
+        ] }),
+    });
+    if (!melee.ok) throw new Error(`E2E weekly ranking seed failed: ${melee.status}`);
+  }
   const web = launch(["exec", "vinext", "dev", "--port", String(webPort)], {
     cwd: webDirectory,
     env: {

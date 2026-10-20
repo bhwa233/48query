@@ -340,18 +340,60 @@ try {
   const rankingOptions = { ...ingestOptions, body: JSON.stringify(rankingPage) };
   await request(origin, "/api/query/ingest/unit", 200, rankingOptions);
   await request(origin, "/api/query/ingest/unit", 200, { ...rankingOptions, body: JSON.stringify({ ...rankingPage, messages: [{ ...rankingPage.messages[2], source: "essence", sourceFlags: 4 }] }) });
+  // A delayed replay must not replace a newer (possibly lower) count. Fan-only
+  // members belong in the fan ranking even when they have no messages in range.
+  for (const followerSnapshot of [
+    { count: 100, observedAt: "2026-10-17T00:00:00.000Z" },
+    { count: 90, observedAt: "2026-10-18T00:00:00.000Z" },
+    { count: 200, observedAt: "2026-10-16T00:00:00.000Z" },
+  ]) await request(origin, "/api/query/ingest/unit", 200, { ...rankingOptions, body: JSON.stringify({ ...rankingPage, messages: [], followerSnapshot }) });
+  const fanOnly = { ...rankingPage, member: { ...rankingPage.member, id: "fan-only", name: "Fan Only" }, messages: [], followerSnapshot: { count: 0, observedAt: "2026-10-18T01:00:00.000Z" } };
+  await request(origin, "/api/query/ingest/unit", 200, { ...rankingOptions, body: JSON.stringify(fanOnly) });
+  await request(origin, "/api/query/ingest/unit", 200, { ...rankingOptions, body: JSON.stringify(fanOnly) });
+  await request(origin, "/api/query/ingest/unit", 400, { ...rankingOptions, body: JSON.stringify({ ...fanOnly, followerSnapshot: { count: 1, observedAt: "2099-01-01T00:00:00.000Z" } }) });
   const dayRanking = (await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-02&group=Boundary&team=Boundary%20team")).json().data;
   assert.deepEqual(dayRanking.totals, { messages: 2, activeMembers: 1, images: 2, replies: 1 });
   assert.deepEqual(dayRanking.dailyActivity, [{ date: "2024-01-02", count: 2 }]);
   assert.equal(dayRanking.members[0].activeDays, 1);
   assert.equal(dayRanking.members[0].images, 2);
+  assert.equal(dayRanking.members[0].followers, 90);
+  assert.equal(dayRanking.members.find(member => member.id === "fan-only").followers, 0);
+  assert.equal(dayRanking.members.find(member => member.id === "fan-only").messages, 0);
+  assert.deepEqual(dayRanking.followersCoverage, { membersCovered: 2, earliestObservedAt: "2026-10-18T00:00:00.000Z", latestObservedAt: "2026-10-18T01:00:00.000Z" });
+  const allFans = (await request(origin, "/api/query/rankings?from=2026-10-17&to=2026-10-18")).json().data;
+  assert.equal(allFans.members.find(member => member.id === "smoke-member").followers, null);
   const expandedRanking = (await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-03&group=Boundary")).json().data;
   assert.equal(expandedRanking.members[0].messages, 3);
   assert.equal(expandedRanking.members[0].activeDays, 2);
   assert.equal((await request(origin, "/api/query/rankings?from=2024-01-02&to=2024-01-03&group=Boundary&team=other")).json().data.members.length, 0);
   for (const range of ["from=2024-01-03&to=2024-01-02", "from=2024-01-01&to=2025-02-01", "from=2024-02-30&to=2024-03-01", "from=2099-01-01&to=2099-01-02"])
     await request(origin, `/api/query/rankings?${range}`, 400);
-  console.log("PASS ranking ranges: Beijing midnight boundaries, image deduplication, active days, filter scope and invalid ranges");
+  console.log("PASS rankings: Beijing ranges, image deduplication, latest fan snapshots, unknown vs zero, fan-only members and filter scope");
+  // Ranking pages and their cursor must commit together; a partial refresh must
+  // not replace the last complete published snapshot.
+  const meleePage = { snapshotId: "10000000-0000-4000-8000-000000000001", periodId: 426, periodLabel: "Synthetic official period", observedAt: "2026-10-17T00:00:00.000Z", cursor: null, nextCursor: "2", entries: [{ memberId: "607515", name: "Synthetic One", rank: 1, score: 100 }] };
+  const saveMelee = page => ({ ...ingestOptions, body: JSON.stringify(page) });
+  await request(origin, "/api/query/ingest/melee", 200, saveMelee(meleePage));
+  assert.equal((await request(origin, "/api/query/melee")).json().data.snapshot.complete, false);
+  assert.equal((await request(origin, "/api/query/ingest/melee/426", 200, imageOptions)).json().data.nextCursor, "2");
+  await request(origin, "/api/query/ingest/melee", 200, saveMelee({ ...meleePage, cursor: "2", nextCursor: null, entries: [{ memberId: "63566", name: "Synthetic Two", rank: 2, score: 90 }] }));
+  await request(origin, "/api/query/ingest/melee", 409, saveMelee({ ...meleePage, entries: [{ ...meleePage.entries[0], score: 999 }] }));
+  const refreshMelee = { ...meleePage, snapshotId: "10000000-0000-4000-8000-000000000002", observedAt: "2026-10-18T00:00:00.000Z", entries: [{ ...meleePage.entries[0], score: 200 }] };
+  await request(origin, "/api/query/ingest/melee", 200, saveMelee(refreshMelee));
+  const publishedMelee = (await request(origin, "/api/query/melee?periodId=426")).json().data;
+  assert.equal(publishedMelee.snapshot.complete, true);
+  assert.equal("nextCursor" in publishedMelee.snapshot || "snapshotId" in publishedMelee.snapshot, false, "Public rankings must not expose private checkpoint identifiers");
+  assert.equal(publishedMelee.entries.length, 2);
+  assert.equal(publishedMelee.entries[0].score, 100);
+  assert.equal(publishedMelee.entries[0].memberAvailable, false);
+  assert.equal((await request(origin, "/api/query/ingest/melee/426", 200, imageOptions)).json().data.snapshotId, refreshMelee.snapshotId);
+  await request(origin, "/api/query/ingest/melee", 200, saveMelee({ ...refreshMelee, cursor: "2", nextCursor: null, entries: [{ memberId: "63566", name: "Synthetic Two", rank: 2, score: 190 }] }));
+  assert.equal((await request(origin, "/api/query/melee")).json().data.entries[0].score, 200);
+  await request(origin, "/api/query/ingest/melee", 200, saveMelee({ ...meleePage, snapshotId: "10000000-0000-4000-8000-000000000003", observedAt: "2026-10-19T00:00:00.000Z", nextCursor: null, limited: true }));
+  assert.equal((await request(origin, "/api/query/melee")).json().data.entries.length, 2, "A later limited response must not replace a complete ranking");
+  assert.equal((await request(origin, "/api/query/ingest/melee/426", 200, imageOptions)).json().data.limited, true);
+  assert.equal((await request(origin, "/api/query/melee?periodId=425")).json().data.snapshot, null);
+  console.log("PASS weekly rankings: durable page resume, stale cursor rejection and atomic publication of complete refreshes");
   const datedMedia = { ...ingestUnit, messages: [{ id: "dated-media", memberId: "smoke-member", senderId: "smoke-member", type: "IMAGE", kind: "image", occurredAt: "2025-12-31T16:00:00.000Z", images: [{ id: "dated-media-image", sourceUrl: "https://source.48.cn/dated.png" }] }] };
   await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify(datedMedia) });
   const datedQueue = (await request(origin, `/api/query/ingest/images?since=${encodeURIComponent(since)}&afterId=`, 200, imageOptions)).json();

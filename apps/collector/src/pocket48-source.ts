@@ -1,7 +1,8 @@
-import type { CatalogEntry } from "@starter/shared";
+import type { CatalogEntry, FollowerSnapshot, MeleePeriod, MeleeEntry } from "@starter/shared";
+import { MeleePeriodSchema, MeleeEntrySchema } from "@starter/shared/schemas";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
-import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
+import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp, unsignedInteger } from "./pocket48-content";
 import { directoryEntries, readHistoricalDirectory, rosterName, type RosterCandidate } from "./group-roster";
 import { collectionSince } from "./collection-scope";
 import type { CollectionBudget } from "./budget";
@@ -38,6 +39,7 @@ export class Pocket48Source implements CollectorSource {
   private readonly directory = new Map<string, CollectorMember>();
   private readonly groupDirectory = new Map<string, CollectorMember>();
   private readonly archiveAnchors = new Map<string, Promise<{ times: number[]; next: string | null }>>();
+  private readonly profiles = new Map<string, { content: Record<string, unknown>; observedAt: string }>();
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
@@ -133,6 +135,54 @@ export class Pocket48Source implements CollectorSource {
     return members;
   }
 
+  private async memberProfile(id: string) {
+    const content = object(await this.post("/user/api/v1/user/info/home", { userId: id }));
+    const profile = { content, observedAt: new Date().toISOString() };
+    this.profiles.set(id, profile);
+    return profile;
+  }
+
+  async readFollowers(member: CollectorMember): Promise<FollowerSnapshot | null> {
+    const profile = this.profiles.get(member.id) ?? await this.memberProfile(member.id);
+    const user = object(profile.content.baseUserInfo);
+    if (string(user.userId) !== member.id || user.isStar !== true) throw new Error("Follower profile does not match a verified member.");
+    // Live profiles return baseUserInfo.followers as an exact integer. Do not
+    // substitute the login account's following list or parse rounded displays.
+    const count = unsignedInteger(user.followers);
+    return count !== null ? { count, observedAt: profile.observedAt } : null;
+  }
+
+  async readMeleePeriods(): Promise<MeleePeriod[]> {
+    const root = object(await this.post("/gift/api/v1/melee/rank/getMeleeRankPage", { rankid: 0 }));
+    if (!Array.isArray(root.weekRankList)) throw new Error("Pocket48 returned no weekly ranking periods.");
+    const periods = root.weekRankList.map(value => {
+      const row = object(value);
+      return MeleePeriodSchema.parse({ id: unsignedInteger(row.weekRankId), label: string(row.weekRankName) });
+    });
+    // Only retain periods actually returned by the platform; never extrapolate
+    // missing IDs, years or dates from a label that omits the year.
+    return [...new Map(periods.map(period => [period.id, period])).values()].sort((a, b) => b.id - a.id);
+  }
+
+  async readMeleePage(periodId: number, cursor: string | null): Promise<{ entries: MeleeEntry[]; nextCursor: string | null; limited: boolean }> {
+    const root = object(await this.post("/gift/api/v1/melee/rank/getMeleeWeekRank", { rankId: periodId, ...(cursor ? { nextId: cursor } : {}) }));
+    if (!Array.isArray(root.rankUserList)) throw new Error("Pocket48 returned an unknown weekly ranking shape.");
+    const marker = string(root.nextId);
+    if (marker === null || !/^-?\d+$/.test(marker)) throw new Error("Weekly ranking has no valid pagination marker.");
+    const repeated = marker === cursor;
+    const nextCursor = marker === "0" || marker === "-1" || repeated ? null : marker;
+    if (nextCursor && (!/^\d+$/.test(nextCursor) || !root.rankUserList.length)) throw new Error("Weekly ranking cursor did not advance.");
+    const entries = root.rankUserList.map(value => {
+      const row = object(value), user = object(row.baseUserInfo);
+      if (user.isStar !== true) throw new Error("Weekly ranking contains an unverified member identity.");
+      return MeleeEntrySchema.parse({ memberId: string(user.userId), name: string(user.starName ?? user.realNickName ?? user.nickname), rank: unsignedInteger(row.rankNum), score: unsignedInteger(row.melee) });
+    });
+    if (new Set(entries.map(entry => entry.memberId)).size !== entries.length) throw new Error("Weekly ranking repeats a member within one page.");
+    // The live endpoint can repeat its top seven entries and the same marker.
+    // Stop the scan, but expose the uncertain coverage instead of claiming a full ranking.
+    return { entries, nextCursor, limited: repeated && entries.length > 0 };
+  }
+
   private addDirectory(payload: unknown) {
     const entries = directoryEntries(payload);
     for (const entry of entries) {
@@ -179,7 +229,7 @@ export class Pocket48Source implements CollectorSource {
         if (checked.has(id)) continue;
         checked.add(id);
         try {
-          const home = object(await this.post("/user/api/v1/user/info/home", { userId: id }));
+          const home = (await this.memberProfile(id)).content;
           const user = object(home.baseUserInfo);
           const names = [user.starName, user.realNickName, user.nickname].map(string).filter((name): name is string => Boolean(name));
           if (string(user.userId) !== id || !names.some(name => rosterName(name) === candidate.name)
@@ -211,7 +261,7 @@ export class Pocket48Source implements CollectorSource {
   }
 
   private async resolveDirectoryMember(id: string) {
-    const home = object(await this.post("/user/api/v1/user/info/home", { userId: id }));
+    const home = (await this.memberProfile(id)).content;
     const user = object(home.baseUserInfo);
     // Missing community-directory entries are not necessarily nonmembers.
     // Require the official account's ID and explicit member flag to add one.

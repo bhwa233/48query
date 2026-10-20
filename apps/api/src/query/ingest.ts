@@ -7,6 +7,7 @@ import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessage
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
+import { registerMeleeIngest } from "./melee";
 
 const BatchCompleteSchema = z.object({ completedAt: z.string().max(80), membersCovered: z.number().int().nonnegative(), totalMembers: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative(), errorMessage: z.string().max(2000).nullable().optional() });
 const unavailable = { description: "Collector ingestion is not configured or authorized.", content: { "application/json": { schema: ErrorSchema } } };
@@ -21,12 +22,14 @@ app.use("*", async (c, next) => {
   await next();
 });
 app.onError((error, c) => {
+  if (/no such table:.*query_(?:melee_|follower_snapshots)/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "ranking_storage_not_configured", message: "Apply the ranking migrations before collecting fans or weekly rankings." } }, 503);
   if (/no such table:.*query_collector_progress/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "collector_progress_not_configured", message: "Apply the collector progress migration before enabling scheduled collection." } }, 503);
   if (error instanceof HTTPException) return c.json({ ok: false, error: { code: "http_error", message: error.message } }, error.status);
   console.error(JSON.stringify({ event: "ingest_failed", name: error.name }));
   return c.json({ ok: false, error: { code: "internal_error", message: "Unexpected ingestion error." } }, 500);
 });
 function database(c: { env: AppEnv["Bindings"] }) { if (!c.env.APP_DB) throw new Error("APP_DB binding is missing"); return c.env.APP_DB; }
+registerMeleeIngest(app);
 
 app.openapi(createRoute({ method: "get", path: "/progress", request: { query: z.object({ since: CollectorSinceSchema, after: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) }, responses: { 200: { description: "Private, date-scoped resumable collector progress.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CollectorProgressSchema), nextCursor: z.string().nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
   const { since: rawSince, after, limit } = c.req.valid("query");
@@ -60,11 +63,14 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
   const input = c.req.valid("json");
   const now = new Date().toISOString();
   if (input.messages.some(message => (message.author && message.author.id !== message.memberId) || (message.senderId && message.senderId !== message.memberId))) return c.json({ ok: false as const, error: { code: "invalid_author", message: "Message author and sender must match." } }, 400);
+  if (input.followerSnapshot && Date.parse(input.followerSnapshot.observedAt) > Date.now() + 300_000) return c.json({ ok: false as const, error: { code: "invalid_snapshot", message: "Follower observation cannot be in the future." } }, 400);
   const statements = [
     db.prepare("INSERT INTO query_batches (id, stat_date, status, started_at, members_covered, total_members, error_count) VALUES (?, ?, 'running', ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET members_covered = excluded.members_covered, total_members = excluded.total_members, error_count = excluded.error_count, error_message = NULL").bind(input.batchId, input.statDate, input.startedAt, input.membersCovered, input.totalMembers, input.errorCount),
     memberStatement(db, input.member, now),
     db.prepare("INSERT INTO query_sync_state (member_id, message_cursor, recording_cursor, updated_at, last_error) VALUES (?, ?, ?, ?, NULL) ON CONFLICT(member_id) DO UPDATE SET message_cursor = excluded.message_cursor, updated_at = excluded.updated_at").bind(input.member.id, input.messageCursor ?? null, input.recordingCursor ?? null, now),
   ];
+  if (input.followerSnapshot) statements.push(db.prepare("INSERT INTO query_follower_snapshots (member_id, observed_at, followers) VALUES (?, ?, ?) ON CONFLICT(member_id, observed_at) DO NOTHING")
+    .bind(input.member.id, new Date(input.followerSnapshot.observedAt).toISOString(), input.followerSnapshot.count));
   for (const message of input.messages) {
     if (message.author && message.author.id !== input.member.id) statements.push(memberStatement(db, message.author, now));
     statements.push(db.prepare(`INSERT INTO query_messages (id, member_id, occurred_at, type, text, sender_id, sender_name, sender_type, source_json, room_owner_id, room_id, kind, question, answer, source, source_flags, parse_status)

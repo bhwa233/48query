@@ -1,4 +1,4 @@
-import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry } from "@starter/shared";
+import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry, FollowerSnapshot } from "@starter/shared";
 export type { CollectionSource, SourceSync } from "@starter/shared";
 
 export type CollectorMember = {
@@ -68,6 +68,7 @@ export type SyncState = {
 
 export interface CollectorSource {
   listMembers(): Promise<CollectorMember[]>;
+  readFollowers?(member: CollectorMember): Promise<FollowerSnapshot | null>;
   listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>>;
   sources?: readonly CollectionSource[];
   retryCatalog?(member: CollectorMember, source: "album" | "post_images", entries: CatalogEntry[]): Promise<CollectorPage<CollectorMessage>>;
@@ -79,6 +80,7 @@ export type IngestUnit = {
   statDate: string;
   startedAt: string;
   member: CollectorMember;
+  followerSnapshot?: FollowerSnapshot;
   messages: CollectorMessage[];
   recordings: CollectorRecording[];
   messageCursor: string | null;

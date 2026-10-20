@@ -12,6 +12,7 @@ import { loadProductionCredential } from "./credentials";
 import { collectionSince, openScopedCheckpoints } from "./collection-scope";
 import { dirname, join } from "node:path";
 import { CollectionBudget } from "./budget";
+import { collectMelee } from "./melee";
 
 const backfillOnly = process.argv.includes("--backfill");
 const mediaOnly = process.argv.includes("--retry-media");
@@ -21,6 +22,7 @@ const since = sourceName === "pocket48" ? collectionSince() : undefined;
 const maxSeconds = Number(process.env.COLLECTOR_MAX_SECONDS ?? 0);
 if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 3600) throw new Error("COLLECTOR_MAX_SECONDS must be between 0 and 3600.");
 const budget = new CollectionBudget(maxSeconds ? Date.now() + maxSeconds * 1000 : Infinity);
+let activeBudget = budget;
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => budget.stop());
 if (mediaOnly && process.env.COLLECTOR_DEFER_MEDIA === "1") throw new Error("Unset COLLECTOR_DEFER_MEDIA before retrying media.");
 if (mediaOnly && (dryRun || sourceName !== "pocket48")) throw new Error("Media retries require the Pocket48 source and a writable ingestion store.");
@@ -33,7 +35,7 @@ const authKey = process.env["INGEST_KEY"];
 const store: CollectorStore = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey, since, budget) : new DryRunStore();
 const stored = sourceName === "pocket48" && !mediaOnly ? await loadProductionCredential() : null;
 const sourceOptions = {
-  budget: () => budget,
+  budget: () => activeBudget,
   maxOriginalLookups: maxSeconds ? 12 : undefined,
   since,
   ["token"]: process.env["POCKET48_TOKEN"] ?? stored?.token ?? "",
@@ -62,6 +64,7 @@ const batchSource = memberId
   ? {
     listMembers: async () => (await source.listMembers()).filter((member) => member.id === memberId),
     listMessages: source.listMessages.bind(source),
+    readFollowers: source instanceof Pocket48Source ? source.readFollowers.bind(source) : undefined,
     sources: source.sources,
     retryCatalog: source instanceof Pocket48Source ? source.retryCatalog.bind(source) : undefined,
     listContent: source.listContent?.bind(source),
@@ -71,6 +74,12 @@ const batchSource = memberId
 
 if (!mediaOnly && sourceName === "pocket48" && !sourceOptions["token"]) throw new Error(`Pocket48 credential not found. Run the login command first: ${CREDENTIAL_PATH}`);
 if (!dryRun && (!endpoint || !authKey)) throw new Error("INGEST_API_URL and INGEST_KEY are required for writes; use --dry-run to inspect safely.");
+let melee = { errors: 0 };
+if (!mediaOnly && !backfillOnly && source instanceof Pocket48Source) {
+  activeBudget = budget.slice(180);
+  try { melee = await collectMelee(source, store instanceof HttpIngestStore ? store : null, activeBudget); }
+  finally { activeBudget = budget; }
+}
 const maxMembers = Number(process.env["COLLECTOR_MAX_MEMBERS"] ?? 0);
 const maxPagesPerMember = Number(process.env["COLLECTOR_MAX_PAGES"] ?? 10);
 const historyBudget = process.env.COLLECTOR_HISTORY_PAGES?.trim();
@@ -130,11 +139,13 @@ if (backfillOnly) {
       }
     }
   }
-} else if (!mediaOnly) {
+} else if (!mediaOnly && !budget.stopped) {
   const result = await runBatch(batchSource, store, runOptions);
   errorCount = result.errorCount;
   if (since && !result.scopeComplete) console.log(JSON.stringify({ event: "collection_pending", batchId: result.batchId }));
   console.log(JSON.stringify({ event: "batch_finished", ...result }));
+} else if (!mediaOnly) {
+  console.log(JSON.stringify({ event: "collection_pending", reason: "budget_reached_before_content" }));
 }
-console.log(JSON.stringify({ event: "collector_finished", errorCount, retryFailures, budgetReached: budget.stopped || retries.budgetReached }));
-if ((errorCount > 0 || retryFailures > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;
+console.log(JSON.stringify({ event: "collector_finished", errorCount, rankingErrors: melee.errors, retryFailures, budgetReached: budget.stopped || retries.budgetReached }));
+if ((errorCount > 0 || retryFailures > 0 || melee.errors > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;

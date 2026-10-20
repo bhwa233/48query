@@ -97,7 +97,7 @@
 /* Ranking-specific presentation uses the same semantic palette as SparkHub. */
 .rank-columns {
   display: grid;
-  grid-template-columns: 2rem minmax(0, 1fr) repeat(4, minmax(4.25rem, 0.5fr));
+  grid-template-columns: 2rem minmax(0, 1fr) repeat(5, minmax(3.75rem, 0.5fr));
   align-items: center;
   column-gap: 0.75rem;
   row-gap: 0.25rem;

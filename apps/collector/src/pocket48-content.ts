@@ -13,6 +13,11 @@ export function parsePocketJson(value: unknown): unknown {
 }
 export const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export const string = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : typeof value === "number" && Number.isSafeInteger(value) ? String(value) : null;
+export function unsignedInteger(value: unknown): number | null {
+  const raw = string(value);
+  const count = raw !== null && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
 export const sourceFlags: Record<CollectionSource, number> = { room: 1, album: 2, essence: 4, posts: 8, post_images: 16, weibo: 32, room_posts: 64 };
 
 export function imageUrl(value: unknown): string | null {

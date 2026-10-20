@@ -12,6 +12,7 @@ import { runBatch } from "./run";
 import type { CollectorStore, SourceSync } from "./types";
 import type { CollectorProgress } from "@starter/shared";
 import { CollectionBudget, CollectionStopped } from "./budget";
+import { collectMelee } from "./melee";
 const collect = process.argv.includes("--collect");
 const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_RUN === "1";
 const manifestOnly = process.argv.includes("--manifest-only");
@@ -117,6 +118,12 @@ try {
       readVerifiedMedia: store?.verifiedRoomMedia?.bind(store), readVerifiedPostImages: store?.verifiedPostImages?.bind(store),
       budget: () => activeBudget, maxOriginalLookups: 12,
       minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000), sources });
+    if (collect) {
+      activeBudget = budget.slice(180);
+      const melee = await collectMelee(source, remoteStore, activeBudget);
+      failures += melee.errors;
+      activeBudget = budget;
+    }
     try { await source.prepareGroupDirectory(state.entries.flatMap(entry => entry.identity === "verified" && entry.member ? [entry.member] : [])); }
     catch (error) { if (!budget.stopped) throw error; }
     const incrementalBudget = maxSeconds ? budget.slice(Math.max(0, (budget.deadline - Date.now()) / 1000) * 0.75) : budget;
@@ -151,7 +158,7 @@ try {
             else entry.lastHistoryAt = attemptedAt;
             await persist(entry);
             if (dryStore) dryStore.units.length = 0;
-            const singleSource = { sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
+            const singleSource = { sources: source.sources, listMembers: async () => [member], readFollowers: source.readFollowers.bind(source), listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
             const localSources = dryRun ? [] : entry.sources ?? [];
             const checkpoints = {
               read: () => localSources,

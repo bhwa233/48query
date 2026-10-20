@@ -13,8 +13,62 @@ import { applyGroupScope, groupWork, reconcileGroupEntries, type GroupEntry, typ
 import { collectionSince } from "../../apps/collector/src/collection-scope";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import { CollectionBudget } from "../../apps/collector/src/budget";
+import { collectMelee } from "../../apps/collector/src/melee";
+import type { MeleePage, MeleeProgress } from "../../packages/shared";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
+
+test("follower collection distinguishes unavailable or rounded values from a verified zero", async () => {
+  const member = { id: "607515", name: "Member", groupName: "SNH48" };
+  for (const followers of [undefined, null, "4.3万", -1, 1.5, true, "9007199254740993", 0, "43320"]) {
+    const source = new Pocket48Source({ token: "test", pa: "test", minIntervalMs: 0,
+      fetchImpl: async () => Response.json({ status: 200, content: { baseUserInfo: { userId: 607515, isStar: true, followers } } }) });
+    const snapshot = await source.readFollowers(member);
+    if (followers === 0 || followers === "43320") assert.equal(snapshot?.count, Number(followers));
+    else assert.equal(snapshot, null, `Unavailable or inexact count must remain unknown: ${String(followers)}`);
+  }
+  const wrongUser = new Pocket48Source({ token: "test", pa: "test", minIntervalMs: 0,
+    fetchImpl: async () => Response.json({ status: 200, content: { baseUserInfo: { userId: 1, isStar: true, followers: 100 } } }) });
+  await assert.rejects(wrongUser.readFollowers(member), /does not match/);
+});
+
+test("weekly ranking collection resumes a committed page after its budget expires", async () => {
+  let budget = new CollectionBudget();
+  let saved: MeleeProgress | null = null;
+  const cursors: (string | null)[] = [];
+  const source = { readMeleePeriods: async () => [{ id: 426, label: "Official period" }], readMeleePage: async (_id: number, cursor: string | null) => {
+    cursors.push(cursor);
+    return { entries: [{ memberId: cursor ? "2" : "1", name: "Member", rank: cursor ? 2 : 1, score: 100 }], nextCursor: cursor ? null : "42", limited: false };
+  } };
+  const store = { meleeProgress: async () => saved, saveMeleePage: async (page: MeleePage) => {
+    saved = { ...page, complete: page.nextCursor === null, updatedAt: new Date().toISOString() };
+    budget.stop();
+    return saved;
+  } };
+  const first = await collectMelee(source, store, budget);
+  assert.equal(first.errors, 0);
+  assert.equal(first.pending, true);
+  budget = new CollectionBudget();
+  await collectMelee(source, store, budget);
+  assert.deepEqual(cursors, [null, "42"]);
+  budget = new CollectionBudget();
+  await collectMelee(source, store, budget);
+  assert.deepEqual(cursors, [null, "42"], "A recently completed period should not be downloaded again");
+});
+
+// Live weekly-rank requests repeat the top seven and the same nextId even when
+// requesting the next page. That must not be presented as confirmed full coverage.
+test("a repeated weekly ranking marker stops as limited coverage", async () => {
+  const source = new Pocket48Source({ token: "test", pa: "test", minIntervalMs: 0, fetchImpl: async () => Response.json({ status: 200, content: {
+    nextId: 91317, rankUserList: [{ melee: 100, rankNum: 1, baseUserInfo: { userId: 607515, starName: "Member", isStar: true } }],
+  } }) });
+  const first = await source.readMeleePage(426, null);
+  assert.equal(first.nextCursor, "91317");
+  assert.equal(first.limited, false);
+  const repeated = await source.readMeleePage(426, first.nextCursor);
+  assert.equal(repeated.nextCursor, null);
+  assert.equal(repeated.limited, true);
+});
 
 // The previous job only stopped between members. A page committed just before
 // the budget expires must survive, without failure or a false completion flag.

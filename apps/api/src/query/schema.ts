@@ -14,6 +14,24 @@ export const queryMembers = sqliteTable("query_members", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const queryFollowerSnapshots = sqliteTable("query_follower_snapshots", {
+  memberId: text("member_id").notNull().references(() => queryMembers.id),
+  observedAt: text("observed_at").notNull(),
+  followers: integer("followers").notNull(),
+}, table => [primaryKey({ columns: [table.memberId, table.observedAt] })]);
+
+export const queryMeleeSnapshots = sqliteTable("query_melee_snapshots", {
+  id: text("id").primaryKey(), periodId: integer("period_id").notNull(), periodLabel: text("period_label").notNull(),
+  observedAt: text("observed_at").notNull(), updatedAt: text("updated_at").notNull(),
+  nextCursor: text("next_cursor"), complete: integer("complete", { mode: "boolean" }).notNull().default(false),
+  limited: integer("limited", { mode: "boolean" }).notNull().default(false),
+}, table => [index("query_melee_period_time").on(table.periodId, table.observedAt, table.id)]);
+
+export const queryMeleeEntries = sqliteTable("query_melee_entries", {
+  snapshotId: text("snapshot_id").notNull().references(() => queryMeleeSnapshots.id),
+  memberId: text("member_id").notNull(), name: text("name").notNull(), rank: integer("rank").notNull(), score: integer("score").notNull(),
+}, table => [primaryKey({ columns: [table.snapshotId, table.memberId] })]);
+
 export const queryMessages = sqliteTable("query_messages", {
   id: text("id").primaryKey(),
   memberId: text("member_id").notNull(),
