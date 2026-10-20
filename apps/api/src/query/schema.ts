@@ -92,3 +92,9 @@ export const querySyncState = sqliteTable("query_sync_state", {
   updatedAt: text("updated_at").notNull(),
   lastError: text("last_error"),
 });
+
+// Unattributed catalog rows stay private until an original message verifies them.
+export const queryCatalog = sqliteTable("query_catalog", {
+  memberId: text("member_id").notNull(), id: text("id").notNull(), source: text("source").notNull(),
+  rawJson: text("raw_json").notNull(), status: text("status").notNull(), updatedAt: text("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.memberId, table.id] }), index("query_catalog_pending").on(table.memberId, table.source, table.status, table.updatedAt)]);

@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
 import { drizzle } from "drizzle-orm/d1";
 import type { AppEnv } from "../env";
-import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema } from "@starter/shared/schemas";
+import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema } from "@starter/shared/schemas";
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
@@ -63,6 +63,14 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
       statements.push(db.prepare("INSERT INTO query_message_videos (message_id, video_id, position) VALUES (?, ?, ?) ON CONFLICT(message_id, video_id) DO NOTHING").bind(message.id, video.id, position));
     }
   }
+  for (const entry of input.catalog) statements.push(db.prepare(`INSERT INTO query_catalog (member_id, id, source, raw_json, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(member_id, id) DO UPDATE SET status = CASE WHEN query_catalog.status = 'resolved' THEN 'resolved' ELSE excluded.status END,
+    raw_json = CASE WHEN query_catalog.status = 'resolved' THEN query_catalog.raw_json
+      WHEN excluded.status = 'resolved' THEN excluded.raw_json
+      WHEN json_extract(CASE WHEN json_valid(query_catalog.raw_json) THEN query_catalog.raw_json ELSE '{}' END, '$.format') = 'pocket48-album-lookup-v1'
+        AND json_extract(CASE WHEN json_valid(excluded.raw_json) THEN excluded.raw_json ELSE '{}' END, '$.format') IS NOT 'pocket48-album-lookup-v1' THEN query_catalog.raw_json
+      ELSE excluded.raw_json END, updated_at = excluded.updated_at`)
+    .bind(input.member.id, entry.id, entry.source, entry.rawJson, entry.status, now));
   if (input.sync) statements.push(db.prepare("INSERT INTO query_source_sync (member_id, source, state_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(member_id, source) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at").bind(input.member.id, input.sync.source, JSON.stringify(input.sync), now));
   await db.batch(statements);
   return c.json({ ok: true as const, data: { batchId: input.batchId, memberId: input.member.id, messagesWritten: input.messages.length, recordingsWritten: 0 } }, 200);
@@ -104,10 +112,19 @@ app.openapi(createRoute({ method: "post", path: "/verified-media", request: { bo
   return c.json({ ok: true as const, data: await readMessages(drizzle(db), [...found.values()]) }, 200);
 });
 
+app.openapi(createRoute({ method: "get", path: "/catalog", request: { query: z.object({ memberId: z.string().min(1).max(100), source: z.enum(["album", "post_images"]), limit: z.coerce.number().int().min(1).max(50).default(10) }) }, responses: { 200: { description: "Private catalog entries awaiting original-message verification.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CatalogEntrySchema) }) } } }, 401: unavailable } }), async c => {
+  const { memberId, source, limit } = c.req.valid("query");
+  const rows = await database(c).prepare("SELECT id, source, raw_json AS rawJson, status FROM query_catalog WHERE member_id = ? AND source = ? AND status = 'pending' ORDER BY updated_at, id LIMIT ?").bind(memberId, source, limit).all();
+  return c.json({ ok: true as const, data: rows.results.map(row => CatalogEntrySchema.parse(row)) }, 200);
+});
+
 const ImageResult = z.object({ ok: z.literal(true), data: ImageAttachmentSchema.nullable() });
 const imageParams = z.object({ id: z.string().min(1).max(100) });
-app.openapi(createRoute({ method: "get", path: "/images", request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }) }, responses: { 200: { description: "Pending or failed image uploads.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(ImageAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
-  const rows = await database(c).prepare(`SELECT ${imageProjection} FROM query_images WHERE gallery_url IS NULL ORDER BY updated_at, id LIMIT ?`).bind(c.req.valid("query").limit).all();
+const MediaQueueQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25), afterId: z.string().max(100).optional() });
+app.openapi(createRoute({ method: "get", path: "/images", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed image uploads; afterId enables stable batch pagination.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(ImageAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
+  const { limit, afterId } = c.req.valid("query");
+  const query = database(c).prepare(`SELECT ${imageProjection} FROM query_images WHERE gallery_url IS NULL ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`);
+  const rows = await (afterId === undefined ? query.bind(limit) : query.bind(afterId, limit)).all();
   return c.json({ ok: true as const, data: rows.results.map(readImage) }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/images/{id}", request: { params: imageParams }, responses: { 200: { description: "Image upload cache.", content: { "application/json": { schema: ImageResult } } }, 401: unavailable } }), async c => {
@@ -122,8 +139,10 @@ app.openapi(createRoute({ method: "post", path: "/images/{id}", request: { param
 });
 
 const VideoResult = z.object({ ok: z.literal(true), data: VideoAttachmentSchema.nullable() });
-app.openapi(createRoute({ method: "get", path: "/videos", request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }) }, responses: { 200: { description: "Pending or failed video uploads; oversized videos are not retried.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(VideoAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
-  const rows = await database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE gallery_url IS NULL AND status IN ('pending', 'failed') ORDER BY updated_at, id LIMIT ?`).bind(c.req.valid("query").limit).all();
+app.openapi(createRoute({ method: "get", path: "/videos", request: { query: MediaQueueQuery }, responses: { 200: { description: "Pending or failed video uploads; oversized videos are not retried.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(VideoAttachmentSchema) }) } } }, 401: unavailable } }), async c => {
+  const { limit, afterId } = c.req.valid("query");
+  const query = database(c).prepare(`SELECT ${videoProjection} FROM query_videos WHERE gallery_url IS NULL AND status IN ('pending', 'failed') ${afterId === undefined ? "ORDER BY updated_at, id" : "AND id > ? ORDER BY id"} LIMIT ?`);
+  const rows = await (afterId === undefined ? query.bind(limit) : query.bind(afterId, limit)).all();
   return c.json({ ok: true as const, data: rows.results.map(readVideo) }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/videos/{id}", request: { params: imageParams }, responses: { 200: { description: "Video upload cache.", content: { "application/json": { schema: VideoResult } } }, 401: unavailable } }), async c => {

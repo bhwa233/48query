@@ -1,3 +1,4 @@
+import type { CatalogEntry } from "@starter/shared";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
@@ -8,6 +9,7 @@ type Pocket48Options = {
   requestedMemberId?: string;
   readVerifiedPostImages?: (memberId: string, imageIds: string[]) => Promise<CollectorMessage[]>;
   readVerifiedMedia?: (roomId: string, assets: { id: string; occurredAt: string }[]) => Promise<CollectorMessage[]>;
+  albumOriginalPages?: number;
   sources?: CollectionSource[]; fetchImpl?: typeof fetch;
 };
 const DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
@@ -27,10 +29,12 @@ export class Pocket48Source implements CollectorSource {
   private readonly legacyRooms = new Map<string, Promise<string>>();
   private readonly verifiedMedia = new Map<string, CollectorMessage>();
   private readonly directory = new Map<string, CollectorMember>();
+  private readonly archiveAnchors = new Map<string, Promise<{ times: number[]; next: string | null }>>();
 
   constructor(private readonly options: Pocket48Options) {
     if (!options.token.trim() || (!options.pa?.trim() && !options.paFactory)) throw new Error("Pocket48 source requires a token and a dynamic pa signer.");
     if (options.minIntervalMs !== undefined && (!Number.isFinite(options.minIntervalMs) || options.minIntervalMs < 0)) throw new Error("POCKET48_MIN_INTERVAL_MS must be a finite non-negative number.");
+    if (options.albumOriginalPages !== undefined && (!Number.isInteger(options.albumOriginalPages) || options.albumOriginalPages < 1 || options.albumOriginalPages > 20)) throw new Error("Album original page budget must be between 1 and 20.");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = (options.apiBaseUrl ?? "https://pocketapi.48.cn").replace(/\/$/, "");
     const order: CollectionSource[] = ["room", "essence", "posts", "weibo", "room_posts", "album", "post_images"];
@@ -72,7 +76,7 @@ export class Pocket48Source implements CollectorSource {
     const payload = object(parsePocketJson(await response.text()));
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
       // Do not include upstream free-form error text, which can contain user data.
-      throw new Error(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`);
+      throw new Error(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status } });
     }
     if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
     if (process.env.POCKET48_LOG_SCHEMA === "1") {
@@ -171,6 +175,109 @@ export class Pocket48Source implements CollectorSource {
 
   async listMessages(member: CollectorMember, cursor: string | null) { return this.listContent(member, "room", cursor); }
 
+  private async legacyRoomPage(member: CollectorMember, cursor: string | null, originalError?: unknown): Promise<CollectorPage<CollectorMessage>> {
+    const roomId = await this.resolveLegacyRoom(member);
+    if (!roomId) throw originalError instanceof Error ? originalError : new Error("No verified legacy room is available.");
+    const parts = cursor?.startsWith("legacy:") ? cursor.split(":") : null;
+    if (parts && (parts[1] !== roomId || !/^\d+$/.test(parts[2] ?? ""))) throw new Error("Legacy room history completeness remains unverified.");
+    const nextTime = parts?.[2] ?? "0";
+    const content = await this.post("/im/api/v1/chatroom/msg/list/homeowner", { roomId, ownerId: member.id, needTop1Msg: "false", nextTime });
+    const rows = contentList(content);
+    if (!rows.length) throw new Error("Legacy room returned no attributable history; completeness remains unverified.");
+    const owner = { ...member, channelId: roomId };
+    const items = rows.flatMap(row => {
+      const message = normalizeMessage(row, owner, "room", this.directory);
+      return message?.memberId === member.id ? [message] : [];
+    });
+    const boundary = rows.map(row => {
+      const raw = object(row);
+      const id = string(raw.msgIdServer ?? raw.msgIdClient ?? raw.msgidClient);
+      const occurredAt = timestamp(raw.msgTime);
+      if (!id || !occurredAt) throw new Error("Legacy message has no stable pagination boundary.");
+      return { id, occurredAt };
+    });
+    const next = string(object(content).nextTime);
+    if (next === nextTime && next !== "0") throw new Error("Pocket48 repeated the legacy room cursor.");
+    return { items, boundary, observed: rows.length, nextCursor: `legacy:${roomId}:${next && next !== "0" && next !== "-1" ? next : "end"}` };
+  }
+
+  // Reuse the album's real timestamps as seek points across empty history
+  // windows; an empty homepage does not prove the room archive is exhausted.
+  private async historicalRoomPage(member: CollectorMember, room: { channelId: string; serverId: string }, cursor: string | null): Promise<unknown> {
+    const seek = cursor?.startsWith("archive:seek:") ?? false;
+    const parts = cursor?.startsWith("archive:") ? cursor.split(":").slice(seek ? 2 : 1) : [cursor ?? "0", "0"];
+    if (parts.length !== 2 || !parts.every(value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)))) throw new Error("Invalid historical room cursor.");
+    let time = Number(parts[0]);
+    const catalogCursor = parts[1]!;
+    const read = async (nextTime: number) => {
+      const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime, limit: 50 };
+      try { return await this.post("/im/api/v1/team/message/list/all", body); }
+      catch (error) {
+        if (!(error instanceof Error) || (object(error.cause).business !== "500" || object(error.cause).http !== 200)) throw error;
+        return this.post("/im/api/v1/team/message/list/homeowner", body);
+      }
+    };
+    let content: unknown;
+    try { content = seek ? { message: [], nextTime: 0 } : await read(time); }
+    catch (error) {
+      if (time || !(error instanceof Error) || (object(error.cause).business !== "500" || object(error.cause).http !== 200)) throw error;
+      content = { message: [], nextTime: 0 };
+    }
+    if (!contentList(content).length) {
+      const key = `${member.id}:${catalogCursor}`;
+      let anchors = this.archiveAnchors.get(key);
+      if (!anchors) {
+        anchors = (async () => {
+          const times: number[] = [];
+          let next: string | null = null;
+          try {
+            const album = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(catalogCursor) });
+            for (const row of contentList(album)) { const at = timestamp(object(row).createTime); if (at) times.push(Date.parse(at) + 1); }
+            const value = string(object(album).nextTime);
+            next = value && value !== "0" && value !== "-1" ? value : null;
+            if (next === catalogCursor && times.length) throw new Error("Pocket48 repeated the historical anchor cursor.");
+          } catch (error) { if (!(error instanceof Error) || (object(error.cause).business !== "500" || object(error.cause).http !== 200)) throw error; }
+          if (catalogCursor === "0") {
+            try {
+              const essence = await this.post("/im/api/v1/team/essence/message/list", { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: 0, limit: 100 });
+              for (const row of Object.keys(object(essence)).length ? contentList(essence) : []) {
+                const message = normalizeMessage(row, member, "essence", this.directory);
+                if (message?.memberId === member.id) times.push(Date.parse(message.occurredAt) + 1);
+              }
+            } catch (error) {
+              // Essence and album availability are independent. Authentication
+              // failures still stop the lookup; an unavailable essence does not.
+              if (!(error instanceof Error) || object(error.cause).business !== "500" || object(error.cause).http !== 200) throw error;
+            }
+          }
+          return { times: [...new Set(times)].sort((a, b) => b - a), next };
+        })();
+        this.archiveAnchors.set(key, anchors);
+      }
+      const page = await anchors;
+      const anchor = page.times.find(at => !time || at < time);
+      if (anchor !== undefined) { time = anchor; content = await read(time); }
+      else {
+        if (anchor === undefined && !page.next) throw new Error("Historical room has no further anchors; history completeness remains unverified.", { cause: "history_anchors_exhausted" });
+        return { message: [], nextTime: `archive:seek:${time}:${page.next}` };
+      }
+    }
+    const next = string(object(content).nextTime);
+    if (next && next !== "0" && next !== "-1" && next === String(time) && contentList(content).length) throw new Error("Pocket48 repeated a non-empty historical room cursor.");
+    // A terminal or blank historical window must seek the remaining catalog,
+    // rather than falsely declaring the room's complete history collected.
+    const rows = contentList(content);
+    if (next && next !== "0" && next !== "-1" && next !== String(time)) {
+      if (!/^\d+$/.test(next) || !Number.isSafeInteger(Number(next)) || (time && Number(next) > time)) throw new Error("Pocket48 returned an invalid historical room cursor.");
+      return { ...object(content), nextTime: `archive:${next}:${catalogCursor}` };
+    }
+    const oldest = rows.reduce<number>((value, row) => {
+      const at = timestamp(object(row).msgTime);
+      return at ? Math.min(value, Date.parse(at) + 1) : value;
+    }, time || Number.MAX_SAFE_INTEGER);
+    return { ...object(content), nextTime: `archive:seek:${oldest}:${catalogCursor}` };
+  }
+
   // Explicit local short-video command; daily text/image collection remains
   // independent. Album names and request ownership never establish authorship.
   async listRoomVideos(member: CollectorMember, cursor: string | null) {
@@ -202,33 +309,56 @@ export class Pocket48Source implements CollectorSource {
     return { videos, unverified, observed: rows.length, nextCursor: next && next !== "0" && next !== "-1" ? next : null };
   }
 
-  async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>> {
+  async retryCatalog(member: CollectorMember, source: "album" | "post_images", entries: CatalogEntry[]) {
+    return this.listContent(member, source, null, entries);
+  }
+
+  async listContent(member: CollectorMember, source: CollectionSource, cursor: string | null, retryEntries?: CatalogEntry[]): Promise<CollectorPage<CollectorMessage>> {
+    // Reuse the private raw JSON queue for versioned lookup progress, keeping
+    // the complete original catalog row and its stable identity intact.
+    const retryRows = retryEntries?.map(entry => {
+      const parsed = parsePocketJson(entry.rawJson);
+      const record = object(parsed);
+      return record.format === "pocket48-album-lookup-v1" ? { value: record.item, cursors: object(record.originalCursors) } : { value: parsed, cursors: {} };
+    });
+    const retryItems = retryRows?.map(row => row.value);
+    const originalCursors = new Map<string, Partial<Record<"all" | "homeowner", number>>>();
+    if (source === "room" && cursor?.startsWith("legacy:")) return this.legacyRoomPage(member, cursor);
     let content: unknown;
     let historicalRoom: { channelId: string; serverId: string; roomId: null } | null = null;
     if (source === "posts" || source === "post_images") {
-      content = await this.post(source === "posts" ? "/posts/api/v1/posts/timeline/home/new" : "/posts/api/v1/posts/img/list", { userId: Number(member.id), nextId: cursor ?? "0", limit: 25 });
+      content = retryItems ? { list: retryItems, nextTime: 0 } : await this.post(source === "posts" ? "/posts/api/v1/posts/timeline/home/new" : "/posts/api/v1/posts/img/list", { userId: Number(member.id), nextId: cursor ?? "0", limit: 25 });
     } else if (source === "weibo" || source === "room_posts") {
       const roomId = await this.resolveLegacyRoom(member);
       content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: source === "weibo" ? "WEI_BO" : "POST_INFO", ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
     } else {
-      const room = await this.resolveRoom(member).catch((error: unknown) => {
+      let room;
+      try { room = await this.resolveRoom(member); }
+      catch (error: unknown) {
         // Yaya queries albums/essence directly by channel/server. Historical
         // content can survive after jump and room-info stop resolving a channel.
         // Keep it as a query candidate and verify actual authors/originals below;
         // never promote it to the current room or bypass authentication failures.
-        if ((source !== "essence" && source !== "album") || !(error instanceof Error) || error.cause !== "missing_room_mapping"
+        if (!(error instanceof Error) || error.cause !== "missing_room_mapping"
           || !member.channelId || !member.serverId
-          || ![member.channelId, member.serverId].every(id => /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0)) throw error;
+          || ![member.channelId, member.serverId].every(id => /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
+          if (source === "room" && error instanceof Error && error.cause === "missing_room_mapping") return this.legacyRoomPage(member, cursor, error);
+          throw error;
+        }
         historicalRoom = { channelId: member.channelId, serverId: member.serverId, roomId: null };
-        return historicalRoom;
-      });
+        room = historicalRoom;
+      }
       const body = { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Number(cursor ?? 0), limit: 25 };
       if (source === "room") {
         // all includes verified members visiting other rooms. Never infer authorship
         // from the selected room, role labels, or a non-empty response alone.
-        content = await this.post("/im/api/v1/team/message/list/all", body);
+        try { content = historicalRoom || cursor?.startsWith("archive:") ? await this.historicalRoomPage(member, room, cursor) : await this.post("/im/api/v1/team/message/list/all", body); }
+        catch (error) {
+          if (!historicalRoom || !(error instanceof Error) || !(error.cause === "history_anchors_exhausted" || (object(error.cause).business === "500" && object(error.cause).http === 200))) throw error;
+          return this.legacyRoomPage(member, cursor, error);
+        }
       } else if (source === "album") {
-        content = await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
+        content = retryItems ? { list: retryItems, nextTime: 0 } : await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
       } else if (source === "essence") {
         content = await this.post("/im/api/v1/team/essence/message/list", body);
       }
@@ -254,26 +384,54 @@ export class Pocket48Source implements CollectorSource {
       for (const message of await this.options.readVerifiedMedia?.(room.channelId, assets) ?? []) {
         for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
       }
-      const checkedTimes = new Set<string>();
+      const groups = new Map<string, string[]>();
       for (const value of values) {
         const raw = object(value);
         const url = string(object(parsePocketJson(raw.bodys)).url);
         const at = timestamp(raw.createTime);
         const known = url ? this.verifiedMedia.get(url) : undefined;
-        if (!url || !at || (known?.occurredAt === at && known.roomId === room.channelId) || checkedTimes.has(at)) continue;
-        checkedTimes.add(at);
+        if (!url || !at || (known?.occurredAt === at && known.roomId === room.channelId && (!historicalRoom || known.memberId === member.id))) continue;
+        const urls = groups.get(at) ?? [];
+        urls.push(url);
+        groups.set(at, urls);
+      }
+      for (const [at, urls] of groups) {
+        const matched = () => urls.every(url => {
+          const found = this.verifiedMedia.get(url);
+          return found?.occurredAt === at && found.roomId === room.channelId && (!historicalRoom || found.memberId === member.id);
+        });
+        const progress: Partial<Record<"all" | "homeowner", number>> = {};
+        originalCursors.set(at, progress);
         // Reuse the room parser and its sender-ID checks. Latest room pages can
         // contain only fans while album images are months older; the timestamp
         // cursor retrieves the original without walking every intervening chat.
-        const originals = await this.post("/im/api/v1/team/message/list/all", {
-          channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime: Date.parse(at) + 1, limit: 50,
-        });
-        for (const original of contentList(originals)) {
-          const message = normalizeMessage(original, member, "room", this.directory);
-          if (message && (!historicalRoom || message.memberId === member.id)) {
-            originalsFound.set(message.id, message);
-            for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
+        for (const endpoint of ["all", "homeowner"] as const) {
+          const hints = retryRows?.filter(row => timestamp(object(row.value).createTime) === at).map(row => row.cursors[endpoint]);
+          const start = Date.parse(at) + 1;
+          let nextTime = hints?.length ? Math.max(...hints.map(value => typeof value === "number" && Number.isSafeInteger(value) && value >= start - 1 && value <= start ? value : start)) : start;
+          for (let page = 0; page < (this.options.albumOriginalPages ?? 3); page++) {
+            let originals: unknown;
+            try { originals = await this.post(`/im/api/v1/team/message/list/${endpoint}`, { channelId: Number(room.channelId), serverId: Number(room.serverId), nextTime, limit: 50 }); }
+            catch (error) {
+              if (!(error instanceof Error) || object(error.cause).business !== "500" || object(error.cause).http !== 200) throw error;
+              break;
+            }
+            const rows = contentList(originals);
+            for (const original of rows) {
+              const message = normalizeMessage(original, member, "room", this.directory);
+              if (message && (!historicalRoom || message.memberId === member.id)) {
+                originalsFound.set(message.id, message);
+                for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
+              }
+            }
+            if (matched()) break;
+            const next = Number(string(object(originals).nextTime));
+            if (!rows.length || !Number.isSafeInteger(next) || next <= 0 || next < Date.parse(at)) break;
+            if (next >= nextTime) throw new Error("Pocket48 repeated the album original cursor.");
+            nextTime = next;
+            if (page === (this.options.albumOriginalPages ?? 3) - 1) progress[endpoint] = next;
           }
+          if (matched()) break;
         }
       }
     }
@@ -326,6 +484,7 @@ export class Pocket48Source implements CollectorSource {
           message = { ...verified, images: verified.images?.map(image => ({ ...image })), videos: verified.videos?.map(video => ({ ...video })), sourceFlags: (verified.sourceFlags ?? 0) | sourceFlags[source] };
         } else unverified += 1;
       }
+      if (historicalRoom && source === "room" && message?.memberId !== member.id) message = null;
       if (message) for (const media of [...(message.images ?? []), ...(message.videos ?? [])]) this.verifiedMedia.set(media.sourceUrl, message);
       return message ? [message] : [];
     });
@@ -338,7 +497,7 @@ export class Pocket48Source implements CollectorSource {
     console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: result.length, images: result.reduce((count, item) => count + (item.images?.length ?? 0), 0), videos: result.reduce((count, item) => count + (item.videos?.length ?? 0), 0), ownerMessages: result.filter(item => item.memberId === member.id).length }));
     const root = object(content);
     const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
-    if (values.length > 0 && rawCursor !== null && rawCursor === cursor) throw new Error("Pocket48 repeated a non-empty page cursor; refusing to mark history complete.");
+    if (rawCursor !== null && rawCursor !== "0" && rawCursor !== "-1" && rawCursor === cursor) throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
     const boundary = values.flatMap(value => {
       const item = object(value);
       const post = postObject(item);
@@ -350,6 +509,15 @@ export class Pocket48Source implements CollectorSource {
       return assetId && occurredAt ? [{ id: source === "album" ? createHash("sha256").update(assetId).digest("hex") : assetId, occurredAt }] : [];
     });
     if (values.length > 0 && boundary.length !== values.length) throw new Error("Pocket48 returned items without a pagination boundary; refusing to advance.");
-    return { items: result, unverified, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
+    const catalog = source === "album" || source === "post_images" ? values.map(value => {
+      const raw = object(value);
+      const url = source === "album" ? string(object(parsePocketJson(raw.bodys)).url) : imageUrl(raw.imgUrl);
+      const at = timestamp(source === "album" ? raw.createTime : raw.createAt);
+      const resolved = result.some(message => (message.sourceFlags ?? 0) & sourceFlags[source] && [...(message.images ?? []), ...(message.videos ?? [])].some(media => media.sourceUrl === url) && (source !== "album" || message.occurredAt === at));
+      const progress = at ? originalCursors.get(at) : undefined;
+      const rawJson = !resolved && progress && Object.keys(progress).length ? JSON.stringify({ format: "pocket48-album-lookup-v1", item: value, originalCursors: progress }) : JSON.stringify(value);
+      return { id: createHash("sha256").update(JSON.stringify([member.id, source, url, at])).digest("hex"), source, rawJson, status: resolved ? "resolved" as const : "pending" as const };
+    }) : undefined;
+    return { items: result, unverified, catalog, observed: values.length, boundary, nextCursor: rawCursor && rawCursor !== "0" && rawCursor !== "-1" ? rawCursor : null };
   }
 }

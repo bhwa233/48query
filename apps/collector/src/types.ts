@@ -1,4 +1,4 @@
-import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync } from "@starter/shared";
+import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry } from "@starter/shared";
 export type { CollectionSource, SourceSync } from "@starter/shared";
 
 export type CollectorMember = {
@@ -53,6 +53,7 @@ export type CollectorPage<T> = {
   nextCursor: string | null;
   boundary?: { id: string; occurredAt: string }[];
   observed?: number; unverified?: number;
+  catalog?: CatalogEntry[];
 };
 
 export type SyncState = {
@@ -68,6 +69,7 @@ export interface CollectorSource {
   listMembers(): Promise<CollectorMember[]>;
   listMessages(member: CollectorMember, cursor: string | null): Promise<CollectorPage<CollectorMessage>>;
   sources?: readonly CollectionSource[];
+  retryCatalog?(member: CollectorMember, source: "album" | "post_images", entries: CatalogEntry[]): Promise<CollectorPage<CollectorMessage>>;
   listContent?(member: CollectorMember, source: CollectionSource, cursor: string | null): Promise<CollectorPage<CollectorMessage>>;
 }
 
@@ -84,6 +86,7 @@ export type IngestUnit = {
   membersCovered: number;
   errorCount: number;
   sync?: SourceSync;
+  catalog?: CatalogEntry[];
 };
 
 export interface CollectorStore {
@@ -92,10 +95,11 @@ export interface CollectorStore {
   completeBatch(input: { batchId: string; completedAt: string; membersCovered: number; totalMembers: number; errorCount: number; errorMessage?: string | null }): Promise<void>;
   getImage?(id: string): Promise<ImageAttachment | null>;
   saveImage?(image: ImageAttachment): Promise<void>;
-  pendingImages?(limit: number): Promise<ImageAttachment[]>;
+  pendingImages?(limit: number, afterId?: string): Promise<ImageAttachment[]>;
   getVideo?(id: string): Promise<VideoAttachment | null>;
   saveVideo?(video: VideoAttachment): Promise<void>;
-  pendingVideos?(limit: number): Promise<VideoAttachment[]>;
+  pendingVideos?(limit: number, afterId?: string): Promise<VideoAttachment[]>;
+  pendingCatalog?(memberId: string, source: "album" | "post_images", limit: number): Promise<CatalogEntry[]>;
   verifiedPostImages?(memberId: string, imageIds: string[]): Promise<CollectorMessage[]>;
   verifiedRoomMedia?(roomId: string, assets: { id: string; occurredAt: string }[]): Promise<CollectorMessage[]>;
 }

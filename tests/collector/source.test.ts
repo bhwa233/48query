@@ -7,6 +7,8 @@ import { DemoSource } from "../../apps/collector/src/demo-source";
 import type { IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { GalleryUploader } from "../../apps/collector/src/gallery";
+import { retryMedia } from "../../apps/collector/src/media-retry";
+import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
 
 // Variable signing latency must not let simultaneous callers send a burst
 // after their pre-signing rate-limit slots have already elapsed.
@@ -67,7 +69,7 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   });
   const member = { id: "1", name: "Synthetic member", groupName: "SNH48", channelId: "old-channel", serverId: "old-server" };
   await source.listMessages(member, null);
-  await source.listMessages(member, "123");
+  await assert.rejects(source.listMessages(member, "123"), /repeated.*cursor/);
   assert.equal(roomLookups, 1);
   assert.equal(messageRequests, 2);
   denyLookup = true;
@@ -90,6 +92,8 @@ test("recovers member-authored historical essence without treating the candidate
   let empty = false;
   const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
     const body = JSON.parse(String(init?.body));
+    if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: [] });
+    if (String(url).includes("/team/message/") || String(url).endsWith("/msg/list/img")) return Response.json({ status: 500 });
     if (String(url).endsWith("/im/server/jump")) return Response.json(body.starId === 4
       ? { status: 401 } : { status: 200, content: { friend: true, star: true } });
     essenceRequests++;
@@ -101,8 +105,7 @@ test("recovers member-authored historical essence without treating the candidate
   const page = await source.listContent(member, "essence", null);
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0]?.memberId, member.id);
-  await assert.rejects(source.listMessages(member, null), /no readable room/, "Historical essence must not authorize ordinary room requests");
-  assert.equal(essenceRequests, 1);
+  await assert.rejects(source.listMessages(member, null), /anchors|business 500/, "Ordinary history must independently verify original messages");
   await assert.rejects(source.listContent({ ...member, id: "2" }, "essence", null), /historical essence.*verified/i, "Another sender cannot verify a candidate channel");
   empty = true;
   await assert.rejects(source.listContent({ ...member, id: "3" }, "essence", null), /historical essence.*verified/i, "An empty candidate must not mark unavailable history complete");
@@ -216,6 +219,24 @@ test("an empty room is reported as unverified without losing the batch", async (
   assert.equal(store.units.at(-2)?.sync?.historyDone, false);
 });
 
+// Historical rooms can require several empty anchor pages before any timestamp
+// boundary exists. The configured history budget must still be usable.
+test("backfills across empty initial windows before observing a newest boundary", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const calls: (string | null)[] = [];
+  const source = { listMembers: async () => [member], listMessages: async (_member: typeof member, cursor: string | null) => {
+    calls.push(cursor);
+    return cursor === "messages" ? { items: [{ id: "original", memberId: "1", type: "TEXT", occurredAt: "2022-08-01T00:00:00.000Z" }], nextCursor: "older" }
+      : { items: [], nextCursor: cursor === null ? "anchor-page" : "messages" };
+  } };
+  const store = new DryRunStore();
+  const result = await runBatch(source, store, { historyOnly: true, maxPagesPerMember: 1, maxHistoryPagesPerMember: 2 });
+  assert.deepEqual(calls, [null, "anchor-page", "messages"]);
+  assert.equal(result.messagesWritten, 1);
+  assert.equal(store.units.filter(unit => unit.sync).at(-1)?.sync?.latestAt, "2022-08-01T00:00:00.000Z");
+  assert.equal(store.units.filter(unit => unit.sync).at(-1)?.sync?.historyCursor, "older");
+});
+
 // Live albums omit sender IDs and may be months older than the latest room
 // page. Resolve the original message, without trusting its displayed starName
 // or attributing a reused image from a different timestamp.
@@ -228,6 +249,7 @@ test("verifies album authors from original room messages, including visiting mem
     const path = new URL(String(url)).pathname;
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     const content = path.endsWith("/im/server/jump") ? historical ? { friend: true, star: true } : { channelId: 22, jumpServerInfo: { serverId: 33 } }
+      : path.endsWith("/essence/message/list") ? {}
       : path.endsWith("/msg/list/img") ? { imgAndVideoList: [
         { starName: "SNH48-Owner", sourceType: "IMAGE", createTime: at, bodys: { url: photo("owner") } },
         { starName: "Visitor", sourceType: "IMAGE", createTime: at + 1000, bodys: { url: photo("visitor") } },
@@ -235,7 +257,7 @@ test("verifies album authors from original room messages, including visiting mem
         { starName: "Owner", sourceType: "IMAGE", createTime: at + 3000, bodys: { url: photo("stale") } },
         { starName: "Owner", sourceType: "VIDEO", createTime: at + 4000, bodys: { url: "https://source.48.cn/video.mp4" } },
       ], nextTime: 0 }
-      : path.endsWith("/message/list/all") ? { message: [
+      : (path.endsWith("/message/list/all") || path.endsWith("/message/list/homeowner")) ? { message: [
         original("owner", "1", at), original("visitor", "2", at + 1000),
         original("fan", "999", at + 2000), original("stale", "1", at - 1000),
         { msgIdServer: "video", msgTime: at + 4000, msgType: "VIDEO", bodys: { url: "https://source.48.cn/video.mp4" }, extInfo: { user: { userId: "2" } } },
@@ -262,7 +284,9 @@ test("verifies album authors from original room messages, including visiting mem
   assert.ok(archived.items.some(row => row.sourceFlags === 3 && row.kind === "image"));
   assert.ok(archived.items.every(row => row.memberId === "1"), "An unconfirmed channel must not attribute visiting members to the selected owner");
   assert.equal(archived.unverified, 4);
-  await assert.rejects(archive.listMessages(archivedMembers[0]!, null), /no readable room/);
+  const roomPage = await archive.listMessages(archivedMembers[0]!, null);
+  assert.ok(roomPage.items.length > 0);
+  assert.ok(roomPage.items.every(row => row.memberId === "1"));
 });
 
 // Han Jiale's image catalog predates her latest text-only posts by months.
@@ -421,4 +445,149 @@ test("pauses all queued gallery uploads after an empty success response and retr
   assert.deepEqual(attempts, [start, start + 30_000, start + 33_100]);
   assert.equal(first.galleryUrl, "https://gallery.example/video.mp4");
   assert.equal(second.galleryUrl, first.galleryUrl);
+});
+
+// Re-querying the oldest retry page can return only files already attempted,
+// hiding the remaining queue. Failed files must not block either media kind.
+test("drains both media queues past failed uploads without retrying a file twice", async () => {
+  const images: ImageAttachment[] = ["a", "b", "c"].map(id => ({ id, sourceUrl: `https://source.48.cn/${id}.png`, status: "pending" }));
+  const videos: VideoAttachment[] = Array.from({ length: 101 }, (_, i) => ({ id: `v${String(i).padStart(3, "0")}`, sourceUrl: `https://source.48.cn/${i}.mp4`, status: "pending" }));
+  const store = Object.assign(new DryRunStore(), {
+    pendingImages: async (limit: number, afterId = "") => images.filter(item => item.status !== "uploaded" && item.id > afterId).slice(0, limit),
+    pendingVideos: async (limit: number, afterId = "") => videos.filter(item => item.status !== "uploaded" && item.id > afterId).slice(0, limit),
+    saveImage: async () => {}, saveVideo: async () => {},
+  });
+  const attempted = new Set<string>();
+  const archive = async (item: ImageAttachment | VideoAttachment) => {
+    assert.equal(attempted.has(item.id), false, "A failed file must be attempted at most once per run");
+    attempted.add(item.id);
+    if (item.id === "a" || item.id === "v000") throw new Error("synthetic unavailable file");
+    item.status = "uploaded";
+  };
+  const result = await retryMedia(store, { mediaOnly: true, imageLimit: 1, maxBatches: 4, archiveImage: archive, archiveVideo: archive });
+  assert.equal(result.failures, 2);
+  assert.ok([...images, ...videos].every(item => attempted.has(item.id)), "Later pages must remain reachable after failures");
+  assert.ok([...images, ...videos].filter(item => item.status === "failed").every(item => ["a", "v000"].includes(item.id)));
+});
+
+// Historical room homepages can be empty while older album timestamps still
+// return owner messages. Resume through blank windows without inventing authors.
+test("traverses historical room windows and rejects stale unverified channels", async () => {
+  const at = 1661327674734;
+  const calls: number[] = [];
+  const member = { id: "1", name: "Owner", groupName: "SNH48", channelId: "22", serverId: "33" };
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (String(url).endsWith("/jump")) return Response.json({ status: 200, content: {} });
+    if (String(url).endsWith("/msg/list/img")) return Response.json({ status: 200, content: { imgAndVideoList: [{ createTime: at, bodys: { url: "https://source.48.cn/original.jpg" } }], nextTime: 0 } });
+    if (String(url).includes("/essence/")) return Response.json({ status: 500 });
+    if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: [] });
+    calls.push(body.nextTime);
+    return Response.json({ status: 200, content: { message: body.nextTime === at + 1 ? [
+      { msgIdServer: "owner", msgTime: at, msgType: "TEXT", bodys: "older text", extInfo: { user: { userId: "1" } } },
+      { msgIdServer: "fan", msgTime: at, msgType: "TEXT", bodys: "fan", extInfo: { user: { userId: "999" } } },
+    ] : [], nextTime: body.nextTime === at + 1 ? 0 : body.nextTime } });
+  } });
+  const page = await source.listMessages(member, null);
+  assert.deepEqual(page.items.map(row => row.id), ["room:22:owner"]);
+  assert.ok(page.nextCursor?.startsWith("archive:"));
+  assert.notEqual(page.nextCursor, `archive:${at + 1}:0`, "A terminal message window must not replay the same window");
+  await assert.rejects(source.listMessages(member, page.nextCursor), /history.*unverified|anchors/i);
+  assert.ok(calls.includes(at + 1));
+});
+
+// An unresolvable catalog row must remain retryable without holding every older
+// catalog page hostage. The checkpoint advances only with durable queue storage.
+test("retains unresolved catalog entries independently of discovery cursors", async () => {
+  class QueueStore extends DryRunStore {
+    queue = new Map<string, NonNullable<IngestUnit["catalog"]>[number]>();
+    saved: IngestUnit["sync"];
+    override async getSyncState(memberId: string) { return { memberId, messageCursor: null, recordingCursor: null, updatedAt: "", lastError: null, sources: this.saved ? [this.saved] : [] }; }
+    override async ingestUnit(unit: IngestUnit) { await super.ingestUnit(unit); if (unit.sync) this.saved = unit.sync; for (const entry of unit.catalog ?? []) this.queue.set(entry.id, entry); }
+    async pendingCatalog() { return [...this.queue.values()].filter(entry => entry.status === "pending"); }
+  }
+  const store = new QueueStore();
+  const entry = { id: "a".repeat(64), source: "album" as const, rawJson: "{}", status: "pending" as const };
+  let pages = 0;
+  const source = { sources: ["album"] as const, listMembers: async () => [{ id: "1", name: "Owner", groupName: "SNH48" }], listMessages: async () => {
+    pages++; return { items: [], observed: 1, unverified: 1, boundary: [{ id: "image", occurredAt: "2022-08-01T00:00:00.000Z" }], nextCursor: "older", catalog: [entry] };
+  } };
+  const result = await runBatch(source, store, { maxPagesPerMember: 1, maxHistoryPagesPerMember: 0 });
+  assert.equal(pages, 1);
+  assert.equal(result.errorCount, 1, "Pending verification must remain visible as an error");
+  assert.equal(store.units.filter(unit => unit.sync).at(-1)?.sync?.historyCursor, "older");
+  assert.equal(store.queue.get(entry.id)?.status, "pending");
+  store.saved = { ...store.saved!, historyDone: true, historyCursor: null };
+  const resumed = { ...source, retryCatalog: async () => ({ items: [], nextCursor: null, unverified: 0, catalog: [{ ...entry, status: "resolved" as const }] }) };
+  const completed = await runBatch(resumed, store, { historyOnly: true });
+  assert.equal(pages, 1, "Retrying a completed catalog must not restart discovery");
+  assert.equal(completed.errorCount, 0);
+  assert.equal(store.saved?.status, "ok", "Resolving the queue must clear its previous failed state");
+  assert.equal(store.saved?.lastError, null);
+});
+
+// Fifty same-time fan messages can hide the original image on the next page.
+// A separate homeowner feed can also return it when the all feed cannot.
+test("finds album originals beyond the first page and in the homeowner feed", async () => {
+  const at = 1661327674734;
+  for (const mode of ["next-page", "homeowner"]) {
+    const reads: string[] = [];
+    const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+      const path = new URL(String(url)).pathname; const body = JSON.parse(String(init?.body));
+      if (path.endsWith("/jump")) return Response.json({ status: 200, content: { channelId: 22, serverId: 33 } });
+      if (path.endsWith("/msg/list/img")) return Response.json({ status: 200, content: { imgAndVideoList: [{ createTime: at, bodys: { url: "https://source.48.cn/original.jpg" } }], nextTime: 0 } });
+      reads.push(`${path.split("/").at(-1)}:${body.nextTime}`);
+      const found = mode === "next-page" ? body.nextTime === at : path.endsWith("/homeowner");
+      return Response.json({ status: 200, content: { message: found ? [{ msgIdServer: "original", msgTime: at, msgType: "IMAGE", bodys: { url: "https://source.48.cn/original.jpg" }, extInfo: { user: { userId: "1" } } }] : [{ msgIdServer: "fan", msgTime: mode === "next-page" ? at : at - 1000, msgType: "TEXT", bodys: "fan", extInfo: { user: { userId: "999" } } }], nextTime: mode === "next-page" && !found ? at : 0 } });
+    } });
+    const page = await source.listContent({ id: "1", name: "Owner", groupName: "SNH48" }, "album", null);
+    assert.equal(page.unverified, 0); assert.equal(page.catalog?.[0]?.status, "resolved");
+    assert.equal(page.items[0]?.memberId, "1");
+    assert.ok(reads.includes(mode === "next-page" ? `all:${at}` : `homeowner:${at+1}`));
+  }
+});
+
+// Same-time catalog images used to stop verification after the first match.
+// A bounded run must retain the other lookup's position across source restarts.
+test("resumes unresolved same-time album originals after the page budget", async () => {
+  const at = 1661327674734;
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const urls = ["https://source.48.cn/one.jpg", "https://source.48.cn/two.jpg"];
+  const reads: number[] = [];
+  const options = { token: "synthetic", pa: "synthetic", minIntervalMs: 0, albumOriginalPages: 1, fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url); const body = JSON.parse(String(init?.body));
+    if (path.endsWith("/jump")) return Response.json({ status: 200, content: { channelId: 22, serverId: 33 } });
+    if (path.endsWith("/msg/list/img")) return Response.json({ status: 200, content: { imgAndVideoList: urls.map(url => ({ createTime: at, bodys: { url } })), nextTime: 0 } });
+    if (path.endsWith("/homeowner")) return Response.json({ status: 200, content: { message: [], nextTime: 0 } });
+    reads.push(body.nextTime);
+    const index = body.nextTime === at + 1 ? 0 : 1;
+    return Response.json({ status: 200, content: { message: [{ msgIdServer: `image-${index}`, msgTime: at, msgType: "IMAGE", bodys: { url: urls[index] }, extInfo: { user: { userId: "1" } } }], nextTime: index === 0 ? at : 0 } });
+  } };
+  const first = await new Pocket48Source(options).listContent(member, "album", null);
+  const pending = first.catalog!.filter(entry => entry.status === "pending");
+  assert.equal(pending.length, 1);
+  const retried = await new Pocket48Source(options).retryCatalog(member, "album", pending);
+  assert.equal(retried.unverified, 0, "The second image must be reached rather than restarting the first page");
+  assert.deepEqual(reads, [at + 1, at]);
+  assert.equal(retried.catalog?.[0]?.id, pending[0]?.id, "Lookup progress must not change catalog identity");
+  assert.equal(retried.catalog?.[0]?.status, "resolved");
+});
+
+// Accounts omitted from the modern directory may still have an official legacy
+// room. Search ownership and returned sender IDs must both match independently.
+test("reads legacy owner history without guessing room IDs or accepting fan authors", async () => {
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (String(url).endsWith("/jump")) return Response.json({ status: 200, content: {} });
+    if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: [{ targetId: "wrong", ownerId: "2", targetType: 0 }, { targetId: "9911", ownerId: "1", targetType: 0 }] });
+    assert.equal(body.roomId, "9911"); assert.equal(body.ownerId, "1");
+    return Response.json({ status: 200, content: { message: [
+      { msgIdServer: "old-owner", msgTime: 1661327674734, msgType: "TEXT", bodys: "old text", extInfo: { user: { userId: "1" } } },
+      { msgIdServer: "fan", msgTime: 1661327674734, msgType: "TEXT", bodys: "fan", extInfo: { user: { userId: "999" } } },
+    ], nextTime: 0 } });
+  } });
+  const page = await source.listMessages({ id: "1", name: "Owner", groupName: "SNH48" }, null);
+  assert.deepEqual(page.items.map(message => message.id), ["room:9911:old-owner"]);
+  assert.equal(page.nextCursor, "legacy:9911:end");
+  await assert.rejects(source.listMessages({ id: "1", name: "Owner", groupName: "SNH48" }, page.nextCursor), /completeness remains unverified/);
 });

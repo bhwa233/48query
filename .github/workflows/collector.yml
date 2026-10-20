@@ -67,6 +67,8 @@ jobs:
       COLLECTOR_MEMBER_SCOPE: ${{ inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed' }}
       COLLECTOR_SOURCES: ${{ inputs.sources || vars.COLLECTOR_SOURCES || 'room,album,essence,posts,post_images,weibo,room_posts' }}
       GALLERY_BASE_URL: ${{ vars.GALLERY_BASE_URL || 'https://gallery233.pages.dev' }}
+      COLLECTOR_CATALOG_RETRY_LIMIT: ${{ vars.COLLECTOR_CATALOG_RETRY_LIMIT || '10' }}
+      POCKET48_ALBUM_ORIGINAL_PAGES: ${{ vars.POCKET48_ALBUM_ORIGINAL_PAGES || '3' }}
       COLLECTOR_IMAGE_RETRY_LIMIT: ${{ vars.COLLECTOR_IMAGE_RETRY_LIMIT || '25' }}
       COLLECTOR_VIDEO_MAX_MIB: ${{ vars.COLLECTOR_VIDEO_MAX_MIB || '50' }}
       POCKET48_MIN_INTERVAL_MS: ${{ vars.POCKET48_MIN_INTERVAL_MS || '5000' }}

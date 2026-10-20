@@ -180,10 +180,16 @@ const IngestMessageSchema = z.object({
   images: z.array(ImageAttachmentSchema).max(30).default([]), videos: z.array(VideoAttachmentSchema).max(5).default([]), parseStatus: z.enum(["parsed", "unsupported"]).default("parsed"),
 });
 
+export const CatalogEntrySchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{64}$/), source: z.enum(["album", "post_images"]),
+  rawJson: z.string().min(2).max(8000), status: z.enum(["pending", "resolved"]),
+});
+
 export const QueryIngestUnitSchema = z.object({
   batchId: z.string().min(1).max(100), statDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), startedAt: z.string().max(80),
   member: IngestMemberSchema, messages: z.array(IngestMessageSchema).max(25), recordings: z.array(z.unknown()).max(0),
   sync: SourceSyncSchema.optional(),
+  catalog: z.array(CatalogEntrySchema).max(50).default([]),
   messageCursor: z.string().max(500).nullable().optional(), recordingCursor: z.string().max(500).nullable().optional(),
   totalMembers: z.number().int().nonnegative(), membersCovered: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative().default(0),
 });
