@@ -8,7 +8,46 @@ import type { IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { GalleryUploader } from "../../apps/collector/src/gallery";
 import { retryMedia } from "../../apps/collector/src/media-retry";
+import { buildGroupRoster } from "../../apps/collector/src/group-roster";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
+
+test("group roster retains transferred and missing identities without substituting website IDs", () => {
+  const roster = buildGroupRoster({ rows: [
+    { sid: "10001", sname: "Transferred", gname: "SNH", pocket_id: "12", tname: "HII", status: "99" },
+    { sid: "30001", sname: "Transferred", gname: "GNZ", pocket_id: "12", tname: "G", status: "44" },
+    { sid: "10002", sname: "Missing", gname: "SNH", pocket_id: "0", status: "44" },
+  ] }, { roomId: [{ id: 12, ownerName: "GNZ48-Transferred" }, { id: 63, ownerName: "袋王" },
+    { id: 13, ownerName: "Former", groupName: "SNH48" }, { id: 14, ownerName: "Project", groupName: "燃烧吧团魂" }] });
+  const transferred = roster.candidates.find(entry => entry.name === "Transferred")!;
+  assert.deepEqual(transferred.candidateIds, ["12"]);
+  assert.deepEqual(transferred.officialIds, ["10001", "30001"]);
+  assert.deepEqual(transferred.groups, ["SNH48", "GNZ48"]);
+  assert.deepEqual(roster.candidates.find(entry => entry.name === "Missing")?.candidateIds, [], "Website IDs must never become user IDs");
+  assert.deepEqual(roster.candidates.find(entry => entry.name === "Former")?.officialIds, [], "Former directory members remain explicit supplemental candidates");
+  assert.deepEqual(roster.excluded.map(entry => entry.id), ["63", "14"]);
+  assert.throws(() => buildGroupRoster({ total: 10, rows: [{ sid: "10001", sname: "Member", gname: "SNH" }] }, { roomId: [] }), /truncated/);
+  const collision = buildGroupRoster({ rows: [
+    { sid: "10001", sname: "Same name", gname: "SNH", pocket_id: "0" },
+    { sid: "30001", sname: "Same name", gname: "GNZ", pocket_id: "12" },
+  ] }, { roomId: [{ id: "12", name: "Same name" }] });
+  assert.equal(collision.candidates.length, 2, "A name alone must not merge distinct official profiles");
+  assert.equal(collision.candidates[0]?.ambiguousName, true);
+  assert.deepEqual(collision.candidates[0]?.candidateIds, []);
+});
+
+test("group identity rejects same-name fans and conflicting official accounts", async () => {
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, fetchImpl: async (url, init) => {
+    const { userId } = JSON.parse(String(init?.body));
+    if (userId === "11") return Response.json({ status: 500, content: {} });
+    if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: [{ ownerId: "12", targetType: 0 }, { ownerId: "999", targetType: 0 }] });
+    if (String(url).endsWith("/star/archives")) return Response.json({ status: 200, content: { starInfo: { starGroupName: "SNH48" } } });
+    return Response.json({ status: 200, content: { baseUserInfo: { userId, nickname: "Member", isStar: userId !== "999" } } });
+  } });
+  const candidate = { name: "Member", officialIds: ["10001"], officialPocketIds: [], candidateIds: ["11", "999", "12"], groups: ["SNH48"], teams: [], officialStatuses: ["44"] };
+  assert.equal((await source.resolveGroupCandidate(candidate))?.id, "12", "A same-name fan is not a member");
+  assert.equal((await source.resolveGroupCandidate({ ...candidate, candidateIds: [] }))?.id, "12", "Missing IDs must use official search plus profile verification");
+  await assert.rejects(source.resolveGroupCandidate({ ...candidate, candidateIds: ["12", "13"] }), /Multiple official Pocket48 identities/);
+});
 
 // Variable signing latency must not let simultaneous callers send a burst
 // after their pre-signing rate-limit slots have already elapsed.

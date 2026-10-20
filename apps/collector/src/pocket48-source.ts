@@ -2,6 +2,7 @@ import type { CatalogEntry } from "@starter/shared";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
+import { rosterName, type RosterCandidate } from "./group-roster";
 
 type Pocket48Options = {
   token: string; deviceId?: string; pa?: string; paFactory?: () => Promise<string> | string;
@@ -29,6 +30,7 @@ export class Pocket48Source implements CollectorSource {
   private readonly legacyRooms = new Map<string, Promise<string>>();
   private readonly verifiedMedia = new Map<string, CollectorMessage>();
   private readonly directory = new Map<string, CollectorMember>();
+  private readonly groupDirectory = new Map<string, CollectorMember>();
   private readonly archiveAnchors = new Map<string, Promise<{ times: number[]; next: string | null }>>();
 
   constructor(private readonly options: Pocket48Options) {
@@ -118,6 +120,65 @@ export class Pocket48Source implements CollectorSource {
     const members = [...this.directory.values()].filter(member => ids.has(member.id));
     console.log(JSON.stringify({ event: "member_scope", followed: ids.size, selected: members.length, nonmemberOrUnknown: ids.size - members.length }));
     return members;
+  }
+
+  async prepareGroupDirectory(verifiedMembers: CollectorMember[] = []) {
+    const members = await this.listMembers();
+    for (const member of members) this.groupDirectory.set(member.id, member);
+    this.directory.clear();
+    for (const member of verifiedMembers) this.directory.set(member.id, member);
+  }
+
+  async resolveGroupCandidate(candidate: RosterCandidate): Promise<CollectorMember | null> {
+    if (candidate.ambiguousName) return null;
+    const ids = new Set(candidate.candidateIds);
+    // Missing/stale Pocket48 IDs need official search results, never a website
+    // sid used as a userId. Every proposed identity is checked again below.
+    const search = async () => {
+      const results = contentList(await this.post("/im/api/v1/im/search", { name: candidate.name }));
+      for (const value of results) {
+        const row = object(value), id = string(row.ownerId);
+        if (id && /^\d+$/.test(id) && string(row.targetType) === "0") ids.add(id);
+      }
+    };
+    const verified: CollectorMember[] = [];
+    const checked = new Set<string>();
+    let failure: unknown;
+    for (let pass = 0; pass < 2; pass++) {
+      if (pass === 1) { if (verified.length) break; await search(); }
+      for (const id of ids) {
+        if (id === "63") continue;
+        if (checked.has(id)) continue;
+        checked.add(id);
+        try {
+          const home = object(await this.post("/user/api/v1/user/info/home", { userId: id }));
+          const user = object(home.baseUserInfo);
+          const names = [user.starName, user.realNickName, user.nickname].map(string).filter((name): name is string => Boolean(name));
+          if (string(user.userId) !== id || !names.some(name => rosterName(name) === candidate.name)
+            || !(user.isStar === true || candidate.officialPocketIds.includes(id))) continue;
+          let info: Record<string, unknown> = {};
+          try { info = object(object(await this.post("/user/api/v1/user/star/archives", { memberId: id })).starInfo); }
+          catch (error) {
+            if ([401, 403].includes(Number(object(error instanceof Error ? error.cause : null).http)) || [401, 403, 1001, 2001].includes(Number(object(error instanceof Error ? error.cause : null).business))) throw error;
+          }
+          const previous = this.groupDirectory.get(id) ?? this.directory.get(id);
+          if (!candidate.officialIds.length && ![info.starGroupName, info.periodName].some(value => /^(?:SNH48|BEJ48|GNZ48|SHY48|CKG48|CGT48|IDFT|IDOLS\s*FT)(?:\b|\s)/i.test(string(value) ?? ""))) continue;
+          verified.push({ ...previous, id, name: candidate.name,
+            groupName: string(info.starGroupName) ?? (candidate.groups.length === 1 ? candidate.groups[0]! : previous?.groupName ?? "未知"),
+            team: string(info.starTeamName) ?? (candidate.teams.length === 1 ? candidate.teams[0] : previous?.team),
+            pinyin: string(info.pinyin) ?? previous?.pinyin, status: previous?.status ?? "active" });
+        } catch (error) {
+          const cause = object(error instanceof Error ? error.cause : null);
+          if ([401, 403].includes(Number(cause.http)) || [401, 403, 1001, 2001].includes(Number(cause.business))) throw error;
+          failure = error;
+        }
+      }
+    }
+    if (verified.length > 1) throw new Error("Multiple official Pocket48 identities match this name; manual reconciliation required.");
+    const member = verified[0] ?? null;
+    if (!member && failure) throw failure instanceof Error ? failure : new Error("Pocket48 member verification failed.");
+    if (member) this.directory.set(member.id, member);
+    return member;
   }
 
   private async resolveDirectoryMember(id: string) {

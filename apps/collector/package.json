@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts --dry-run",
     "run": "tsx src/cli.ts",
+    "group": "tsx src/group.ts",
     "videos": "tsx src/videos.ts",
     "login": "node src/login.mjs",
     "typecheck": "tsc --noEmit",

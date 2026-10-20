@@ -158,3 +158,34 @@ COLLECTOR_SOURCE=pocket48 pnpm collector:run --retry-media
 陈思、黄艺暄、钟洁玟本次补查的旧媒体路径仍为空；旧文字分类返回业务错误，不据此推断删除或权限原因。已有后续补采任务使用修复后的采集器继续运行。本轮没有执行数据库结构迁移或部署。
 
 生产补采与独立补传的阶段结果见 [后端采集落地记录](backend-collection-rollout.md#2026-10-20-生产读回与继续任务)。上面的只读探测结论不代表后续生产回填没有取得新数据；请以带时间的生产读回结果为准。
+
+## 全团名单核验与分批扩展
+
+`pnpm --filter @starter/collector group` 是显式的全团扩展入口，范围包括 SNH48 GROUP 各姐妹团、IDFT 和历史 SHY48 成员，并保留毕业成员档案。名单来自[官网成员页](https://www.snh48.com/member_list.html)实际调用的[全成员 JSON](https://h5.48.cn/resource/jsonp/allmembers.php?gid=00)，与已有社区房间目录合并。官网 `sid` 不等于口袋用户 ID，`pocket_id=0` 不生成用户 ID；明确共享口袋 ID 的档案保留全部官网 ID 和原分团信息；其他同名档案分别保留，缺少独立 ID 时标为未验证，不据姓名直接宣布身份相同。
+
+首次公开名单读取于 2026-10-20：官网返回 761 条档案；只合并官网明确共享口袋 ID 的档案，与社区目录合并后得到 798 个待核验档案候选，明确排除 26 个袋王／团魂项目。这是候选数，不是已核实成员数或已采集人数。官网缺项的社区账号也保留为候选，以免丢弃已毕业成员。补充候选必须同时通过官方主页 `isStar=true`、真实用户 ID／姓名和官方档案的团体关联核验；官网直接提供的历史口袋 ID 也必须与真实主页 ID 和姓名匹配。多个真实账号同名时停止该项，保留人工核对原因。官网状态 `44` 包含病休、暂休等情况，不能直接转换为“毕业”或“账号删除”。
+
+```sh
+# 第一次仅生成公开候选清单，不读取账号凭证、不入库
+COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
+  pnpm --filter @starter/collector group --manifest-only
+
+# 默认每次核验 20 项；重复运行从待核验项继续，不入库、不上传
+COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
+  pnpm --filter @starter/collector group
+
+# 显式重查身份未验证／查询失败的项
+COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
+  pnpm --filter @starter/collector group --retry-unverified
+
+# 已配置 INGEST_API_URL、INGEST_KEY 后，按成员执行七来源首次采集
+# 默认每来源首页 1 页、历史 0 页；先保存正文和附件，媒体单独补传
+COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
+  pnpm --filter @starter/collector group --collect
+```
+
+`COLLECTOR_GROUP_LIMIT` 为单次处理候选数，范围 1–1000，默认 20；`COLLECTOR_MAX_PAGES`、`COLLECTOR_HISTORY_PAGES` 沿用采集器的来源页数预算。进度文件以原子替换保存，不包含凭证；同一进度文件以独占锁避免重入。正常中断会在当前成员处理后保存并释放锁；进程被强制杀死时，应先核实锁中的 PID 已退出，再清理该锁。相同账号的其他本地／远端采集任务仍须由操作者串行调度，文件锁不提供跨机器账号互斥。
+
+`--collect` 再次核验身份后才调用现有 `runBatch`，复用每成员每来源的 D1 检查点；已经尝试采集的项不会在这个首次覆盖任务里重复执行。`collectedAt` 仅表示该成员本轮已尝试，必须结合 `sources`、`errorCount` 判断真实结果，不能等同于七来源成功或历史完整。身份未验证、来源失败、未处理候选均使最终退出码为 1。日常任务和深度历史补采仍使用既有入口，不会因生成名单而自动切换生产定时配置。
+
+WSL 终端若继承了 Windows 的 `APPDATA`，而登录凭证存放在 Linux 用户目录，应显式设置 `POCKET48_CRED_PATH` 指向现有 `cred.json`，不要另复制一份凭证。全团任务与历史补采使用同一账号时，应先让原批次结束或暂停其确定的进程树；名单读取、身份核验、正文采集依次执行，完成后再恢复原任务。
