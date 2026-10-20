@@ -1,9 +1,33 @@
 import { object, string } from "./pocket48-content";
+import { readFile } from "node:fs/promises";
 
 export const OFFICIAL_ROSTER_URL = "https://h5.48.cn/resource/jsonp/allmembers.php?gid=00";
 export const COMMUNITY_DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
 export const HISTORICAL_DIRECTORY_URL = "https://data.gnz.hk/members.json";
 const groups: Record<string, string> = { SNH: "SNH48", BEJ: "BEJ48", GNZ: "GNZ48", SHY: "SHY48", CKG: "CKG48", CGT: "CGT48", IDFT: "IDFT" };
+
+export async function readHistoricalDirectory(options: { url?: string; fetchImpl?: typeof fetch } = {}): Promise<unknown> {
+  const url = options.url ?? HISTORICAL_DIRECTORY_URL;
+  let response: Response | null = null;
+  try {
+    response = await (options.fetchImpl ?? fetch)(url, { signal: AbortSignal.timeout(30_000) });
+  } catch (error) { if (url !== HISTORICAL_DIRECTORY_URL) throw error; }
+  if (response?.ok) {
+    const payload: unknown = await response.json();
+    directoryEntries(payload);
+    return payload;
+  }
+  if (response && (url !== HISTORICAL_DIRECTORY_URL || ![403, 429].includes(response.status) && response.status < 500)) throw new Error(`Historical directory request failed (HTTP ${response.status}).`);
+  // Reuse the same public directory parser and identity checks. The source
+  // blocks GitHub runner IPs with 403; a small dated snapshot keeps graduate
+  // candidates available without copying birthdays, media, or credentials.
+  // An explicitly configured directory must never silently use a different one.
+  const snapshot: unknown = JSON.parse(await readFile(new URL("../data/historical-directory.json", import.meta.url), "utf8"));
+  const metadata = object(snapshot);
+  if (metadata.source !== HISTORICAL_DIRECTORY_URL || !directoryEntries(snapshot).length) throw new Error("Historical directory snapshot is invalid.");
+  console.log(JSON.stringify({ event: "historical_directory_snapshot", source: HISTORICAL_DIRECTORY_URL, fetchedAt: metadata.fetchedAt }));
+  return snapshot;
+}
 
 export async function readGroupRoster(options: { directoryUrl?: string; historicalUrl?: string } = {}) {
   const read = async (url: string): Promise<unknown> => {
@@ -11,7 +35,7 @@ export async function readGroupRoster(options: { directoryUrl?: string; historic
     if (!response.ok) throw new Error(`Roster request failed (HTTP ${response.status}).`);
     return response.json() as Promise<unknown>;
   };
-  const [official, community, historical] = await Promise.all([read(OFFICIAL_ROSTER_URL), read(options.directoryUrl ?? COMMUNITY_DIRECTORY_URL), read(options.historicalUrl ?? HISTORICAL_DIRECTORY_URL)]);
+  const [official, community, historical] = await Promise.all([read(OFFICIAL_ROSTER_URL), read(options.directoryUrl ?? COMMUNITY_DIRECTORY_URL), readHistoricalDirectory({ url: options.historicalUrl })]);
   return buildGroupRoster(official, community, historical);
 }
 

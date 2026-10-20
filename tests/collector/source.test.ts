@@ -8,12 +8,24 @@ import type { IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { GalleryUploader } from "../../apps/collector/src/gallery";
 import { retryMedia } from "../../apps/collector/src/media-retry";
-import { buildGroupRoster } from "../../apps/collector/src/group-roster";
+import { buildGroupRoster, directoryEntries, HISTORICAL_DIRECTORY_URL, readHistoricalDirectory } from "../../apps/collector/src/group-roster";
 import { applyGroupScope, groupWork, reconcileGroupEntries, type GroupEntry, type GroupProgress } from "../../apps/collector/src/group-progress";
 import { collectionSince } from "../../apps/collector/src/collection-scope";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
+
+// GitHub-hosted collection failed before its first member because the public
+// historical directory rejects runner IPs with 403. A dated candidate snapshot
+// is a fallback only for that known source; custom directories still fail.
+test("historical directory survives upstream runner blocking without replacing a custom source", async () => {
+  const blocked: typeof fetch = async () => new Response(null, { status: 403 });
+  const snapshot = await readHistoricalDirectory({ fetchImpl: blocked });
+  assert.ok(directoryEntries(snapshot).some(value => String((value as { id?: unknown }).id) === "9"), "The fallback must retain retired candidates absent from the smaller directory");
+  await assert.rejects(readHistoricalDirectory({ url: "https://synthetic.invalid/members.json", fetchImpl: blocked }), /HTTP 403/);
+  const live = { roomId: [{ id: "fresh", ownerName: "New candidate" }] };
+  assert.deepEqual(await readHistoricalDirectory({ url: HISTORICAL_DIRECTORY_URL, fetchImpl: async () => Response.json(live) }), live, "A live source must take precedence over the snapshot");
+});
 
 // Previously a pre-2026 album triggered deep original lookups and a historical
 // completion flag could make a fresh, date-limited run skip the requested year.

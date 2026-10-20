@@ -2,7 +2,7 @@ import type { CatalogEntry } from "@starter/shared";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp } from "./pocket48-content";
-import { directoryEntries, rosterName, type RosterCandidate } from "./group-roster";
+import { directoryEntries, readHistoricalDirectory, rosterName, type RosterCandidate } from "./group-roster";
 import { collectionSince } from "./collection-scope";
 
 type Pocket48Options = {
@@ -141,9 +141,7 @@ export class Pocket48Source implements CollectorSource {
   async prepareGroupDirectory(verifiedMembers: CollectorMember[] = []) {
     await this.listMembers();
     if (this.options.historyDirectoryUrl) {
-      const response = await this.fetchImpl(this.options.historyDirectoryUrl, { signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) throw new Error(`Historical member directory request failed with HTTP ${response.status}`);
-      this.addDirectory(parsePocketJson(await response.text()));
+      this.addDirectory(await readHistoricalDirectory({ url: this.options.historyDirectoryUrl, fetchImpl: this.fetchImpl }));
     }
     for (const member of this.directory.values()) this.groupDirectory.set(member.id, member);
     this.directory.clear();
