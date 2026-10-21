@@ -57,15 +57,36 @@ export class GalleryUploader {
     return response;
   }
 
+  // The existing gallery loop retries POSTs only. Reuse native fetch and the
+  // collection budget for source retries, including failures while reading a body.
+  private async retrySource<T>(stage: "size" | "download", read: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      this.options.budget?.check();
+      try { return await read(); }
+      catch (error) {
+        this.options.budget?.check();
+        if (!(error instanceof TypeError || error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))) throw error;
+        if (attempt === 2) throw new Error(`Media source ${stage} failed after 3 attempts (${error.name}).`, { cause: error });
+        console.warn(JSON.stringify({ event: "media_source_retry", stage, attempt: attempt + 1 }));
+        const wait = 1000 * (attempt + 1);
+        if (this.options.budget) await this.options.budget.wait(wait);
+        else await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    }
+    throw new Error("Media source attempts exhausted.");
+  }
+
   async videoSize(sourceUrl: string): Promise<number | null> {
-    const head = await this.sourceResponse(sourceUrl, "HEAD", { Accept: "video/*" });
-    const length = Number(head.headers.get("Content-Length"));
-    await head.body?.cancel();
-    if (head.ok && Number.isSafeInteger(length) && length > 0) return length;
-    const response = await this.sourceResponse(sourceUrl, "GET", { Accept: "video/*", Range: "bytes=0-0" });
-    const size = Number(response.status === 206 ? response.headers.get("Content-Range")?.match(/\/(\d+)$/)?.[1] : response.status === 200 ? response.headers.get("Content-Length") : null);
-    await response.body?.cancel();
-    return response.ok && Number.isSafeInteger(size) && size > 0 ? size : null;
+    return this.retrySource("size", async () => {
+      const head = await this.sourceResponse(sourceUrl, "HEAD", { Accept: "video/*" });
+      const length = Number(head.headers.get("Content-Length"));
+      await head.body?.cancel();
+      if (head.ok && Number.isSafeInteger(length) && length > 0) return length;
+      const response = await this.sourceResponse(sourceUrl, "GET", { Accept: "video/*", Range: "bytes=0-0" });
+      const size = Number(response.status === 206 ? response.headers.get("Content-Range")?.match(/\/(\d+)$/)?.[1] : response.status === 200 ? response.headers.get("Content-Length") : null);
+      await response.body?.cancel();
+      return response.ok && Number.isSafeInteger(size) && size > 0 ? size : null;
+    });
   }
 
   async upload(image: ImageAttachment): Promise<void> { await this.uploadFile(image, "image", MAX_BYTES); }
@@ -74,22 +95,26 @@ export class GalleryUploader {
 
   private async uploadFile(image: GalleryFile, kind: "image" | "video", maxBytes: number): Promise<number> {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_BYTES) throw new Error("Media size limit must be between 1 byte and 50 MiB.");
-    const response = await this.sourceResponse(image.sourceUrl, "GET", { Accept: `${kind}/*` });
-    if (!response.ok || !response.body) throw new Error("Media download failed.");
-    if (Number(response.headers.get("Content-Length")) > maxBytes) { await response.body.cancel(); throw new MediaSizeLimitError(); }
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      while (true) {
-        const result = await reader.read();
-        if (result.done) break;
-        size += result.value.byteLength;
-        if (size > maxBytes) throw new MediaSizeLimitError();
-        chunks.push(result.value);
-      }
-    } catch (error) { await reader.cancel(); throw error; }
-    const bytes = Buffer.concat(chunks, size);
+    const bytes = await this.retrySource("download", async () => {
+      const response = await this.sourceResponse(image.sourceUrl, "GET", { Accept: `${kind}/*` });
+      if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`Media download failed (HTTP ${response.status}).`); }
+      if (Number(response.headers.get("Content-Length")) > maxBytes) { await response.body.cancel(); throw new MediaSizeLimitError(); }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const result = await reader.read();
+          if (result.done) break;
+          size += result.value.byteLength;
+          if (size > maxBytes) throw new MediaSizeLimitError();
+          chunks.push(result.value);
+        }
+      } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+      finally { reader.releaseLock(); }
+      return Buffer.concat(chunks, size);
+    });
+    const size = bytes.length;
     const brand = bytes.subarray(8, 12).toString("ascii");
     const isoMedia = bytes.length >= 16 && bytes.subarray(4, 8).toString("ascii") === "ftyp";
     const imageFormat = bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) ? ["jpeg", "image/jpeg"]

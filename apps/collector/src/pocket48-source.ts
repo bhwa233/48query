@@ -321,7 +321,16 @@ export class Pocket48Source implements CollectorSource {
     if (cursor !== null && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) throw new Error("Legacy media history completeness remains unverified.");
     if (this.since && Number(cursor) > 0 && Number(cursor) < Date.parse(this.since)) return { items: [], boundary: [], observed: 0, reachedSince: true, nextCursor: null };
     const roomId = await this.resolveLegacyRoom(member);
-    const content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: kind, ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) });
+    let content: unknown;
+    try { content = await this.post("/im/api/v1/chatroom/msg/list/aim/type", { extMsgType: kind, ownerId: member.id, roomId, nextTime: Number(cursor ?? 0) }); }
+    catch (error) {
+      // Owner-only shares can remain readable after a room disappears, while
+      // IMAGE/VIDEO return business 500. This does not prove media exhaustion.
+      if (!roomId && error instanceof Error && object(error.cause).http === 200 && object(error.cause).business === "500") {
+        throw new SourceVerificationPending("Pocket48 owner-only legacy media is unavailable (HTTP 200, business 500); room history remains unverified.", { cause: error });
+      }
+      throw error;
+    }
     const rows = contentList(content);
     const owner = { ...member, channelId: roomId || null, roomId: roomId || null };
     const items = rows.flatMap(row => {
@@ -565,7 +574,15 @@ export class Pocket48Source implements CollectorSource {
           return this.legacyRoomPage(member, cursor);
         }
       } else if (source === "album") {
-        content = retryItems ? { list: retryItems, nextTime: 0 } : await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) });
+        try { content = retryItems ? { list: retryItems, nextTime: 0 } : await this.post("/im/api/v1/team/msg/list/img", { channelId: room.channelId, nextTime: Number(cursor ?? 0) }); }
+        catch (error) {
+          // A directory channel is only a historical query candidate when jump
+          // supplies no current mapping. Keep its cursor and verification gap.
+          if (historicalRoom && error instanceof Error && object(error.cause).http === 200 && object(error.cause).business === "500") {
+            throw new SourceVerificationPending("Pocket48 historical album candidate is unavailable (HTTP 200, business 500); source retained for verification.", { cause: error });
+          }
+          throw error;
+        }
       } else if (source === "essence") {
         content = await this.post("/im/api/v1/team/essence/message/list", body);
       }

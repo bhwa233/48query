@@ -112,6 +112,43 @@ test("source skip thresholds never suppress authentication or ingestion failures
   assert.equal(saved[0]?.historyCursor, "older", "A failed durable write must not advance or skip its checkpoint");
 });
 
+// The scheduled group run queried retired channels and owner-only legacy media
+// with no official room mapping. Their business 500s are unresolved coverage;
+// a resolved room outage or expired credential must still fail the batch.
+test("unmapped historical media remain pending without advancing saved cursors", async () => {
+  for (const scenario of [
+    { stream: "album", mapped: false, status: 500, pending: true },
+    { stream: "room", mapped: false, status: 500, pending: true },
+    { stream: "album", mapped: true, status: 500, pending: false },
+    { stream: "room", mapped: true, status: 500, pending: false },
+    { stream: "album", mapped: false, status: 401, pending: false },
+  ] as const) {
+    const time = String(Date.parse("2026-10-01T00:00:00Z"));
+    const cursor = scenario.stream === "room" ? `legacy-image:${time}` : time;
+    const member = { id: "1", name: "Owner", groupName: "SNH48", channelId: "22", serverId: "33" };
+    let saved: SourceSync = { source: scenario.stream, historyCursor: cursor, historyDone: false, latestAt: null, latestIds: [],
+      incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "ok", lastError: null, lastSuccessAt: null, lastNonemptyAt: null };
+    const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, sources: [scenario.stream], fetchImpl: async url => {
+      if (String(url).endsWith("/jump")) return Response.json({ status: 200, content: scenario.mapped ? { channelId: 22, serverId: 33 } : {} });
+      if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: scenario.mapped ? [{ ownerId: "1", targetId: "9911", targetType: 0 }] : [] });
+      return Response.json({ status: scenario.status });
+    } });
+    const collect = () => runBatch({ sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source) }, new DryRunStore(), {
+      since: collectionSince(), maxHistoryPagesPerMember: 0,
+      checkpoints: { read: () => [saved], write: async (_id, sync) => { saved = structuredClone(sync); } },
+    });
+    if (scenario.status === 401) await assert.rejects(collect(), /business 401/);
+    else {
+      const result = await collect();
+      assert.equal(result.errorCount, scenario.pending ? 0 : 1, JSON.stringify(scenario));
+      assert.equal(saved.status, scenario.pending ? "pending" : "failed");
+      assert.equal(result.scopeComplete, false);
+    }
+    assert.equal(saved.historyCursor, cursor);
+    assert.equal(saved.historyDone, false);
+  }
+});
+
 test("follower collection distinguishes unavailable or rounded values from a verified zero", async () => {
   const member = { id: "607515", name: "Member", groupName: "SNH48" };
   for (const followers of [undefined, null, "4.3万", -1, 1.5, true, "9007199254740993", 0, "43320"]) {
@@ -192,14 +229,21 @@ test("a budget ending during a media upload leaves that item retryable", async (
   const budget = new CollectionBudget();
   const image: ImageAttachment = { id: "pending", sourceUrl: "https://source.48.cn/pending.jpg", status: "pending" };
   const saved: string[] = [];
+  let requests = 0;
+  const gallery = new GalleryUploader({ budget, fetchImpl: async () => {
+    requests++;
+    budget.stop();
+    throw new DOMException("Interrupted source request", "TimeoutError");
+  } });
   const result = await retryMedia({ ...new DryRunStore(), getSyncState: async () => null, ingestUnit: async () => {}, completeBatch: async () => {},
     pendingImages: async () => [image], saveImage: async item => { saved.push(item.id); } }, {
-    budget, mediaOnly: true, archiveImage: async () => { budget.stop(); throw new Error("Interrupted upload"); },
+    budget, mediaOnly: true, archiveImage: gallery.upload.bind(gallery),
   });
   assert.equal(result.budgetReached, true);
   assert.equal(result.failures, 0);
   assert.equal(image.status, "pending");
   assert.deepEqual(saved, []);
+  assert.equal(requests, 1, "Stopping the collection budget must suppress all source retries");
 });
 
 // GitHub-hosted collection failed before its first member because the public
@@ -804,6 +848,51 @@ test("bounds short-video downloads before uploading original MP4 bytes", async (
   redirect = true;
   await assert.rejects(gallery.uploadVideo({ ...video, galleryUrl: null }), /source host/);
   assert.equal(uploads, 1, "Untrusted redirects must not result in uploads");
+});
+
+// A 48 MiB production video timed out before reaching the gallery. Source HEAD
+// and streamed GET had no retries, so one transient timeout failed the media job.
+test("media retries recover source timeouts and discard interrupted download bytes", async () => {
+  const bytes = Buffer.from("00000018667479706d7034320000000069736f6d6d703432", "hex");
+  const video: VideoAttachment = { id: "timeout-video", sourceUrl: "https://kd48-nosdn.yunxinsvr.com/short.mp4", status: "pending" };
+  let heads = 0;
+  let downloads = 0;
+  let uploads = 0;
+  let saved: VideoAttachment | undefined;
+  const gallery = new GalleryUploader({ fetchImpl: async (url, init) => {
+    if (String(url).endsWith("/upload")) {
+      uploads++;
+      assert.ok(init?.body instanceof FormData);
+      const file = init.body.get("file");
+      assert.ok(file instanceof File);
+      assert.deepEqual(Buffer.from(await file.arrayBuffer()), bytes, "A retry must restart the file instead of appending to partial bytes");
+      return Response.json([{ src: "https://gallery.example/recovered.mp4" }]);
+    }
+    if (init?.method === "HEAD") {
+      if (++heads === 1) throw new DOMException("Synthetic header timeout", "TimeoutError");
+      return new Response(null, { headers: { "Content-Length": String(bytes.length) } });
+    }
+    if (++downloads === 1) return new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(bytes.subarray(0, 12)); },
+      pull(controller) { controller.error(new DOMException("Synthetic body timeout", "TimeoutError")); },
+    }));
+    return new Response(bytes);
+  } });
+  const store = Object.assign(new DryRunStore(), { pendingVideos: async () => [video], saveVideo: async (item: VideoAttachment) => { saved = structuredClone(item); } });
+  const result = await retryMedia(store, { mediaOnly: true, maxBatches: 1, archiveVideo: async item => {
+    item.bytes = await gallery.videoSize(item.sourceUrl);
+    item.bytes = await gallery.uploadVideo(item);
+  } });
+  assert.equal(result.failures, 0);
+  assert.equal(heads, 2);
+  assert.equal(downloads, 2);
+  assert.equal(uploads, 1);
+  assert.equal(saved?.status, "uploaded");
+  assert.equal(saved?.bytes, bytes.length);
+  let timeouts = 0;
+  const unavailable = new GalleryUploader({ fetchImpl: async () => { timeouts++; throw new DOMException("Persistent timeout", "TimeoutError"); } });
+  await assert.rejects(unavailable.videoSize(video.sourceUrl), /source size failed after 3 attempts/);
+  assert.equal(timeouts, 3, "A persistent source outage must remain a failure after bounded retries");
 });
 
 // Live followed member 37 was missing from the community directory, while
