@@ -8,7 +8,7 @@ import { ArchiveImage, archiveLabels, formatTime } from "./ArchiveData";
 // The shared UI and installed Web dependencies have no Pocket48 text formatter.
 // Unwrap known mentions/spans; keep a mention with its text while retaining paragraphs.
 // Other markup remains literal text and can never create elements or handlers.
-function displayMessageText(value: string | null) {
+export function displayMessageText(value: string | null) {
   return value
     ?.replace(/<a\s+href\s*=\s*(["'])snh48:\/\/\d+\1\s*>([\s\S]*?)<\/a\s*>/gi, "$2")
     .replace(/<\/?span(?:\s[^<>]*)?\s*>/gi, "")

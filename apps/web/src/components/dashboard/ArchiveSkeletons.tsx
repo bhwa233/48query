@@ -15,15 +15,26 @@ export function HeadingSkeleton({ action = false }: { action?: boolean }) {
   return <div className="flex min-h-7 items-center justify-between gap-3 sm:min-h-8"><Skeleton className="h-7 w-36 max-w-full sm:h-8" />{action ? <Skeleton className="hidden h-8 w-28 sm:block" /> : null}</div>;
 }
 
-export function FiltersSkeleton({ members = false }: { members?: boolean }) {
+export function FiltersSkeleton({ members = false, imagesOnly = false }: { members?: boolean; imagesOnly?: boolean }) {
   return members ? <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] gap-2 sm:grid-cols-[minmax(0,24rem)_10rem_1fr]">
     <Skeleton className="h-11 w-full sm:h-9" /><Skeleton className="h-11 w-full sm:h-9" />
   </div> : <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2 sm:p-3">
     <div className="flex min-w-0 flex-col gap-2 md:flex-row">
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 md:flex-1"><Skeleton className="h-11 w-full sm:h-9" /><Skeleton className="h-11 w-14 sm:h-9" /></div>
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 md:flex-1"><Skeleton className="h-11 w-full sm:h-9" /><Skeleton className="h-11 w-full sm:h-9" /><Skeleton className="h-11 w-20 sm:h-9" /></div>
+      <div className="grid min-w-0 gap-2 md:flex-1" style={{ gridTemplateColumns: imagesOnly ? "minmax(0,1fr) auto" : "minmax(0,1fr) minmax(0,1fr) auto" }}><Skeleton className="h-11 w-full sm:h-9" />{!imagesOnly ? <Skeleton className="h-11 w-full sm:h-9" /> : null}<Skeleton className="h-11 w-20 sm:h-9" /></div>
     </div>
   </div>;
+}
+
+export function ImageGallerySkeleton({ label }: { label?: string }) {
+  return <LoadingRegion label={label} className="gallery-shell">
+    <div className="gallery-grid items-start">
+      {["3 / 4", "1 / 1", "4 / 5", "4 / 3", "2 / 3"].map((ratio, index) => <div key={ratio} className="gallery-skeleton-column flex flex-col gap-2">
+        <Skeleton className="w-full rounded-lg" style={{ aspectRatio: ratio }} />
+        <Skeleton className="w-full rounded-lg" style={{ aspectRatio: index % 2 ? "3 / 4" : "1 / 1" }} />
+      </div>)}
+    </div>
+  </LoadingRegion>;
 }
 
 export function MembersTableSkeleton({ label }: { label?: string }) {

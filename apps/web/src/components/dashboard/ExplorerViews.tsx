@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, SlidersHorizontal } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { ArrowLeft } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { ArchiveMemberDetail, ArchiveMembers, ArchiveMessages } from "@starter/shared";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ArchiveFilter, ArchiveMessageFilters, emptyArchiveFilters, type ArchiveFilters } from "./ArchiveMessageFilters";
 import { ArchiveDataRegion, archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
 import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton, MessageListSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
@@ -58,45 +58,16 @@ export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl
 
 export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale: string; apiBaseUrl?: string; initialKind?: string }) {
   const t = archiveLabels(locale);
-  const [draft, setDraft] = useState("");
-  const [query, setQuery] = useState("");
-  const [member, setMember] = useState("");
-  const [kind, setKind] = useState(initialKind);
-  const [source, setSource] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedId = useId();
+  const [filters, setFilters] = useState<ArchiveFilters>({ ...emptyArchiveFilters, kind: initialKind });
   const [cursors, setCursors] = useState<string[]>([]);
+  const { query, member, kind, source, from, to } = filters;
   const params = new URLSearchParams({ limit: "30" });
   for (const [key, value] of Object.entries({ q: query, memberId: member, kind, source, from, to, before: cursors.at(-1) })) if (value) params.set(key, value);
   const state = useArchiveQuery<ArchiveMessages>(apiBaseUrl, `/api/query/messages?${params}`);
-  const members = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
-  const sources = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
   const displayed = state.data ?? state.previousData;
-  const summary = [source ? t[`source_${source}`] : "", from ? `${t.from}: ${from}` : "", to ? `${t.to}: ${to}` : ""].filter(Boolean).join(" · ");
 
   return <>
-    <section aria-label={t.messageFilters} className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2 sm:p-3">
-      <div className="flex min-w-0 flex-col gap-2 md:flex-row">
-        <form className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 md:flex-1" onSubmit={event => { event.preventDefault(); setQuery(draft); setCursors([]); }}>
-          <Input className="h-11 sm:h-9" disabled={!state.configured} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
-          <Button className="h-11 sm:h-9" disabled={!state.configured} type="submit" size="sm">{t.search}</Button>
-        </form>
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 md:flex-1">
-          <ArchiveFilter label={t.allMembers!} value={member} onChange={value => { setMember(value); setCursors([]); }} options={members.data?.data.map(item => ({ value: item.id, label: item.name })) ?? []} />
-          <ArchiveFilter label={t.allTypes!} value={kind} onChange={value => { setKind(value); setCursors([]); }} options={["text", "image", "reply", "post"].map(value => ({ value, label: t[`kind_${value}`]! }))} />
-          <Button type="button" variant={summary ? "secondary" : "outline"} size="sm" className="h-11 sm:h-9" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal data-icon="inline-start" />{t.moreFilters}</Button>
-        </div>
-      </div>
-      <fieldset id={advancedId} hidden={!advancedOpen} className={advancedOpen ? "grid min-w-0 grid-cols-1 items-end gap-2 border-t border-border pt-2 sm:grid-cols-3" : "hidden"}>
-        <legend className="sr-only">{t.moreFilters}</legend>
-        <ArchiveFilter label={t.allSources!} value={source} onChange={value => { setSource(value); setCursors([]); }} options={sources.map(value => ({ value, label: t[`source_${value}`]! }))} />
-        <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">{t.from}<Input className="h-11 sm:h-9" type="date" max={to || undefined} value={from} onChange={event => { setFrom(event.target.value); setCursors([]); }} /></label>
-        <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">{t.to}<Input className="h-11 sm:h-9" type="date" min={from || undefined} value={to} onChange={event => { setTo(event.target.value); setCursors([]); }} /></label>
-      </fieldset>
-      {summary ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><p className="min-w-0 break-words">{summary}</p><Button type="button" variant="ghost" size="xs" onClick={() => { setSource(""); setFrom(""); setTo(""); setCursors([]); }}>{t.clearExtraFilters}</Button></div> : null}
-    </section>
+    <ArchiveMessageFilters locale={locale} apiBaseUrl={apiBaseUrl} value={filters} onChange={value => { setFilters(value); setCursors([]); }} />
     <QueryStatus state={state} locale={locale} />
     {state.loading || state.data ? <>
       <ArchiveDataRegion loading={state.loading} fallback={<MessageListSkeleton label={t.loading} images={kind === "image"} rows={state.previousData?.data.length || (kind === "image" ? 2 : 4)} />}>
@@ -129,13 +100,6 @@ export function MemberDetailView({ locale, id, apiBaseUrl }: { locale: string; i
   </>;
 }
 
-// Compose the installed Select once for the archive's common "all" option and labels.
-function ArchiveFilter({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[] }) {
-  return <Select value={value || "all"} onValueChange={next => onChange(next === "all" ? "" : next)}>
-    <SelectTrigger aria-label={label} className="h-11 min-w-0 sm:h-9"><SelectValue /></SelectTrigger>
-    <SelectContent><SelectGroup><SelectItem value="all">{label}</SelectItem>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
-  </Select>;
-}
 
 function Metric({ label, value, locale }: { label: string; value: number; locale: string }) {
   return <dl className="flex min-w-0 flex-col-reverse gap-0.5"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-all font-mono text-base font-semibold leading-6 tabular-nums sm:text-lg">{new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en").format(value)}</dd></dl>;

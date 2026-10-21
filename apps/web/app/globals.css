@@ -1,6 +1,21 @@
 @import "tailwindcss";
 @config '../tailwind.config.ts';
 
+.gallery-shell { container-type: inline-size; }
+.gallery-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.gallery-skeleton-column:nth-child(n+3) { display: none; }
+@container (min-width: 600px) { .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (min-width: 880px) { .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container (min-width: 1080px) { .gallery-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@container (min-width: 600px) { .gallery-skeleton-column:nth-child(3) { display: flex; } }
+@container (min-width: 880px) { .gallery-skeleton-column:nth-child(4) { display: flex; } }
+@container (min-width: 1080px) { .gallery-skeleton-column:nth-child(5) { display: flex; } }
+@media (min-width: 640px) and (hover: hover) and (pointer: fine) {
+  .gallery-caption { opacity: 0; transition: opacity 150ms ease-out; }
+  .gallery-card:hover .gallery-caption, .gallery-card:focus-visible .gallery-caption { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) { .gallery-caption { transition: none; } }
+
 @theme {
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));

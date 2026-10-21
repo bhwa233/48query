@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowDown, ArrowRight, CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
+import { ArrowDown, CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
 import type { QueryRankings } from "@starter/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,8 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
-import { ActivitySkeleton, MessageListSkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
-import { MessageList } from "./MessageList";
+import { ActivitySkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
 import { MeleeRankingDashboard } from "./MeleeRankingDashboard";
 
 const metrics = ["followers", "messages", "images", "replies", "activeDays"] as const;
@@ -215,12 +214,6 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
           <CardContent className="flex flex-col gap-2 px-3">{pending ? <TypeBreakdownSkeleton /> : data?.typeBreakdown.length ? data.typeBreakdown.map(item => <div key={item.type} className="flex flex-col gap-1.5"><div className="flex justify-between gap-3 text-xs"><span>{t[`type_${item.type}`] ?? item.type}</span><span className="font-mono tabular-nums">{number.format(item.count)}</span></div><div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-brand/70" style={{ width: `${item.count / data.totals.messages * 100}%` }} /></div></div>) : <p className="flex h-24 items-center justify-center text-xs text-muted-foreground">{t.noMessages}</p>}</CardContent>
         </Card>
       </div>
-
-      <section className="flex flex-col gap-2" aria-labelledby="rank-recent-title">
-        <div className="flex items-center justify-between gap-3"><h2 id="rank-recent-title" className="font-medium">{t.latestMessages}</h2><Button asChild variant="ghost" size="sm"><Link href={`/${locale}/messages`}>{t.viewAll}<ArrowRight data-icon="inline-end" /></Link></Button></div>
-        <ArchiveDataRegion loading={pending} fallback={<MessageListSkeleton label={t.loading} rows={state.previousData?.data.recentMessages.length || 4} />}><MessageList messages={(data ?? state.previousData?.data)?.recentMessages ?? []} locale={locale} /></ArchiveDataRegion>
-      </section>
-
 
     </div>
   );

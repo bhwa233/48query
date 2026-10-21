@@ -113,7 +113,7 @@ try {
   await web.ready(`${webOrigin}/en`);
   const tests = launch(
     ["exec", "playwright", "test", ...process.argv.slice(2)],
-    { env: { STARTER_E2E_WEB_URL: webOrigin, STARTER_E2E_API_URL: apiOrigin } },
+    { env: { STARTER_E2E_WEB_URL: webOrigin, STARTER_E2E_API_URL: apiOrigin, STARTER_E2E_D1_STATE: state } },
   );
   console.log(await tests.complete());
 } catch (error) {
