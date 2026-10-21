@@ -317,8 +317,9 @@ test("member history keeps messages on failure, resumes its cursor and resets fo
   await expect(page.getByText("分页消息001", { exact: true })).toHaveCount(0);
 });
 
-// Pocket48 birthday messages were displaying the literal <a href="snh48://..."> wrapper.
-test("stored Pocket48 mentions display their labels in text, answers and quoted questions", async ({ page, request }) => {
+// Birthday posts contained literal mention/br/span markup; metadata and body
+// must occupy separate rows without interpreting source text as executable HTML.
+test("stored Pocket48 rich text keeps line breaks and separates message metadata from its body", async ({ page, request }, testInfo) => {
   const apiOrigin = process.env.STARTER_E2E_API_URL;
   if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
   const occurredAt = new Date(Date.now() - 86400_000).toISOString();
@@ -331,17 +332,33 @@ test("stored Pocket48 mentions display their labels in text, answers and quoted 
       member: { id: "e2e-mentions", name: "提及验证成员", groupName: "SNH48" },
       messages: [
         { id: "mention-text", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "TEXT", occurredAt,
-          text: `<a href="snh48://8672772264">@🍫坏大儿_tyt</a>${birthday}` },
+          text: `<a href="snh48://8672772264">@🍫坏大儿_tyt</a><br /><span>${birthday}</span>` },
         { id: "mention-reply", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "REPLY", kind: "reply", occurredAt,
-          question: '<a href="snh48://2">@提问对象</a> 晚上好！', answer: `<a href='snh48://1'>@回答对象</a>${plainSuffix}` },
+          question: '<a href="snh48://2">@提问对象</a><br><span>晚上好！</span>', answer: `<span class="pocket-post"><a href='snh48://1'>@回答对象</a><BR/>${plainSuffix}</span>` },
+        { id: "birthday-post", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "POST_INFO", kind: "post", source: "posts", sourceFlags: 8, occurredAt,
+          text: `@202604101500067sr<br /><span>${birthday}</span>` },
       ],
       recordings: [], totalMembers: 4, membersCovered: 4, errorCount: 0,
     },
   });
   expect(seed.ok(), await seed.text()).toBe(true);
   await page.goto("/zh/members/e2e-mentions");
-  await expect(page.getByText(`@🍫坏大儿_tyt${birthday}`, { exact: true })).toBeVisible();
-  await expect(page.getByText(`@回答对象${plainSuffix}`, { exact: true })).toBeVisible();
-  await expect(page.getByText("@提问对象 晚上好！", { exact: true })).toBeVisible();
+  await expect(page.getByText(`@🍫坏大儿_tyt\n${birthday}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`@回答对象\n${plainSuffix}`, { exact: true })).toBeVisible();
+  await expect(page.getByText("@提问对象\n晚上好！", { exact: true })).toBeVisible();
+  const expected = `@202604101500067sr\n${birthday}`;
+  const body = page.getByText(expected, { exact: true });
+  await expect(body).toBeVisible();
+  expect(await body.textContent(), "A source br must become a real line break").toBe(expected);
+  const post = page.locator("article").filter({ has: body });
+  await expect(post.locator("header")).toContainText("公开动态");
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const metadata = await post.locator("header").boundingBox();
+    const content = await body.boundingBox();
+    expect(content!.y).toBeGreaterThanOrEqual(metadata!.y + metadata!.height);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`message-rows-${width}.png`), fullPage: true });
+  }
   await expect(page.locator("article img")).toHaveCount(0);
 });

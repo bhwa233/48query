@@ -43,10 +43,10 @@ export function MessageListSkeleton({ label, images = false, rows = 4 }: { label
   const widths = ["w-64", "w-40", "w-52", "w-32"];
   return <LoadingRegion label={label} className="rounded-xl border border-border bg-card p-2 sm:p-3">
     <div className="mb-2 flex items-center gap-3 border-b border-border/60 px-2 pb-2 pt-1"><Skeleton className="h-4 w-28" /><Skeleton className="h-3 w-12" /></div>
-    {Array.from({ length: rows }, (_, index) => <div key={index} className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 px-2 py-1.5 sm:grid-cols-[4rem_minmax(0,1fr)]">
-      <Skeleton className="mt-1 h-3 w-9" />
-      <div className="flex min-h-[22px] min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><Skeleton className="h-3 w-16 max-w-full" /><Skeleton className={cn("h-3 max-w-full", widths[index % widths.length])} /></div>
-      {images ? <div className="col-span-2 mt-1.5 min-w-0 pb-1.5 sm:col-span-1 sm:col-start-2"><Skeleton className="aspect-square w-[300px] max-w-full rounded-lg" /></div> : null}
+    {Array.from({ length: rows }, (_, index) => <div key={index} className="flex min-w-0 flex-col gap-0.5 px-2 py-1.5">
+      <div className="flex min-h-5 min-w-0 items-center gap-2"><Skeleton className="h-3 w-9" /><Skeleton className="h-3 w-16" /><Skeleton className="h-3 w-12" /></div>
+      <div className="flex min-h-[22px] min-w-0 items-center"><Skeleton className={cn("h-3 max-w-full", widths[index % widths.length])} /></div>
+      {images ? <div className="mt-1 min-w-0 pb-1.5"><Skeleton className="aspect-square w-[300px] max-w-full rounded-lg" /></div> : null}
     </div>)}
   </LoadingRegion>;
 }

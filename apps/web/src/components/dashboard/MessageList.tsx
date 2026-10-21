@@ -6,9 +6,13 @@ import { Badge } from "@/components/ui/badge";
 import { ArchiveImage, archiveLabels, formatTime } from "./ArchiveData";
 
 // The shared UI and installed Web dependencies have no Pocket48 text formatter.
-// Only unwrap this legacy mention format; keep all content as React text, without an HTML parser.
+// Unwrap known mentions/spans and preserve source line breaks as React text.
+// Other markup remains literal text and can never create elements or handlers.
 function displayMessageText(value: string | null) {
-  return value?.replace(/<a\s+href\s*=\s*(["'])snh48:\/\/\d+\1\s*>([\s\S]*?)<\/a\s*>/gi, "$2") ?? null;
+  return value
+    ?.replace(/<a\s+href\s*=\s*(["'])snh48:\/\/\d+\1\s*>([\s\S]*?)<\/a\s*>/gi, "$2")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?span(?:\s[^<>]*)?\s*>/gi, "") ?? null;
 }
 
 export function MessageList({ messages, locale, emptyText }: { messages: ArchiveMessage[]; locale: string; emptyText?: string }) {
@@ -37,24 +41,23 @@ export function MessageList({ messages, locale, emptyText }: { messages: Archive
             const content = displayMessageText(message.answer ?? message.text);
             const visiting = message.roomOwnerName && (message.roomOwnerId ? message.roomOwnerId !== message.memberId : message.roomOwnerName !== message.memberName);
             return (
-              <article key={message.id} className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 rounded-md px-2 py-1.5 text-sm leading-[22px] hover:bg-muted/50 sm:grid-cols-[4rem_minmax(0,1fr)]">
-                <time dateTime={message.occurredAt} title={formatTime(message.occurredAt, locale)} className="pt-px text-xs tabular-nums text-muted-foreground">
-                  {timeFormatter.format(new Date(message.occurredAt))}
-                </time>
+              <article key={message.id} className="flex min-w-0 flex-col gap-0.5 rounded-md px-2 py-1.5 text-sm leading-[22px] hover:bg-muted/50">
+                <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs leading-5 text-muted-foreground">
+                  <time dateTime={message.occurredAt} title={formatTime(message.occurredAt, locale)} className="shrink-0 tabular-nums">
+                    {timeFormatter.format(new Date(message.occurredAt))}
+                  </time>
+                  <Link href={`/${locale}/members/${encodeURIComponent(message.memberId)}`} className="font-medium text-brand hover:underline">{message.memberName}</Link>
+                  {message.kind !== "text" && message.kind !== "image" ? <Badge variant="outline">{t[`type_${message.type}`] ?? message.type}</Badge> : null}
+                  {message.source !== "room" ? <span>{t[`source_${message.source}`]}</span> : null}
+                  {message.sourceFlags & 4 ? <Badge variant="secondary">{t.essence}</Badge> : null}
+                  {visiting ? <span className="break-words [overflow-wrap:anywhere]">{t.room}: {message.roomOwnerName} · {t.visitor}</span> : null}
+                </header>
                 <div className="min-w-0">
-                  <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                    <Link href={`/${locale}/members/${encodeURIComponent(message.memberId)}`} className="font-medium text-brand hover:underline">{message.memberName}</Link>
-                    <span className="text-muted-foreground">{t.messageSeparator}</span>
-                    <span>{content}</span>
-                    {message.kind !== "text" && message.kind !== "image" ? <Badge variant="outline" className="ml-2 align-middle">{t[`type_${message.type}`] ?? message.type}</Badge> : null}
-                    {message.source !== "room" ? <span className="ml-2 text-xs text-muted-foreground">{t[`source_${message.source}`]}</span> : null}
-                    {message.sourceFlags & 4 ? <Badge variant="secondary" className="ml-2 align-middle">{t.essence}</Badge> : null}
-                  </p>
-                  {visiting ? <p className="text-xs text-muted-foreground">{t.room}: {message.roomOwnerName} · {t.visitor}</p> : null}
+                  {content ? <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{content}</p> : null}
                   {message.question ? <blockquote className="mt-1 border-l-2 border-border pl-2 text-xs leading-5 text-muted-foreground"><p className="font-medium">{t.question}</p><p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{displayMessageText(message.question)}</p></blockquote> : null}
                   {message.kind === "excluded" || message.kind === "unknown" ? <p className="text-xs text-muted-foreground">{message.kind === "excluded" ? t.excluded : t.unsupported}</p> : null}
                 </div>
-                {message.images.length ? <div className="col-span-2 mt-1.5 flex min-w-0 flex-wrap gap-2 pb-1.5 sm:col-span-1 sm:col-start-2">{message.images.map(image => <ArchiveImage key={image.id} image={image} locale={locale} />)}</div> : null}
+                {message.images.length ? <div className="mt-1 flex min-w-0 flex-wrap gap-2 pb-1.5">{message.images.map(image => <ArchiveImage key={image.id} image={image} locale={locale} />)}</div> : null}
               </article>
             );
           })}
