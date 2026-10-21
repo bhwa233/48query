@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
 import { drizzle } from "drizzle-orm/d1";
 import type { AppEnv } from "../env";
-import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema, CollectorSinceSchema, CollectorProgressSchema } from "@starter/shared/schemas";
+import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema, CollectorSinceSchema, CollectorProgressSchema, CollectorRunSchema } from "@starter/shared/schemas";
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
@@ -22,6 +22,7 @@ app.use("*", async (c, next) => {
   await next();
 });
 app.onError((error, c) => {
+  if (/(?:no such table:.*query_collector_runs|(?:no such column:|has no column named).*run_id)/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "collector_runs_not_configured", message: "Apply the collector runs migration before collecting task summaries." } }, 503);
   if (/no such table:.*query_(?:melee_|follower_snapshots)/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "ranking_storage_not_configured", message: "Apply the ranking migrations before collecting fans or weekly rankings." } }, 503);
   if (/no such table:.*query_collector_progress/.test(`${error.message} ${error.cause instanceof Error ? error.cause.message : ""}`)) return c.json({ ok: false as const, error: { code: "collector_progress_not_configured", message: "Apply the collector progress migration before enabling scheduled collection." } }, 503);
   if (error instanceof HTTPException) return c.json({ ok: false, error: { code: "http_error", message: error.message } }, error.status);
@@ -30,6 +31,15 @@ app.onError((error, c) => {
 });
 function database(c: { env: AppEnv["Bindings"] }) { if (!c.env.APP_DB) throw new Error("APP_DB binding is missing"); return c.env.APP_DB; }
 registerMeleeIngest(app);
+
+app.openapi(createRoute({ method: "post", path: "/runs", request: { body: { required: true, content: { "application/json": { schema: CollectorRunSchema } } } }, responses: { 200: { description: "Saved one collector invocation, separate from its member batches.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: CollectorRunSchema }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
+  const input = c.req.valid("json");
+  await database(c).prepare(`INSERT INTO query_collector_runs (id, stat_date, started_at, completed_at, status, total_members, error_count) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET completed_at = excluded.completed_at, status = excluded.status, error_count = excluded.error_count
+    WHERE query_collector_runs.status = 'running'`)
+    .bind(input.id, input.statDate, input.startedAt, input.completedAt, input.status, input.totalMembers, input.errorCount).run();
+  return c.json({ ok: true as const, data: input }, 200);
+});
 
 app.openapi(createRoute({ method: "get", path: "/progress", request: { query: z.object({ since: CollectorSinceSchema, after: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) }, responses: { 200: { description: "Private, date-scoped resumable collector progress.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CollectorProgressSchema), nextCursor: z.string().nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
   const { since: rawSince, after, limit } = c.req.valid("query");
@@ -65,7 +75,7 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
   if (input.messages.some(message => (message.author && message.author.id !== message.memberId) || (message.senderId && message.senderId !== message.memberId))) return c.json({ ok: false as const, error: { code: "invalid_author", message: "Message author and sender must match." } }, 400);
   if (input.followerSnapshot && Date.parse(input.followerSnapshot.observedAt) > Date.now() + 300_000) return c.json({ ok: false as const, error: { code: "invalid_snapshot", message: "Follower observation cannot be in the future." } }, 400);
   const statements = [
-    db.prepare("INSERT INTO query_batches (id, stat_date, status, started_at, members_covered, total_members, error_count, counts_tracked) VALUES (?, ?, 'running', ?, ?, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET members_covered = excluded.members_covered, total_members = excluded.total_members, error_count = excluded.error_count, error_message = NULL").bind(input.batchId, input.statDate, input.startedAt, input.membersCovered, input.totalMembers, input.errorCount),
+    db.prepare("INSERT INTO query_batches (id, stat_date, status, started_at, members_covered, total_members, error_count, counts_tracked, run_id, member_id, phase) VALUES (?, ?, 'running', ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET members_covered = excluded.members_covered, total_members = excluded.total_members, error_count = excluded.error_count, error_message = NULL").bind(input.batchId, input.statDate, input.startedAt, input.membersCovered, input.totalMembers, input.errorCount, input.runId ?? null, input.member.id, input.phase ?? null),
     memberStatement(db, input.member, now),
     db.prepare("INSERT INTO query_sync_state (member_id, message_cursor, recording_cursor, updated_at, last_error) VALUES (?, ?, ?, ?, NULL) ON CONFLICT(member_id) DO UPDATE SET message_cursor = excluded.message_cursor, updated_at = excluded.updated_at").bind(input.member.id, input.messageCursor ?? null, input.recordingCursor ?? null, now),
   ];

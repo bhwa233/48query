@@ -82,6 +82,8 @@ export interface CollectorSource {
 
 export type IngestUnit = {
   batchId: string;
+  runId?: string;
+  phase?: "incremental" | "history";
   statDate: string;
   startedAt: string;
   member: CollectorMember;

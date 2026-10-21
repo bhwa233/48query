@@ -14,6 +14,8 @@ import { CollectorStoreError, SourceAuthenticationError } from "./types";
 import type { CollectorProgress } from "@starter/shared";
 import { CollectionBudget, CollectionStopped } from "./budget";
 import { collectMelee } from "./melee";
+import { randomUUID } from "node:crypto";
+import type { CollectorRun } from "@starter/shared";
 const collect = process.argv.includes("--collect");
 const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_RUN === "1";
 const manifestOnly = process.argv.includes("--manifest-only");
@@ -42,12 +44,14 @@ const lockPath = `${statePath}.lock`;
 const lock = await open(lockPath, "wx", 0o600);
 await lock.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
 await lock.close();
+let monitorRun: CollectorRun | undefined;
+let monitorStore: HttpIngestStore | null = null;
+let failures = 0;
 try {
   const started = Date.now();
   let processed = 0;
   let budgetReached = false;
   let initialized = false;
-  let failures = 0;
   let state: GroupProgress;
   const rosterOptions = { directoryUrl: process.env.POCKET48_DIRECTORY_URL, historicalUrl: process.env.POCKET48_HISTORY_DIRECTORY_URL };
   try {
@@ -86,6 +90,14 @@ try {
     const dryStore = dryRun ? new DryRunStore() : null;
     const store: CollectorStore | null = collect ? dryStore ?? new HttpIngestStore(process.env.INGEST_API_URL!, process.env.INGEST_KEY!, since) : null;
     const remoteStore = store instanceof HttpIngestStore ? store : null;
+    if (remoteStore) {
+      monitorStore = remoteStore;
+      const startedAt = new Date(started).toISOString();
+      monitorRun = { id: process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `run-${randomUUID()}`,
+        statDate: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(started)),
+        startedAt, completedAt: null, status: "running", totalMembers: state.entries.length, errorCount: 0 };
+      await remoteStore.saveRun(monitorRun);
+    }
     const durable = remoteStore ? await remoteStore.collectionProgress() : new Map<string, CollectorProgress>();
     const restore = (entry: typeof state.entries[number], progress: CollectorProgress) => {
       entry.sources = structuredClone(progress.sources);
@@ -172,6 +184,7 @@ try {
               },
             };
             const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
+              runId: monitorRun?.id, phase, batchId: monitorRun ? `${monitorRun.id}:${phase}:${member.id}` : undefined,
               since, checkpoints, budget: activeBudget, historyOnly: phase === "history", retrySkipped,
               maxHistoryPagesPerMember: phase === "history" ? Number(process.env.COLLECTOR_HISTORY_PAGES ?? 1) : 0,
               catalogRetryLimit: phase === "history" ? 2 : 0 });
@@ -203,8 +216,16 @@ try {
     }
   }
   console.log(JSON.stringify(summary()));
+  if (monitorRun) {
+    monitorRun.status = failures > 0 ? "failed" : budgetReached || stopping ? "bounded" : "completed";
+    monitorRun.errorCount = failures;
+  }
   // A bounded batch can succeed with remaining work; actual request/write errors fail.
   if (!manifestOnly && failures > 0) process.exitCode = 1;
 } finally {
-  await unlink(lockPath);
+  try {
+    if (monitorRun && monitorStore) await monitorStore.saveRun({ ...monitorRun, completedAt: new Date().toISOString(),
+      status: monitorRun.status === "running" ? "failed" : monitorRun.status,
+      errorCount: monitorRun.status === "running" ? Math.max(1, failures) : failures });
+  } finally { await unlink(lockPath); }
 }

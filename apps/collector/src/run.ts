@@ -7,7 +7,7 @@ import { CollectionStopped, type CollectionBudget } from "./budget";
 const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
@@ -40,7 +40,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     let roomSync: SourceSync | undefined;
     let verifiedRoomContent = false;
     const pendingStreams = new Set<CollectionSource>();
-    const unit = (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]): IngestUnit => ({ catalog, batchId, statDate, startedAt, member, messages, recordings: [], messageCursor: state?.messageCursor ?? null, recordingCursor: state?.recordingCursor ?? null, totalMembers: members.length, membersCovered, errorCount, ...(sync && !options.checkpoints ? { sync } : {}) });
+    const unit = (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]): IngestUnit => ({ catalog, batchId, runId: options.runId, phase: options.phase, statDate, startedAt, member, messages, recordings: [], messageCursor: state?.messageCursor ?? null, recordingCursor: state?.recordingCursor ?? null, totalMembers: members.length, membersCovered, errorCount, ...(sync && !options.checkpoints ? { sync } : {}) });
     const persist = async (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]) => {
       await store.ingestUnit(unit(messages, sync, catalog));
       if (sync) await options.checkpoints?.write(member.id, sync);

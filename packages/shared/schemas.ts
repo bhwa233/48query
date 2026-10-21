@@ -219,12 +219,20 @@ export const CatalogEntrySchema = z.object({
 
 export const QueryIngestUnitSchema = z.object({
   batchId: z.string().min(1).max(100), statDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), startedAt: z.string().max(80),
+  runId: z.string().min(1).max(100).optional(), phase: z.enum(["incremental", "history"]).optional(),
   member: IngestMemberSchema, messages: z.array(IngestMessageSchema).max(25), recordings: z.array(z.unknown()).max(0),
   followerSnapshot: FollowerSnapshotSchema.optional(),
   sync: SourceSyncSchema.optional(),
   catalog: z.array(CatalogEntrySchema).max(50).default([]),
   messageCursor: z.string().max(500).nullable().optional(), recordingCursor: z.string().max(500).nullable().optional(),
   totalMembers: z.number().int().nonnegative(), membersCovered: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative().default(0),
+});
+
+export const CollectorRunSchema = z.object({
+  id: z.string().min(1).max(100), statDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  startedAt: z.string().datetime(), completedAt: z.string().datetime().nullable(),
+  status: z.enum(["running", "completed", "bounded", "failed"]),
+  totalMembers: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative(),
 });
 
 export const QueryIngestResponseSchema = z.object({ ok: z.literal(true), data: z.object({ batchId: z.string(), memberId: z.string(), messagesWritten: z.number().int().nonnegative(), recordingsWritten: z.number().int().nonnegative() }) });

@@ -96,6 +96,12 @@ export const queryDailyStats = sqliteTable("query_daily_stats", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const queryCollectorRuns = sqliteTable("query_collector_runs", {
+  id: text("id").primaryKey(), statDate: text("stat_date").notNull(),
+  startedAt: text("started_at").notNull(), completedAt: text("completed_at"), status: text("status").notNull(),
+  totalMembers: integer("total_members").notNull().default(0), errorCount: integer("error_count").notNull().default(0),
+}, table => [index("query_collector_runs_started").on(table.startedAt, table.id)]);
+
 export const queryBatches = sqliteTable("query_batches", {
   id: text("id").primaryKey(),
   statDate: text("stat_date").notNull(),
@@ -107,7 +113,8 @@ export const queryBatches = sqliteTable("query_batches", {
   errorCount: integer("error_count").notNull().default(0),
   errorMessage: text("error_message"),
   countsTracked: integer("counts_tracked", { mode: "boolean" }).notNull().default(false),
-});
+  runId: text("run_id").references(() => queryCollectorRuns.id), memberId: text("member_id"), phase: text("phase"),
+}, table => [index("query_batches_run").on(table.runId, table.id)]);
 
 export const queryBatchItems = sqliteTable("query_batch_items", {
   batchId: text("batch_id").notNull().references(() => queryBatches.id),

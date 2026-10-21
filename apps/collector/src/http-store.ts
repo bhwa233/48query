@@ -1,6 +1,6 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
 import { CollectorStoreError, SourceVerificationPending } from "./types";
-import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, MeleePage, MeleeProgress } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, CollectorRun, MeleePage, MeleeProgress } from "@starter/shared";
 import { object, parsePocketJson, timestamp } from "./pocket48-content";
 import type { CollectionBudget } from "./budget";
 
@@ -29,6 +29,10 @@ export class HttpIngestStore implements CollectorStore {
   async saveCollectionProgress(progress: CollectorProgress) {
     const saved = await this.request<{ revision: number }>("/api/query/ingest/progress", { method: "POST", body: JSON.stringify(progress) });
     progress.revision = saved.revision;
+  }
+
+  async saveRun(run: CollectorRun) {
+    await this.request("/api/query/ingest/runs", { method: "POST", body: JSON.stringify(run) });
   }
 
   private async request<T>(path: string, init?: RequestInit, envelope = false): Promise<T> {

@@ -226,6 +226,10 @@ try {
     errorCount: 0,
   };
   const ingestOptions = { ...post(ingestUnit), headers: { ...post(ingestUnit).headers, "X-Ingest-Key": "test-ingest-key" } };
+  const groupRun = { id: "smoke-group-run", statDate: ingestUnit.statDate, startedAt: ingestUnit.startedAt, completedAt: null, status: "running", totalMembers: 2, errorCount: 0 };
+  const runOptions = value => ({ ...post(value), headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-ingest-key" } });
+  await request(origin, "/api/query/ingest/runs", 401, post(groupRun));
+  await request(origin, "/api/query/ingest/runs", 200, runOptions(groupRun));
   const ingest = await request(origin, "/api/query/ingest/unit", 200, ingestOptions);
   assert.equal(ingest.json().data.messagesWritten, 2);
   assert.equal(ingest.response.headers.get("Cache-Control"), "no-store");
@@ -332,6 +336,20 @@ try {
   ]);
   servers.delete(batchCounts);
   console.log("PASS batch contents: idempotent message/media counts and isolation across batches");
+  // One invocation owns multiple member/phase batches. Repeated content and
+  // members must count once in its summary, without changing per-batch counts.
+  for (const [id, phase, member] of [["group-a", "incremental", ingestUnit.member], ["group-b", "history", ingestUnit.member],
+    ["group-c", "incremental", { ...ingestUnit.member, id: "second-group-member", name: "Second Member" }]]) {
+    await request(origin, "/api/query/ingest/unit", 200, runOptions({ ...ingestUnit, batchId: id, runId: groupRun.id, phase, member,
+      messages: id === "group-c" ? [] : ingestUnit.messages }));
+  }
+  await request(origin, "/api/query/ingest/runs", 200, runOptions({ ...groupRun, status: "bounded", completedAt: "2026-10-18T01:00:00.000Z" }));
+  await request(origin, "/api/query/ingest/runs", 200, runOptions(groupRun));
+  const runCounts = launch(["exec", "wrangler", "d1", "execute", "APP_DB", "--config", "wrangler.d1.jsonc", "--local", "--persist-to", state,
+    "--command", "SELECT r.status, (SELECT COUNT(DISTINCT member_id) FROM query_batches WHERE run_id = r.id) AS members, (SELECT COUNT(DISTINCT i.item_id) FROM query_batch_items i JOIN query_batches b ON b.id = i.batch_id WHERE b.run_id = r.id AND i.kind = 'message') AS messages FROM query_collector_runs r WHERE r.id = 'smoke-group-run'", "--json"], { cwd: apiDirectory });
+  assert.deepEqual(JSON.parse(await runCounts.complete())[0].results, [{ status: "bounded", members: 2, messages: 2 }]);
+  servers.delete(runCounts);
+  console.log("PASS collector task summary: member/phase grouping, unique counts and terminal status replay");
   const cacheRequest = (roomId, occurredAt = videoMessage.occurredAt) => ({ ...post({ scope: "room", roomId, assets: [{ id: video.id, occurredAt }] }), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
   const verified = (await request(origin, "/api/query/ingest/verified-media", 200, cacheRequest(videoMessage.roomId))).json().data;
   assert.deepEqual(verified.map(message => message.id), [videoMessage.id]);
