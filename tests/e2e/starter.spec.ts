@@ -319,6 +319,7 @@ test("member history keeps messages on failure, resumes its cursor and resets fo
 
 // Birthday posts contained literal mention/br/span markup; metadata and body
 // must occupy separate rows without interpreting source text as executable HTML.
+// A br after an @ mention must not isolate the recipient from the greeting.
 test("stored Pocket48 rich text keeps line breaks and separates message metadata from its body", async ({ page, request }, testInfo) => {
   const apiOrigin = process.env.STARTER_E2E_API_URL;
   if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
@@ -336,20 +337,20 @@ test("stored Pocket48 rich text keeps line breaks and separates message metadata
         { id: "mention-reply", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "REPLY", kind: "reply", occurredAt,
           question: '<a href="snh48://2">@提问对象</a><br><span>晚上好！</span>', answer: `<span class="pocket-post"><a href='snh48://1'>@回答对象</a><BR/>${plainSuffix}</span>` },
         { id: "birthday-post", memberId: "e2e-mentions", senderId: "e2e-mentions", type: "POST_INFO", kind: "post", source: "posts", sourceFlags: 8, occurredAt,
-          text: `@202604101500067sr<br /><span>${birthday}</span>` },
+          text: `生日祝福\n@202604101500067sr<br /><span>${birthday}<br />第二段保留换行。</span>` },
       ],
       recordings: [], totalMembers: 4, membersCovered: 4, errorCount: 0,
     },
   });
   expect(seed.ok(), await seed.text()).toBe(true);
   await page.goto("/zh/members/e2e-mentions");
-  await expect(page.getByText(`@🍫坏大儿_tyt\n${birthday}`, { exact: true })).toBeVisible();
-  await expect(page.getByText(`@回答对象\n${plainSuffix}`, { exact: true })).toBeVisible();
-  await expect(page.getByText("@提问对象\n晚上好！", { exact: true })).toBeVisible();
-  const expected = `@202604101500067sr\n${birthday}`;
+  await expect(page.getByText(`@🍫坏大儿_tyt ${birthday}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`@回答对象${plainSuffix}`, { exact: true })).toBeVisible();
+  await expect(page.getByText("@提问对象 晚上好！", { exact: true })).toBeVisible();
+  const expected = `生日祝福\n@202604101500067sr ${birthday}\n第二段保留换行。`;
   const body = page.getByText(expected, { exact: true });
   await expect(body).toBeVisible();
-  expect(await body.textContent(), "A source br must become a real line break").toBe(expected);
+  expect(await body.textContent(), "Mentions stay inline while body paragraphs keep their line breaks").toBe(expected);
   const post = page.locator("article").filter({ has: body });
   await expect(post.locator("header")).toContainText("公开动态");
   for (const width of [1440, 390]) {

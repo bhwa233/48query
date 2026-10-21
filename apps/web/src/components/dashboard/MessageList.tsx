@@ -6,13 +6,14 @@ import { Badge } from "@/components/ui/badge";
 import { ArchiveImage, archiveLabels, formatTime } from "./ArchiveData";
 
 // The shared UI and installed Web dependencies have no Pocket48 text formatter.
-// Unwrap known mentions/spans and preserve source line breaks as React text.
+// Unwrap known mentions/spans; keep a mention with its text while retaining paragraphs.
 // Other markup remains literal text and can never create elements or handlers.
 function displayMessageText(value: string | null) {
   return value
     ?.replace(/<a\s+href\s*=\s*(["'])snh48:\/\/\d+\1\s*>([\s\S]*?)<\/a\s*>/gi, "$2")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/?span(?:\s[^<>]*)?\s*>/gi, "") ?? null;
+    .replace(/<\/?span(?:\s[^<>]*)?\s*>/gi, "")
+    .replace(/(^|[\r\n])(@[^\r\n<>]+)<br\s*\/?>[ \t]*/gi, "$1$2 ")
+    .replace(/<br\s*\/?>/gi, "\n") ?? null;
 }
 
 export function MessageList({ messages, locale, emptyText }: { messages: ArchiveMessage[]; locale: string; emptyText?: string }) {
