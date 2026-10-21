@@ -1,12 +1,13 @@
 import type { CatalogEntry } from "@starter/shared";
 import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStore, IngestUnit, SourceSync } from "./types";
+import { CollectorStoreError, SourceAuthenticationError, SourceVerificationPending } from "./types";
 import type { ScopedCheckpoints } from "./collection-scope";
 import { CollectionStopped, type CollectionBudget } from "./budget";
 
 const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
@@ -27,6 +28,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   let imageFailures = 0;
   let videoFailures = 0;
   let sourcesPending = 0;
+  let sourcesSkipped = 0;
   let budgetReached = false;
   const streams = source.sources ?? ["room"];
 
@@ -37,10 +39,26 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     let covered = false;
     let roomSync: SourceSync | undefined;
     let verifiedRoomContent = false;
+    const pendingStreams = new Set<CollectionSource>();
     const unit = (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]): IngestUnit => ({ catalog, batchId, statDate, startedAt, member, messages, recordings: [], messageCursor: state?.messageCursor ?? null, recordingCursor: state?.recordingCursor ?? null, totalMembers: members.length, membersCovered, errorCount, ...(sync && !options.checkpoints ? { sync } : {}) });
     const persist = async (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]) => {
       await store.ingestUnit(unit(messages, sync, catalog));
       if (sync) await options.checkpoints?.write(member.id, sync);
+    };
+    const recordIssue = async (sync: SourceSync, error: unknown) => {
+      const reason = error instanceof Error ? error.message : "Collection failed.";
+      const failureCount = Math.min(3, (sync.failureCount ?? (sync.status === "failed" ? 1 : 0)) + 1);
+      const skippedAt = failureCount >= 3 ? new Date().toISOString() : null;
+      const pending = error instanceof SourceVerificationPending;
+      const next: SourceSync = { ...sync, failureCount, skippedAt, status: pending ? "pending" : "failed", lastError: reason.slice(0, 1000) };
+      // A skipped source remains incomplete. Infrastructure/authentication errors
+      // never enter this path, even when a source has reached its failure limit.
+      await persist([], next);
+      if (!pending && !skippedAt) { errorCount += 1; lastError = reason; }
+      if (skippedAt) sourcesSkipped += 1;
+      pendingStreams.add(sync.source);
+      console[!pending && !skippedAt ? "error" : "log"](JSON.stringify({ event: skippedAt ? "source_skipped" : pending ? "source_pending" : "source_failed", memberId: member.id, source: sync.source, failureCount, error: reason }));
+      return next;
     };
     // Register before any source can fail, preserving the original error on completion.
     await store.ingestUnit(unit([]));
@@ -51,6 +69,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         console.log(JSON.stringify({ event: followerSnapshot ? "followers_collected" : "followers_unavailable", memberId: member.id }));
       } catch (error) {
         if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
+        if (error instanceof SourceAuthenticationError || error instanceof CollectorStoreError) throw error;
         errorCount += 1;
         lastError = error instanceof Error ? error.message : "Follower collection failed.";
         console.error(JSON.stringify({ event: "followers_failed", memberId: member.id, error: lastError }));
@@ -59,12 +78,29 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     for (const stream of streams) {
       if (options.budget?.stopped) { budgetReached = true; break; }
       let sync = structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream));
+      sync.failureCount ??= sync.status === "failed" ? 1 : 0;
+      if (sync.skippedAt && options.retrySkipped) {
+        sync = { ...sync, failureCount: 0, skippedAt: null };
+        await persist([], sync);
+      }
+      if (sync.skippedAt) {
+        sourcesSkipped += 1;
+        pendingStreams.add(stream);
+        console.log(JSON.stringify({ event: "source_skipped", memberId: member.id, source: stream, failureCount: sync.failureCount, error: sync.lastError }));
+        continue;
+      }
       let catalogPending = false;
+      let sourceFailure = false;
+      let sourceRead = false;
+      let catalogReadError: Error | undefined;
       try {
         const readPage = async (cursor: string | null) => {
           options.budget?.check();
           console.log(JSON.stringify({ event: "source_page_started", memberId: member.id, source: stream, phase: options.historyOnly ? "history" : "incremental" }));
-          const page = await (source.listContent ? source.listContent(member, stream, cursor) : source.listMessages(member, cursor));
+          let page;
+          try { page = await (source.listContent ? source.listContent(member, stream, cursor) : source.listMessages(member, cursor)); }
+          catch (error) { sourceFailure = true; throw error; }
+          sourceRead = true;
           if (!options.since) return page;
           const boundary = page.boundary ?? page.items.map(item => ({ id: item.id, occurredAt: item.occurredAt }));
           const times = boundary.map(item => Date.parse(item.occurredAt));
@@ -121,11 +157,14 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
           if (pending.length) {
             try {
               const retried = await source.retryCatalog(member, stream, pending);
+              sourceRead = true;
               const now = new Date().toISOString();
               await write(retried.items, { ...sync, status: retried.unverified ? "pending" : "ok", lastError: retried.unverified ? sync.lastError : null,
                 lastSuccessAt: now, lastNonemptyAt: retried.items.length ? now : sync.lastNonemptyAt }, retried.catalog);
             } catch (error) {
               options.budget?.check();
+              if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError) throw error;
+              catalogReadError = error instanceof Error ? error : new Error("Catalog verification request failed.");
               // Rotate failed lookups without letting one old item block new
               // discovery. Originals remain private and the source stays failed.
               await store.ingestUnit(unit([], undefined, pending));
@@ -142,7 +181,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
           if (page.unverified && !(page.catalog && store.pendingCatalog)) {
             const now = new Date().toISOString();
             await write(page.items, { ...sync, lastSuccessAt: now, lastNonemptyAt: page.items.length ? now : sync.lastNonemptyAt });
-            throw new Error(`${page.unverified} catalog items lack verifiable authorship; matched records retained, cursor unchanged.`);
+            throw new SourceVerificationPending(`${page.unverified} catalog items lack verifiable authorship; matched records retained, cursor unchanged.`);
           }
           const boundary = page.boundary ?? page.items.map(message => ({ id: message.id, occurredAt: message.occurredAt }));
           const observed = page.observed ?? boundary.length;
@@ -169,7 +208,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             const page = await readPage(sync.historyCursor);
             if (page.unverified && !(page.catalog && store.pendingCatalog)) {
               await write(page.items, sync);
-              throw new Error(`${page.unverified} catalog items lack verifiable authorship; history cursor unchanged.`);
+              throw new SourceVerificationPending(`${page.unverified} catalog items lack verifiable authorship; history cursor unchanged.`);
             }
             const now = new Date().toISOString();
             const boundary = page.boundary ?? page.items.map(item => ({ id: item.id, occurredAt: item.occurredAt }));
@@ -184,32 +223,32 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         if ((stream === "album" || stream === "post_images") && store.pendingCatalog && (await store.pendingCatalog(member.id, stream, 1)).length) {
           catalogPending = true;
           console.log(JSON.stringify({ event: "catalog_pending", memberId: member.id, source: stream }));
+          if (catalogReadError) { sourceFailure = true; throw catalogReadError; }
+        }
+        if (sourceRead && sync.failureCount && (stream !== "room" || sync.lastNonemptyAt || verifiedRoomContent || options.since && sync.historyDone)) {
+          sync = { ...sync, failureCount: 0, skippedAt: null };
+          await persist([], sync);
         }
         if (stream === "room") roomSync = sync;
       } catch (error) {
         if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
-        errorCount += 1;
-        lastError = error instanceof Error ? error.message : "Collection failed.";
-        sync = { ...sync, status: "failed", lastError: lastError.slice(0, 1000) };
-        await persist([], sync);
+        if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError || (!sourceFailure && !(error instanceof SourceVerificationPending))) throw error;
+        sync = await recordIssue(sync, error);
         if (stream === "room") roomSync = sync;
-        console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: stream, error: lastError }));
       }
-      if (catalogPending || !sync.historyDone || sync.incrementalCursor !== null || sync.status === "failed") sourcesPending += 1;
+      if (catalogPending || !sync.historyDone || sync.incrementalCursor !== null || sync.lastError) pendingStreams.add(stream);
     }
     // Album verification can find genuine older member messages beyond pages of
     // fan chat. Record that evidence without changing newest/history boundaries.
-    if (!budgetReached && roomSync && !roomSync.lastNonemptyAt) {
+    if (!budgetReached && roomSync && !roomSync.lastNonemptyAt && !roomSync.skippedAt) {
       const now = new Date().toISOString();
       if (verifiedRoomContent) await persist([], { ...roomSync,
-        ...(roomSync.status === "failed" ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now });
-      else if (roomSync.status !== "failed" && !(options.since && roomSync.historyDone)) {
-        errorCount += 1;
-        lastError = "No attributable member room messages observed yet; collection is not verified.";
-        await persist([], { ...roomSync, status: "failed", lastError });
-        console.error(JSON.stringify({ event: "source_failed", memberId: member.id, source: "room", error: lastError }));
+        ...(roomSync.lastError ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now });
+      else if (!roomSync.lastError && !(options.since && roomSync.historyDone)) {
+        await recordIssue(roomSync, new SourceVerificationPending("No attributable member room messages observed yet; collection is not verified."));
       }
     }
+    sourcesPending += pendingStreams.size;
     if (covered) membersCovered += 1;
     await store.ingestUnit(unit([]));
     if (budgetReached) break;
@@ -217,5 +256,5 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   if (imageFailures > 0) { errorCount += imageFailures; lastError = `${imageFailures} image uploads failed; retained for retry.`; }
   if (videoFailures > 0) { errorCount += videoFailures; lastError = `${videoFailures} video uploads failed; retained for retry.`; }
   await store.completeBatch({ batchId, completedAt: new Date().toISOString(), membersCovered, totalMembers: members.length, errorCount, errorMessage: lastError });
-  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, budgetReached, scopeComplete: !budgetReached && sourcesPending === 0 && errorCount === 0 };
+  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, sourcesSkipped, budgetReached, scopeComplete: !budgetReached && sourcesPending === 0 && errorCount === 0 };
 }

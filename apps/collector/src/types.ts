@@ -1,6 +1,11 @@
 import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry, FollowerSnapshot } from "@starter/shared";
 export type { CollectionSource, SourceSync } from "@starter/shared";
 
+// Coverage gaps are neither transport failures nor evidence of complete history.
+export class SourceVerificationPending extends Error {}
+export class SourceAuthenticationError extends Error {}
+export class CollectorStoreError extends Error {}
+
 export type CollectorMember = {
   id: string;
   name: string;

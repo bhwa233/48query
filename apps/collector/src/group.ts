@@ -10,6 +10,7 @@ import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
 import { runBatch } from "./run";
 import type { CollectorStore, SourceSync } from "./types";
+import { CollectorStoreError, SourceAuthenticationError } from "./types";
 import type { CollectorProgress } from "@starter/shared";
 import { CollectionBudget, CollectionStopped } from "./budget";
 import { collectMelee } from "./melee";
@@ -18,6 +19,7 @@ const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_R
 const manifestOnly = process.argv.includes("--manifest-only");
 const refresh = process.argv.includes("--refresh");
 const retryUnverified = process.argv.includes("--retry-unverified");
+const retrySkipped = process.argv.includes("--retry-skipped");
 const since = collectionSince();
 if (refresh && !collect) throw new Error("--refresh requires --collect.");
 if (collect && manifestOnly) throw new Error("Choose either --collect or --manifest-only.");
@@ -73,6 +75,7 @@ try {
     verified: state.entries.filter(e => e.identity === "verified").length, unverified: state.entries.filter(e => e.identity === "unverified").length,
     failed: state.entries.filter(e => e.identity === "failed").length, pending: state.entries.filter(e => e.identity === "pending").length,
     collected: state.entries.filter(e => e.collectedAt).length, sourceFailures: state.entries.reduce((sum, e) => sum + (e.errorCount ?? 0), 0),
+    sourcesSkipped: state.entries.reduce((sum, e) => sum + (e.sources?.filter(source => source.skippedAt).length ?? 0), 0),
     inspected: state.entries.filter(e => e.inspectedAt).length, inspectionFailures: state.entries.reduce((sum, e) => sum + (e.inspectionErrorCount ?? 0), 0), dryRun,
     processed, budgetReached, stopping, outcome: failures > 0 ? "failed" : budgetReached || stopping || state.entries.some(e => dryRun ? !e.inspectionScopeComplete : !e.scopeComplete) ? "pending" : "complete", elapsedSeconds: Math.round((Date.now() - started) / 1000) });
   await save();
@@ -130,7 +133,7 @@ try {
     for (const phase of ["incremental", "history"] as const) {
       const phaseBudget = phase === "incremental" ? incrementalBudget : budget;
       let phaseProcessed = 0;
-      for (const { entry } of groupWork(state.entries, { collect, refresh, retryUnverified, phase })) {
+      for (const { entry } of groupWork(state.entries, { collect, refresh, retryUnverified, retrySkipped, phase })) {
         if (phaseBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
         phaseProcessed += 1; processed += 1;
         activeBudget = phaseBudget.slice(300);
@@ -169,7 +172,7 @@ try {
               },
             };
             const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
-              since, checkpoints, budget: activeBudget, historyOnly: phase === "history",
+              since, checkpoints, budget: activeBudget, historyOnly: phase === "history", retrySkipped,
               maxHistoryPagesPerMember: phase === "history" ? Number(process.env.COLLECTOR_HISTORY_PAGES ?? 1) : 0,
               catalogRetryLimit: phase === "history" ? 2 : 0 });
             failures += result.errorCount;
@@ -186,7 +189,9 @@ try {
           else {
             failures += 1;
             entry.identityError = error instanceof Error ? error.message : "Group member verification interrupted.";
+            console.error(JSON.stringify({ event: "group_member_interrupted", memberId: entry.member?.id ?? null, phase, error: entry.identityError }));
             if (entry.identity !== "verified") entry.identity = "failed";
+            if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError) throw error;
             const cause = error instanceof Error && error.cause && typeof error.cause === "object" ? error.cause as Record<string, unknown> : {};
             if ([401, 403].includes(Number(cause.http)) || [401, 403, 1001, 2001].includes(Number(cause.business))) throw error;
           }

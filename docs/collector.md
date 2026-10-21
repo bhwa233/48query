@@ -188,7 +188,15 @@ COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
 
 `COLLECTOR_GROUP_LIMIT` 为单次处理候选数，范围 1–1000，默认 20；`COLLECTOR_MAX_PAGES`、`COLLECTOR_HISTORY_PAGES` 沿用采集器的来源页数预算。进度文件以原子替换保存，不包含凭证；同一进度文件以独占锁避免重入。正常中断会在当前成员处理后保存并释放锁；进程被强制杀死时，应先核实锁中的 PID 已退出，再清理该锁。相同账号的其他本地／远端采集任务仍须由操作者串行调度，文件锁不提供跨机器账号互斥。
 
-`--collect` 再次核验身份后才调用现有 `runBatch`。`collectedAt` 仅表示该成员本轮已尝试，必须结合 `sources`、`errorCount`、`scopeComplete` 判断真实结果，不能等同于七来源成功或历史完整。有限页数未到范围边界时仍为未验证，后续运行继续；实际请求或写入失败使最终退出码为 1；预算结束、尚待核验和未扫完范围报告为待续采，保留 `scopeComplete=false`，不冒充全量成功。`--refresh` 按上次尝试时间轮转已处理成员；失败尝试也更新轮转时间，避免重复卡在队首。`--update-roster` 刷新公开名单，并保留已发现的毕业成员。`--dry-run --collect` 使用独立的检查结果，不写库、不上传，也不设置真实 `collectedAt`。
+`--collect` 再次核验身份后才调用现有 `runBatch`。`collectedAt` 仅表示该成员本轮已尝试，必须结合 `sources`、`errorCount`、`scopeComplete` 判断真实结果，不能等同于七来源成功或历史完整。有限页数未到范围边界时仍为未验证，后续运行继续；预算结束、尚待核验和未扫完范围报告为待续采，保留 `scopeComplete=false`，不冒充全量成功。`--refresh` 按上次尝试时间轮转已处理成员；失败尝试也更新轮转时间，避免重复卡在队首。`--update-roster` 刷新公开名单，并保留已发现的毕业成员。`--dry-run --collect` 使用独立的检查结果，不写库、不上传，也不设置真实 `collectedAt`。
+
+### 失败来源跳过与待核验
+
+来源独立记录 `failureCount` 和 `skippedAt`，随现有 JSON 检查点保存到 D1／本地进度文件，无需新增表。某成员的某个来源连续 3 次请求失败或无法核验后，保存跳过时间、原游标和具体原因，之后的定时任务直接跳过该来源，其他来源及粉丝采集继续。一次完整成功的来源尝试清零连续失败数；运行预算耗尽、没有实际读取的历史阶段都不算恢复或失败。旧检查点缺少计数时，原 `failed` 状态按已有 1 次失败处理。
+
+无法确认历史房间归属、精华／目录原文或普通文本完整性属于待核验，记录 `status=pending`、`lastError` 和 `source_pending` 日志，不单独令 CI 失败。`legacy-video:end`／`legacy:房间号:end` 仅表示对应旧接口分支已到终点，恢复时不再向接口发送该标记，也不据此宣称文本历史完整。未达到跳过门槛的实际请求错误仍使任务失败；达到门槛后的局部来源错误记录为 `source_skipped`。鉴权和入库／检查点写入失败始终报错，不参与跳过计数。跳过项仍为覆盖缺口，`scopeComplete=false`，汇总日志包含 `sourcesSkipped`。
+
+跳过不会按定时或每周任务自动解除；确认来源可用后，可显式对本地 `group --collect --refresh --retry-skipped` 或普通采集／补采命令添加 `--retry-skipped`，使用原游标重新尝试并重新累计失败数。`--retry-unverified` 仅重查身份，不会重启已跳过的内容来源。
 
 WSL 终端若继承了 Windows 的 `APPDATA`，而登录凭证存放在 Linux 用户目录，应显式设置 `POCKET48_CRED_PATH` 指向现有 `cred.json`，不要另复制一份凭证。相同账号的任务须串行执行。
 

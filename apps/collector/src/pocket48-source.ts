@@ -2,6 +2,7 @@ import type { CatalogEntry, FollowerSnapshot, MeleePeriod, MeleeEntry } from "@s
 import { MeleePeriodSchema, MeleeEntrySchema } from "@starter/shared/schemas";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
+import { SourceAuthenticationError, SourceVerificationPending } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp, unsignedInteger } from "./pocket48-content";
 import { directoryEntries, readHistoricalDirectory, rosterName, type RosterCandidate } from "./group-roster";
 import { collectionSince } from "./collection-scope";
@@ -102,7 +103,8 @@ export class Pocket48Source implements CollectorSource {
     const payload = object(parsePocketJson(await response.text()));
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
       // Do not include upstream free-form error text, which can contain user data.
-      throw new Error(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status } });
+      const Failure = [401, 403].includes(response.status) || ["401", "403", "1001", "2001"].includes(string(payload.status) ?? "") ? SourceAuthenticationError : Error;
+      throw new Failure(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status } });
     }
     if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
     if (process.env.POCKET48_LOG_SCHEMA === "1") {
@@ -278,7 +280,7 @@ export class Pocket48Source implements CollectorSource {
         const content = object(value);
         const channelId = string(content.channelId);
         const serverId = string(object(content.jumpServerInfo).serverId ?? content.serverId);
-        if (!channelId || !serverId) throw new Error(`Pocket48 returned no readable room for member ${member.id}; account access or room mapping requires verification.`, { cause: "missing_room_mapping" });
+        if (!channelId || !serverId) throw new SourceVerificationPending(`Pocket48 returned no readable room for member ${member.id}; account access or room mapping requires verification.`, { cause: "missing_room_mapping" });
         const roomId = string(content.imRoomId ?? content.roomId);
         return { channelId, serverId, roomId };
       });
@@ -359,7 +361,7 @@ export class Pocket48Source implements CollectorSource {
     }
     if (!page.items.length && page.nextCursor === null) {
       if (kind === "IMAGE") return this.legacyRoomMedia(member, "VIDEO", null);
-      throw new Error("Legacy room returned no further attributable media; ordinary text history remains unverified.");
+      throw new SourceVerificationPending("Legacy room returned no further attributable media; ordinary text history remains unverified.");
     }
     return { ...page, nextCursor: page.nextCursor ? `legacy-${kind.toLowerCase()}:${page.nextCursor}` : kind === "IMAGE" ? "legacy-video:0" : "legacy-video:end" };
   }
@@ -368,7 +370,8 @@ export class Pocket48Source implements CollectorSource {
     const roomId = await this.resolveLegacyRoom(member);
     if (!roomId) return this.legacyRoomMedia(member, "IMAGE", null);
     const parts = cursor?.startsWith("legacy:") ? cursor.split(":") : null;
-    if (parts && (parts[1] !== roomId || !/^\d+$/.test(parts[2] ?? ""))) throw new Error("Legacy room history completeness remains unverified.");
+    if (parts?.length === 3 && parts[1] === roomId && parts[2] === "end") throw new SourceVerificationPending("Legacy room history completeness remains unverified.");
+    if (parts && (parts.length !== 3 || parts[1] !== roomId || !/^\d+$/.test(parts[2] ?? ""))) throw new Error("Invalid legacy room cursor.");
     const nextTime = parts?.[2] ?? "0";
     const content = await this.post("/im/api/v1/chatroom/msg/list/homeowner", { roomId, ownerId: member.id, needTop1Msg: "false", nextTime });
     const rows = contentList(content);
@@ -450,7 +453,7 @@ export class Pocket48Source implements CollectorSource {
       const anchor = page.times.find(at => (!this.since || at > Date.parse(this.since)) && (!time || at < time));
       if (anchor !== undefined) { time = anchor; content = await read(time); }
       else {
-        if (anchor === undefined && !page.next) throw new Error("Historical room has no further anchors; history completeness remains unverified.", { cause: "history_anchors_exhausted" });
+        if (anchor === undefined && !page.next) throw new SourceVerificationPending("Historical room has no further anchors; history completeness remains unverified.", { cause: "history_anchors_exhausted" });
         return { message: [], nextTime: `archive:seek:${time}:${page.next}` };
       }
     }
@@ -524,6 +527,7 @@ export class Pocket48Source implements CollectorSource {
     if (source === "room" && (cursor?.startsWith("legacy-image:") || cursor?.startsWith("legacy-video:"))) {
       const [prefix, time, extra] = cursor.split(":");
       if (!time || extra !== undefined) throw new Error("Invalid legacy media cursor.");
+      if (prefix === "legacy-video" && time === "end") throw new SourceVerificationPending("Legacy media feeds exhausted; ordinary text history remains unverified.");
       return this.legacyRoomMedia(member, prefix === "legacy-image" ? "IMAGE" : "VIDEO", time);
     }
     if (source === "room" && cursor?.startsWith("legacy:")) return this.legacyRoomPage(member, cursor);
@@ -574,14 +578,14 @@ export class Pocket48Source implements CollectorSource {
     // request. Keep the original boundary solely to stop reverse pagination.
     const values = allValues.filter(value => this.inRange(rawTime(value)));
     if (historicalRoom && source === "essence" && (!values.length || values.some(value => normalizeMessage(value, member, source, this.directory)?.memberId !== member.id))) {
-      throw new Error("Pocket48 historical essence candidate could not be verified from target-member messages; source retained for retry.");
+      throw new SourceVerificationPending("Pocket48 historical essence candidate could not be verified from target-member messages; source retained for retry.");
     }
     const originalsFound = new Map<string, CollectorMessage>();
     let originalLookups = 0;
     const canLookup = () => !this.options.budget?.().stopped && originalLookups < (this.options.maxOriginalLookups ?? Infinity);
     if (source === "album") {
       const room = historicalRoom ?? await this.resolveRoom(member);
-      if (historicalRoom && !values.length) throw new Error("Pocket48 historical album candidate has no verifiable originals; source retained for retry.");
+      if (historicalRoom && !values.length) throw new SourceVerificationPending("Pocket48 historical album candidate has no verifiable originals; source retained for retry.");
       const assets = values.flatMap(value => {
         const raw = object(value);
         const url = string(object(parsePocketJson(raw.bodys)).url);

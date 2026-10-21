@@ -85,6 +85,7 @@ export const SourceSyncSchema = z.object({
   incrementalCursor: z.string().max(500).nullable(), pendingLatestAt: z.string().nullable(), pendingLatestIds: z.array(z.string().max(200)).max(100),
   status: z.enum(["pending", "ok", "empty", "failed"]), lastError: z.string().max(1000).nullable(),
   lastSuccessAt: z.string().nullable(), lastNonemptyAt: z.string().nullable(),
+  failureCount: z.number().int().min(0).max(3).optional(), skippedAt: z.string().datetime().nullable().optional(),
 });
 
 export const CollectorSinceSchema = z.string().datetime().refine(value => Date.parse(value) >= Date.parse("2025-12-31T16:00:00.000Z"), "Collection starts no earlier than Beijing New Year 2026.");

@@ -1,4 +1,5 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
+import { CollectorStoreError, SourceVerificationPending } from "./types";
 import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, MeleePage, MeleeProgress } from "@starter/shared";
 import { object, parsePocketJson, timestamp } from "./pocket48-content";
 import type { CollectionBudget } from "./budget";
@@ -42,7 +43,7 @@ export class HttpIngestStore implements CollectorStore {
       try {
         response = await fetch(`${this.baseUrl.replace(/\/$/, "")}${path}`, { ...init, headers, signal: AbortSignal.timeout(30_000) });
       } catch (error) {
-        if (attempt === 2) throw error;
+        if (attempt === 2) throw new CollectorStoreError("Ingest connection attempts exhausted.", { cause: error });
         await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
         continue;
       }
@@ -51,8 +52,8 @@ export class HttpIngestStore implements CollectorStore {
         await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
         continue;
       }
-      if (!payload || typeof payload.ok !== "boolean") throw new Error(`Invalid ingest response (HTTP ${response.status}).`);
-      if (!response.ok || !payload.ok) throw new Error(payload.ok ? `Ingest request failed: ${response.status}` : `${payload.error.code}: ${payload.error.message}`);
+      if (!payload || typeof payload.ok !== "boolean") throw new CollectorStoreError(`Invalid ingest response (HTTP ${response.status}).`);
+      if (!response.ok || !payload.ok) throw new CollectorStoreError(payload.ok ? `Ingest request failed: ${response.status}` : `${payload.error.code}: ${payload.error.message}`);
       return (envelope ? payload : payload.data) as T;
     }
     throw new Error("Ingest request attempts exhausted.");
@@ -79,10 +80,10 @@ export class HttpIngestStore implements CollectorStore {
       const raw = object(parsePocketJson(entry.rawJson));
       const item = raw.format === "pocket48-album-lookup-v1" ? object(raw.item) : raw;
       const at = timestamp(source === "album" ? item.createTime : item.createAt);
-      if (!at) throw new Error("Catalog entry has no verifiable date; scoped verification remains incomplete.");
+      if (!at) throw new SourceVerificationPending("Catalog entry has no verifiable date; scoped verification remains incomplete.");
       return Date.parse(at) >= Date.parse(this.since!);
     });
-    if (entries.length === 50 && eligible.length === 0) throw new Error("Older catalog rows fill the queue window; scoped pending coverage remains unverified.");
+    if (entries.length === 50 && eligible.length === 0) throw new SourceVerificationPending("Older catalog rows fill the queue window; scoped pending coverage remains unverified.");
     return eligible.slice(0, limit);
   }
 

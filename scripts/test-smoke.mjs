@@ -241,12 +241,17 @@ try {
   assert.equal(restored.sources[0].historyCursor, "older");
   assert.equal(restored.revision, 1);
   assert.deepEqual((await request(origin, readProgress("2026-01-01T00:00:00.000Z"), 200, imageOptions)).json().data, []);
-  const advanced = { ...restored, sources: [{ ...restored.sources[0], historyCursor: "oldest" }] };
+  const advanced = { ...restored, sources: [{ ...restored.sources[0], historyCursor: "oldest", status: "failed", failureCount: 3,
+    skippedAt: "2026-10-18T01:00:00.000Z", lastError: "Repeated source outage" }] };
   assert.equal((await request(origin, progressPath, 200, saveProgress(advanced))).json().data.revision, 2);
   await request(origin, progressPath, 409, saveProgress(restored));
-  assert.equal((await request(origin, readProgress(since), 200, imageOptions)).json().data[0].sources[0].historyCursor, "oldest");
+  const skippedSource = (await request(origin, readProgress(since), 200, imageOptions)).json().data[0].sources[0];
+  assert.equal(skippedSource.historyCursor, "oldest");
+  assert.equal(skippedSource.failureCount, 3, "Failure counts must survive the real API and D1 JSON checkpoint round trip");
+  assert.equal(skippedSource.skippedAt, "2026-10-18T01:00:00.000Z");
+  assert.equal(skippedSource.historyDone, false);
   assert.deepEqual((await request(origin, "/api/query/ingest/state/smoke-member", 200, imageOptions)).json().data.sources, [], "Scoped progress must not replace all-history checkpoints");
-  console.log("PASS scoped collector progress: durable resume, scope isolation and stale writer rejection");
+  console.log("PASS scoped collector progress: durable resume, persisted source skips, scope isolation and stale writer rejection");
   const pendingEntry = { id: "a".repeat(64), source: "album", rawJson: JSON.stringify({ createTime: 1661327674734, bodys: { url: "https://source.48.cn/unverified.jpg" } }), status: "pending" };
   const catalogPath = "/api/query/ingest/catalog?memberId=smoke-member&source=album&limit=50";
   await request(origin, catalogPath, 401);

@@ -18,6 +18,100 @@ import type { MeleePage, MeleeProgress } from "../../packages/shared";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
 
+// Production resumed its own legacy-video:end marker as a numeric timestamp,
+// failing every later run after both attributable media feeds were exhausted.
+test("legacy media exhaustion remains pending and repeated gaps are skipped across restarts", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  let requests = 0;
+  const source = new Pocket48Source({ since: null, token: "synthetic", pa: "synthetic", minIntervalMs: 0, sources: ["room"], fetchImpl: async (url, init) => {
+    requests++;
+    if (String(url).endsWith("/jump")) return Response.json({ status: 200, content: {} });
+    if (String(url).endsWith("/im/search")) return Response.json({ status: 200, content: [] });
+    const body = JSON.parse(String(init?.body));
+    const kind = body.extMsgType;
+    return Response.json({ status: 200, content: { message: [{ msgidClient: kind, msgTime: Date.parse("2026-10-01T00:00:00Z"), msgType: kind,
+      bodys: { url: `https://source.48.cn/${kind}.jpg` }, extInfo: { user: { userId: "1" } } }], nextTime: 0 } });
+  } });
+  let saved: SourceSync[] = [];
+  const checkpoints = { read: () => saved, write: async (_id: string, sync: SourceSync) => { saved = JSON.parse(JSON.stringify([sync])); } };
+  const store = new DryRunStore();
+  const single = { sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source) };
+  const options = { since: collectionSince(), checkpoints, maxPagesPerMember: 1, maxHistoryPagesPerMember: 1 };
+  await runBatch(single, store, options);
+  assert.equal(saved[0]?.historyCursor, "legacy-video:end");
+  const requestsAtEnd = requests;
+  const pending = await runBatch(single, store, { ...options, historyOnly: true });
+  assert.equal(pending.errorCount, 0, "An exhausted media feed is a coverage gap, not a failed timestamp request");
+  assert.equal(saved[0]?.status, "pending");
+  assert.equal(saved[0]?.historyDone, false);
+  assert.equal(requests, requestsAtEnd, "The terminal marker must never reach the upstream API");
+  await runBatch(single, store, { ...options, historyOnly: true });
+  await runBatch(single, store, { ...options, historyOnly: true });
+  const skipped = await runBatch(single, store, options);
+  assert.equal(skipped.sourcesSkipped, 1);
+  assert.equal(skipped.scopeComplete, false, "Skipped history must never certify coverage");
+  assert.ok(saved[0]?.skippedAt);
+  assert.equal(requests, requestsAtEnd, "A persisted skip also suppresses the next incremental refresh");
+});
+
+test("repeated source outages skip only that source and successful recovery resets the streak", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  let saved: SourceSync[] = [];
+  let brokenReads = 0;
+  let healthyReads = 0;
+  let unavailable = true;
+  const checkpoints = { read: () => saved, write: async (_id: string, sync: SourceSync) => {
+    saved = JSON.parse(JSON.stringify([...saved.filter(item => item.source !== sync.source), sync]));
+  } };
+  const source = { sources: ["album", "posts"] as const, listMembers: async () => [member], listMessages: async () => ({ items: [], nextCursor: null }),
+    listContent: async (_member: typeof member, stream: string) => {
+      if (stream === "album") { brokenReads++; if (unavailable) throw new Error("Upstream business 500"); }
+      else healthyReads++;
+      return { items: [], nextCursor: null };
+    } };
+  const options = { since: collectionSince(), checkpoints, maxHistoryPagesPerMember: 0 };
+  const store = new DryRunStore();
+  assert.equal((await runBatch(source, store, options)).errorCount, 1);
+  unavailable = false;
+  await runBatch(source, store, options);
+  unavailable = true;
+  assert.equal((await runBatch(source, store, options)).errorCount, 1);
+  assert.equal(saved.find(sync => sync.source === "album")?.failureCount, 1, "A recovered source starts a new failure streak");
+  await runBatch(source, store, options);
+  assert.equal((await runBatch(source, store, options)).errorCount, 0, "The third failure is recorded as a skip");
+  const previousReads = brokenReads;
+  const skipped = await runBatch(source, store, options);
+  assert.equal(brokenReads, previousReads);
+  assert.equal(healthyReads, 6);
+  assert.equal(skipped.sourcesSkipped, 1);
+  assert.equal(skipped.scopeComplete, false);
+  unavailable = false;
+  await runBatch(source, store, { ...options, retrySkipped: true });
+  assert.equal(saved.find(sync => sync.source === "album")?.skippedAt, null);
+  assert.equal(saved.find(sync => sync.source === "album")?.failureCount, 0);
+});
+
+// A broken source may be skipped; an expired credential or failed durable
+// write must still fail the run, even just before its third source failure.
+test("source skip thresholds never suppress authentication or ingestion failures", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  let saved: SourceSync[] = [{ source: "posts", historyCursor: "older", historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null,
+    pendingLatestAt: null, pendingLatestIds: [], status: "failed", lastError: "Previous source failure", lastSuccessAt: null, lastNonemptyAt: null, failureCount: 2 }];
+  const checkpoints = { read: () => saved, write: async (_id: string, sync: SourceSync) => { saved = [sync]; } };
+  const denied = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0,
+    fetchImpl: async () => Response.json({ status: 401, content: {} }) });
+  const source = { sources: ["posts"] as const, listMembers: async () => [member], listMessages: denied.listMessages.bind(denied), listContent: denied.listContent.bind(denied) };
+  await assert.rejects(runBatch(source, new DryRunStore(), { since: collectionSince(), checkpoints }), /business 401/);
+  assert.equal(saved[0]?.skippedAt, undefined);
+  class FailingStore extends DryRunStore {
+    override async ingestUnit(unit: IngestUnit) { if (unit.messages.length) throw new Error("D1 write unavailable"); await super.ingestUnit(unit); }
+  }
+  const readable = { ...source, listContent: async () => ({ items: [{ id: "post", memberId: "1", occurredAt: "2026-10-01T00:00:00Z", type: "POST" }], nextCursor: null }) };
+  await assert.rejects(runBatch(readable, new FailingStore(), { since: collectionSince(), checkpoints }), /D1 write unavailable/);
+  assert.equal(saved[0]?.failureCount, 2);
+  assert.equal(saved[0]?.historyCursor, "older", "A failed durable write must not advance or skip its checkpoint");
+});
+
 test("follower collection distinguishes unavailable or rounded values from a verified zero", async () => {
   const member = { id: "607515", name: "Member", groupName: "SNH48" };
   for (const followers of [undefined, null, "4.3万", -1, 1.5, true, "9007199254740993", 0, "43320"]) {
@@ -488,15 +582,23 @@ test("keeps latest sync and history independent, with zero recording requests", 
   assert.equal(saved.incrementalCursor, null);
 });
 
-test("an empty room is reported as unverified without losing the batch", async () => {
+test("an empty room remains pending and repeated unverifiable results are skipped", async () => {
   class EmptySource extends DemoSource {
     override async listMessages() { return { items: [], nextCursor: null }; }
   }
   const store = new DryRunStore();
+  let saved: SourceSync | undefined;
+  store.getSyncState = async memberId => ({ memberId, messageCursor: null, recordingCursor: null, updatedAt: "", lastError: null, sources: saved ? [saved] : [] });
+  const ingest = store.ingestUnit.bind(store);
+  store.ingestUnit = async unit => { await ingest(unit); if (unit.sync) saved = unit.sync; };
   const result = await runBatch(new EmptySource(), store);
-  assert.equal(result.errorCount, 1);
+  assert.equal(result.errorCount, 0);
   assert.equal(result.membersCovered, 0);
-  assert.equal(store.units.at(-2)?.sync?.historyDone, false);
+  assert.equal(saved?.historyDone, false);
+  assert.equal(saved?.status, "pending");
+  await runBatch(new EmptySource(), store);
+  await runBatch(new EmptySource(), store);
+  assert.ok(saved?.skippedAt, "Successful empty transport responses must not reset the verification failure streak");
 });
 
 // Album lookups recovered genuine room text after the room feed had failed,

@@ -110,7 +110,7 @@ const checkpoints = since && !mediaOnly ? dryRun ? {
   read: (id: string) => memoryCheckpoints.get(id) ?? [],
   write: async (id: string, sync: SourceSync) => { memoryCheckpoints.set(id, [...(memoryCheckpoints.get(id) ?? []).filter(item => item.source !== sync.source), sync]); },
 } : await openScopedCheckpoints(process.env.COLLECTOR_CHECKPOINT_STATE ?? join(dirname(CREDENTIAL_PATH), "collection-scope.json"), since, store instanceof HttpIngestStore ? store : undefined) : undefined;
-const runOptions = { since, checkpoints, budget, maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
+const runOptions = { since, checkpoints, budget, maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", retrySkipped: process.argv.includes("--retry-skipped"), catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
 let errorCount = 0;
 if (backfillOnly) {
   if (mediaOnly || dryRun || !(source instanceof Pocket48Source)) throw new Error("Backfill requires a writable Pocket48 source.");
