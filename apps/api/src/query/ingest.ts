@@ -65,7 +65,7 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
   if (input.messages.some(message => (message.author && message.author.id !== message.memberId) || (message.senderId && message.senderId !== message.memberId))) return c.json({ ok: false as const, error: { code: "invalid_author", message: "Message author and sender must match." } }, 400);
   if (input.followerSnapshot && Date.parse(input.followerSnapshot.observedAt) > Date.now() + 300_000) return c.json({ ok: false as const, error: { code: "invalid_snapshot", message: "Follower observation cannot be in the future." } }, 400);
   const statements = [
-    db.prepare("INSERT INTO query_batches (id, stat_date, status, started_at, members_covered, total_members, error_count) VALUES (?, ?, 'running', ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET members_covered = excluded.members_covered, total_members = excluded.total_members, error_count = excluded.error_count, error_message = NULL").bind(input.batchId, input.statDate, input.startedAt, input.membersCovered, input.totalMembers, input.errorCount),
+    db.prepare("INSERT INTO query_batches (id, stat_date, status, started_at, members_covered, total_members, error_count, counts_tracked) VALUES (?, ?, 'running', ?, ?, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET members_covered = excluded.members_covered, total_members = excluded.total_members, error_count = excluded.error_count, error_message = NULL").bind(input.batchId, input.statDate, input.startedAt, input.membersCovered, input.totalMembers, input.errorCount),
     memberStatement(db, input.member, now),
     db.prepare("INSERT INTO query_sync_state (member_id, message_cursor, recording_cursor, updated_at, last_error) VALUES (?, ?, ?, ?, NULL) ON CONFLICT(member_id) DO UPDATE SET message_cursor = excluded.message_cursor, updated_at = excluded.updated_at").bind(input.member.id, input.messageCursor ?? null, input.recordingCursor ?? null, now),
   ];
@@ -98,6 +98,17 @@ app.openapi(createRoute({ method: "post", path: "/unit", request: { body: { requ
       ELSE excluded.raw_json END, updated_at = excluded.updated_at`)
     .bind(input.member.id, entry.id, entry.source, entry.rawJson, entry.status, now));
   if (input.sync) statements.push(db.prepare("INSERT INTO query_source_sync (member_id, source, state_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(member_id, source) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at").bind(input.member.id, input.sync.source, JSON.stringify(input.sync), now));
+  // Uploads and transport retries can ingest the same page repeatedly. Keep
+  // unique batch contents in the same transaction as the content/checkpoint.
+  const items = input.messages.filter(message => message.parseStatus === "parsed" && ["text", "image", "video", "reply", "post"].includes(message.kind))
+    .flatMap(message => [
+      { kind: "message", id: message.id },
+      ...message.images.map(image => ({ kind: "image", id: image.id })),
+      ...message.videos.map(video => ({ kind: "video", id: video.id })),
+    ]);
+  if (items.length) statements.push(db.prepare(`INSERT INTO query_batch_items (batch_id, kind, item_id)
+    SELECT ?, json_extract(value, '$.kind'), json_extract(value, '$.id') FROM json_each(?) WHERE true
+    ON CONFLICT(batch_id, kind, item_id) DO NOTHING`).bind(input.batchId, JSON.stringify(items)));
   await db.batch(statements);
   return c.json({ ok: true as const, data: { batchId: input.batchId, memberId: input.member.id, messagesWritten: input.messages.length, recordingsWritten: 0 } }, 200);
 });

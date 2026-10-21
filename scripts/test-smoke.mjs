@@ -318,6 +318,20 @@ try {
   const videoResults = (await request(origin, "/api/query/messages?kind=video")).json().data;
   assert.deepEqual(videoResults.find(message => message.id === videoMessage.id).videos[0], { ...video, thumbnailUrl: null, skipReason: null });
   assert.deepEqual((await request(origin, "/api/query/ingest/videos", 200, imageOptions)).json().data, []);
+  // Pre-upload writes and retries must count each item once per batch, while
+  // collecting the same saved content in another batch still counts there.
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...videoPage, batchId: "smoke-replayed-batch" }) });
+  const batchCounts = launch(["exec", "wrangler", "d1", "execute", "APP_DB", "--config", "wrangler.d1.jsonc", "--local", "--persist-to", state,
+    "--command", "SELECT batch_id, kind, COUNT(*) AS count FROM query_batch_items WHERE batch_id IN ('smoke-batch', 'smoke-replayed-batch') GROUP BY batch_id, kind ORDER BY batch_id, kind", "--json"], { cwd: apiDirectory });
+  assert.deepEqual(JSON.parse(await batchCounts.complete())[0].results, [
+    { batch_id: "smoke-batch", kind: "image", count: 1 },
+    { batch_id: "smoke-batch", kind: "message", count: 4 },
+    { batch_id: "smoke-batch", kind: "video", count: 2 },
+    { batch_id: "smoke-replayed-batch", kind: "message", count: 2 },
+    { batch_id: "smoke-replayed-batch", kind: "video", count: 2 },
+  ]);
+  servers.delete(batchCounts);
+  console.log("PASS batch contents: idempotent message/media counts and isolation across batches");
   const cacheRequest = (roomId, occurredAt = videoMessage.occurredAt) => ({ ...post({ scope: "room", roomId, assets: [{ id: video.id, occurredAt }] }), headers: { ...imageOptions.headers, "Content-Type": "application/json" } });
   const verified = (await request(origin, "/api/query/ingest/verified-media", 200, cacheRequest(videoMessage.roomId))).json().data;
   assert.deepEqual(verified.map(message => message.id), [videoMessage.id]);

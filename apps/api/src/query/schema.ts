@@ -106,7 +106,14 @@ export const queryBatches = sqliteTable("query_batches", {
   totalMembers: integer("total_members").notNull().default(0),
   errorCount: integer("error_count").notNull().default(0),
   errorMessage: text("error_message"),
+  countsTracked: integer("counts_tracked", { mode: "boolean" }).notNull().default(false),
 });
+
+export const queryBatchItems = sqliteTable("query_batch_items", {
+  batchId: text("batch_id").notNull().references(() => queryBatches.id),
+  kind: text("kind", { enum: ["message", "image", "video"] }).notNull(),
+  itemId: text("item_id").notNull(),
+}, table => [primaryKey({ columns: [table.batchId, table.kind, table.itemId] })]);
 
 export const querySyncState = sqliteTable("query_sync_state", {
   memberId: text("member_id").primaryKey(),
