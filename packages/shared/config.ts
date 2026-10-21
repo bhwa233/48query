@@ -31,7 +31,7 @@ export function parseWebEnv(env: {
       "NEXT_PUBLIC_SITE_URL",
       true,
     ),
-    apiBaseUrl: env.NEXT_PUBLIC_API_BASE_URL?.trim()
+    apiBaseUrl: env.NEXT_PUBLIC_API_BASE_URL?.trim() === "/" ? "/" : env.NEXT_PUBLIC_API_BASE_URL?.trim()
       ? parseHttpUrl(
           env.NEXT_PUBLIC_API_BASE_URL.trim(),
           "NEXT_PUBLIC_API_BASE_URL",

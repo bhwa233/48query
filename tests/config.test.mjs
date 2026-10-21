@@ -26,6 +26,7 @@ test("standalone defaults and invalid URL boundaries", () => {
       .apiBaseUrl,
     "https://api.example.org/v1",
   );
+  assert.equal(parseWebEnv({ NEXT_PUBLIC_API_BASE_URL: "/" }).apiBaseUrl, "/");
 });
 
 test("CORS accepts only exact origins and normalizes duplicates", () => {
@@ -157,6 +158,11 @@ test("deployment guard rejects placeholders and overrides and accepts customized
       const result = run(profile);
       assert.equal(result.status, 0, result.stderr);
     }
+    await writeFile(join(directory, "apps/web/wrangler.jsonc"), JSON.stringify({ name: "custom-web", vars: { ...vars, NEXT_PUBLIC_API_BASE_URL: "/" } }));
+    assert.match(run("web").stderr, /QUERY_API service binding/);
+    await writeFile(join(directory, "apps/web/wrangler.jsonc"), JSON.stringify({ name: "custom-web", vars: { ...vars, NEXT_PUBLIC_API_BASE_URL: "/" }, services: [{ binding: "QUERY_API", service: "custom-api" }] }));
+    assert.equal(run("web").status, 0);
+    await writeFile(join(directory, "apps/web/wrangler.jsonc"), JSON.stringify({ name: "custom-web", vars }));
     await writeFile(
       join(directory, "apps/web/.env.local"),
       "NEXT_PUBLIC_SITE_URL=http://localhost:3000\n",

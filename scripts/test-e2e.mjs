@@ -10,8 +10,8 @@ import {
 
 const state = await mkdtemp(join(tmpdir(), "starter-e2e-"));
 const servers = [];
-function launch(args, options) {
-  const server = start(args, options);
+function launch(args, options = {}) {
+  const server = start(args, { ...options, env: { ...options.env, WRANGLER_REGISTRY_PATH: join(state, "registry"), MINIFLARE_REGISTRY_PATH: join(state, "registry") } });
   servers.push(server);
   return server;
 }
@@ -107,7 +107,7 @@ try {
     cwd: webDirectory,
     env: {
       NEXT_PUBLIC_SITE_URL: webOrigin,
-      NEXT_PUBLIC_API_BASE_URL: apiOrigin,
+      NEXT_PUBLIC_API_BASE_URL: "/",
     },
   });
   await web.ready(`${webOrigin}/en`);

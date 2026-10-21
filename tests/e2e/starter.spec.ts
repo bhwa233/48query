@@ -7,6 +7,11 @@ test.beforeEach(({ page }) => {
   const messages: string[] = [];
   errors.set(page, messages);
   expectedMissing.set(page, new Set());
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/query/") && url.origin !== process.env.STARTER_E2E_WEB_URL)
+      messages.push(`Browser archive query left the Web origin: ${url.origin}`);
+  });
   page.on("pageerror", (error) => messages.push(error.message));
   page.on("console", (message) => {
     if (message.type() !== "error") return;
@@ -106,11 +111,13 @@ test("theme defaults to dark even on a light system and preserves explicit choic
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/en");
   await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(page.locator('main:visible [aria-busy="true"]:visible')).toHaveCount(0);
   await page.getByRole("button", { name: "Change theme" }).click();
   await page.getByRole("menuitem", { name: "Light", exact: true }).click();
   await expect(page.locator("html")).toHaveClass(/light/);
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/light/);
+  await expect(page.locator('main:visible [aria-busy="true"]:visible')).toHaveCount(0);
   await page.getByRole("button", { name: "Change theme" }).click();
   await page.getByRole("menuitem", { name: "Dark", exact: true }).click();
   await page.reload();

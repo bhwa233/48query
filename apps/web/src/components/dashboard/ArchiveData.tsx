@@ -22,7 +22,7 @@ export function useArchiveQuery<T>(apiBaseUrl: string | undefined, path: string)
   useEffect(() => {
     if (!apiBaseUrl) return;
     const controller = new AbortController();
-    fetch(`${apiBaseUrl}${path}`, { headers: { Accept: "application/json" }, signal: controller.signal })
+    fetch(`${apiBaseUrl.replace(/\/$/, "")}${path}`, { headers: { Accept: "application/json" }, signal: controller.signal })
       .then(async response => {
         if (!response.ok) throw new Error("Archive request failed");
         const payload = await response.json() as T & { ok?: boolean };

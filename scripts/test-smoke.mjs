@@ -11,8 +11,8 @@ import {
 
 const state = await mkdtemp(join(tmpdir(), "starter-smoke-"));
 const servers = new Set();
-function launch(args, options) {
-  const server = start(args, options);
+function launch(args, options = {}) {
+  const server = start(args, { ...options, env: { ...options.env, WRANGLER_REGISTRY_PATH: join(state, "registry"), MINIFLARE_REGISTRY_PATH: join(state, "registry") } });
   servers.add(server);
   return server;
 }
@@ -83,6 +83,11 @@ try {
   }
   for (const path of ["/robots.txt", "/sitemap.xml", "/favicon.svg"])
     await request(webOrigin, path);
+  const unboundQuery = await request(webOrigin, "/api/query/rankings", 503);
+  assert.equal(unboundQuery.json().error.code, "api_unavailable");
+  const privateQuery = await request(webOrigin, "/api/query/ingest/state/smoke-member", 404);
+  assert.equal(privateQuery.json().ok, false);
+  await request(webOrigin, "/api/query/members", 405, post({}));
   const sitemap = await request(webOrigin, "/sitemap.xml");
   assert.ok(sitemap.text.includes("/zh/articles/welcome"));
   console.log(
@@ -408,8 +413,6 @@ try {
   console.log(
     "PASS D1 API: uninitialized database, local migration, creation/readback, validation, no-store",
   );
-  await close(database);
-
   const previewPort = await freePort();
   const previewOrigin = `http://localhost:${previewPort}`;
   const preview = launch(
@@ -449,6 +452,19 @@ try {
   ];
   assert.ok(assets.length > 0, "Built Worker must reference client assets");
   for (const asset of assets) await request(previewOrigin, asset);
+  const proxied = await request(previewOrigin, "/api/query/messages?memberId=smoke-member&limit=1");
+  const page = proxied.json();
+  assert.equal(page.data.length, 1);
+  assert.ok(page.nextCursor, "Same-origin queries must preserve pagination cursors");
+  const next = await request(previewOrigin, `/api/query/messages?memberId=smoke-member&limit=1&before=${encodeURIComponent(page.nextCursor)}`);
+  assert.notEqual(next.json().data[0].id, page.data[0].id);
+  assert.equal(proxied.response.headers.get("cache-control"), "public, max-age=60, stale-while-revalidate=300");
+  assert.equal((await request(previewOrigin, "/api/query/members/smoke-member")).json().data.id, "smoke-member");
+  await request(previewOrigin, "/api/query/rankings?from=invalid", 400);
+  assert.equal((await request(previewOrigin, "/api/query/melee")).json().ok, true);
+  await request(previewOrigin, "/api/query/ingest/progress", 404, imageOptions);
+  await request(previewOrigin, "/api/query/ingest/unit", 405, ingestOptions);
+  console.log("PASS same-origin query binding: real D1, pagination, upstream errors/cache headers and private/write route isolation");
   console.log(
     `PASS built Web Worker: locales, MDX, 404 and ${assets.length} client assets`,
   );

@@ -13,6 +13,8 @@ export function resolveWebEnv(mode: string) {
   };
   // Vite gives shell variables precedence over .env files, including .env.local.
   const loaded = loadEnv(mode, directory, "NEXT_PUBLIC_");
-  const values = { ...config.vars, ...loaded };
+  // Development stays standalone unless the developer explicitly enables API
+  // queries. Production uses the checked-in same-origin service binding.
+  const values = { ...(mode === "development" ? {} : config.vars), ...loaded };
   return parseWebEnv(values);
 }

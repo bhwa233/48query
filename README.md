@@ -86,7 +86,9 @@ D1 profile 使用 `apps/api/wrangler.d1.jsonc`；占位 database ID 只用于本
 
 首次运行浏览器测试前执行 `pnpm exec playwright install chromium`。自动测试使用动态端口和临时 D1，结束后清理自身进程与数据；先停止当前工作树的 Vinext 开发服务，再运行回归。CI 按顺序执行完整检查、安全审计、启动回归和 Chromium 交互测试。
 
-公开环境配置的优先级为：**命令行环境变量 > Vite 环境文件 > Web Wrangler vars > 独立运行默认值**。`.env.local` 也会参与生产构建；所有 `NEXT_PUBLIC_*` 都是公开值。`pnpm env:check production` 检查生产模式的格式；发布校验还要求实际构建 URL 与生产 Wrangler vars 一致，避免本地文件覆盖生产地址。CORS 来源只接受不带路径的 HTTP(S) origin，不接受通配符。
+公开环境配置的优先级为：**命令行环境变量 > Vite 环境文件 > 生产模式的 Web Wrangler vars > 独立运行默认值**。开发模式不继承生产公开地址，默认独立运行；`.env.local` 也会参与生产构建，所有 `NEXT_PUBLIC_*` 都是公开值。`pnpm env:check production` 检查生产模式的格式；发布校验还要求实际构建 URL 与生产 Wrangler vars 一致，避免本地文件覆盖生产地址。CORS 来源只接受不带路径的 HTTP(S) origin，不接受通配符。
+
+生产归档查询使用 `NEXT_PUBLIC_API_BASE_URL=/`：浏览器访问本站 `/api/query/...`，Web Worker 通过 `QUERY_API` Service Binding 内部调用 `48query-api`，不再直连 `workers.dev`。转发仅开放公开 GET/HEAD 查询，保留筛选、分页、上游状态和缓存头；不转发 Cookie、鉴权头或采集写入接口。没有本地 API 时，仅查询端点返回明确 503，页面仍能运行。要在本地验证同域链路，启动 D1 API 并显式设置 `NEXT_PUBLIC_API_BASE_URL=/`。修改绑定后运行 Web/API 的 `cf-typegen`；`pnpm test:smoke` 和 `pnpm test:e2e` 使用临时本地 D1 验证实际 Service Binding。
 
 ## 目录与修改顺序
 

@@ -17,8 +17,14 @@
     "directory": "./dist/client",
     "binding": "ASSETS"
   },
+  "services": [
+    {
+      "binding": "QUERY_API",
+      "service": "48query-api"
+    }
+  ],
   "vars": {
     "NEXT_PUBLIC_SITE_URL": "https://48.bhwa233.com",
-    "NEXT_PUBLIC_API_BASE_URL": "https://48query-api.404174262.workers.dev"
+    "NEXT_PUBLIC_API_BASE_URL": "/"
   }
 }

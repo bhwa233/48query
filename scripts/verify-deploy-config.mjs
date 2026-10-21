@@ -47,14 +47,16 @@ if (profile === "web") {
   if (!isPublicHttps(config.vars?.NEXT_PUBLIC_SITE_URL))
     problems.push("Set a production HTTPS site URL.");
   const api = config.vars?.NEXT_PUBLIC_API_BASE_URL;
-  if (api && !isPublicHttps(api))
-    problems.push("Use an HTTPS API URL or leave it empty for standalone Web.");
+  if (api && api !== "/" && !isPublicHttps(api))
+    problems.push("Use a same-origin / or HTTPS API URL, or leave it empty for standalone Web.");
+  if (api === "/" && !config.services?.some(service => service.binding === "QUERY_API" && service.service && !service.service.startsWith("starter-")))
+    problems.push("Same-origin queries require a QUERY_API service binding.");
   const { resolveWebEnv } = await import("../apps/web/env.config.ts");
   const effective = resolveWebEnv("production");
   if (
     effective.siteUrl !==
       config.vars?.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ||
-    effective.apiBaseUrl !== (api ?? "").replace(/\/$/, "")
+    effective.apiBaseUrl !== (api === "/" ? "/" : (api ?? "").replace(/\/$/, ""))
   )
     problems.push(
       "Build-time environment overrides Wrangler URLs. Align shell/.env files with production vars before deployment.",
