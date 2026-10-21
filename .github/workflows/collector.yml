@@ -37,6 +37,10 @@ on:
         description: "Log response field names/types only (no content or credentials)"
         type: boolean
         default: false
+      defer_media:
+        description: "Defer media uploads so a targeted run spends its budget on content"
+        type: boolean
+        default: false
       sources:
         description: "Comma-separated content sources; empty uses all seven"
         required: false
@@ -91,7 +95,7 @@ jobs:
       COLLECTOR_GROUP_LIMIT: ${{ (inputs.max_members != '0' && inputs.max_members) || vars.COLLECTOR_GROUP_LIMIT || '1000' }}
       COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || '60' }}
       COLLECTOR_MAX_SECONDS: "3600"
-      COLLECTOR_DEFER_MEDIA: ${{ (inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id && '1' || '0' }}
+      COLLECTOR_DEFER_MEDIA: ${{ (inputs.defer_media || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id)) && '1' || '0' }}
       COLLECTOR_GROUP_REFRESH: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
       COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ github.event_name == 'schedule' && '1' || '0' }}
     steps:

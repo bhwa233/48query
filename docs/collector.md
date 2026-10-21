@@ -198,6 +198,8 @@ COLLECTOR_GROUP_STATE=/absolute/private/group-progress.json \
 
 跳过不会按定时或每周任务自动解除；确认来源可用后，可显式对本地 `group --collect --refresh --retry-skipped` 或普通采集／补采命令添加 `--retry-skipped`，使用原游标重新尝试并重新累计失败数。`--retry-unverified` 仅重查身份，不会重启已跳过的内容来源。
 
+手动 Actions 可设 `defer_media=true`，暂缓当前任务的旧媒体补传和正文附件上传，把短时预算留给指定成员的正文及检查点。已保存的待上传附件由常规定时媒体任务处理；不改变定时任务既有的媒体分离策略。
+
 WSL 终端若继承了 Windows 的 `APPDATA`，而登录凭证存放在 Linux 用户目录，应显式设置 `POCKET48_CRED_PATH` 指向现有 `cred.json`，不要另复制一份凭证。相同账号的任务须串行执行。
 
 ### 2026 年起的采集范围
