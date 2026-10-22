@@ -1,5 +1,6 @@
 import { object, string } from "./pocket48-content";
 import { readFile } from "node:fs/promises";
+import { SourceRequestSkipped } from "./types";
 
 export const OFFICIAL_ROSTER_URL = "https://h5.48.cn/resource/jsonp/allmembers.php?gid=00";
 export const COMMUNITY_DIRECTORY_URL = "https://fastly.jsdelivr.net/gh/duan602728596/qqtools@main/packages/NIMTest/node/roomId.json";
@@ -32,6 +33,7 @@ export async function readHistoricalDirectory(options: { url?: string; fetchImpl
 export async function readGroupRoster(options: { directoryUrl?: string; historicalUrl?: string } = {}) {
   const read = async (url: string): Promise<unknown> => {
     const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (response.status === 502) throw new SourceRequestSkipped("Roster request failed (HTTP 502).");
     if (!response.ok) throw new Error(`Roster request failed (HTTP ${response.status}).`);
     return response.json() as Promise<unknown>;
   };

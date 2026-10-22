@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { contentList, normalizeMessage, parsePocketJson } from "../../apps/collector/src/pocket48-content";
 import { runBatch } from "../../apps/collector/src/run";
 import { DryRunStore } from "../../apps/collector/src/dry-run-store";
@@ -17,6 +23,53 @@ import { collectMelee } from "../../apps/collector/src/melee";
 import type { MeleePage, MeleeProgress } from "../../packages/shared";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
+
+// Run 39742139728 aborted before collecting any member: --update-roster
+// received HTTP 502 despite having restored a valid progress file.
+test("group startup reuses saved progress only for a roster HTTP 502 and can refresh next run", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "48query-roster-"));
+  const statePath = join(temporary, "progress.json");
+  const previous: GroupProgress = { version: 1, since: collectionSince(), createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z",
+    rosterRefreshedAt: "2026-10-01T00:00:00Z", officialRows: 1, excluded: [], entries: [{
+      candidate: { name: "Owner", officialIds: ["10001"], officialPocketIds: ["11"], candidateIds: ["11"], groups: ["SNH48"], teams: [], officialStatuses: [] },
+      member: { id: "11", name: "Owner", groupName: "SNH48" }, identity: "verified", collectedAt: "2026-10-01T00:00:00Z", scopeComplete: false,
+      sources: [{ source: "posts", historyCursor: "older-page", historyDone: false, latestAt: null, latestIds: [], incrementalCursor: "newer-page",
+        pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null, failureCount: 2 }],
+    }] };
+  const tsx = createRequire(new URL("../../apps/collector/package.json", import.meta.url)).resolve("tsx");
+  const launch = (status: number, malformed = false) => {
+    const preload = `globalThis.fetch = async input => {
+      const url = new URL(String(input));
+      if (url.hostname === "h5.48.cn") return ${status === 200
+        ? `Response.json(${malformed ? "{}" : JSON.stringify({ rows: [{ sid: "10001", sname: "Owner", gname: "SNH", pocket_id: "11" }, { sid: "10002", sname: "New member", gname: "SNH", pocket_id: "12" }] })})`
+        : `new Response(null, { status: ${status} })`};
+      if (url.hostname === "fastly.jsdelivr.net" || url.hostname === "data.gnz.hk") return Response.json([]);
+      throw new Error("Unexpected test request: " + url.origin);
+    };`;
+    return promisify(execFile)(process.execPath, ["--import", tsx, "--import", `data:text/javascript,${encodeURIComponent(preload)}`,
+      new URL("../../apps/collector/src/group.ts", import.meta.url).pathname, "--manifest-only", "--update-roster"], {
+      env: { ...process.env, COLLECTOR_GROUP_STATE: statePath, COLLECTOR_SINCE: previous.since!, POCKET48_DIRECTORY_URL: "https://fastly.jsdelivr.net/fixture",
+        POCKET48_HISTORY_DIRECTORY_URL: "https://data.gnz.hk/fixture" }, timeout: 15_000,
+    });
+  };
+  try {
+    await writeFile(statePath, JSON.stringify(previous));
+    const skipped = await launch(502);
+    assert.ok(skipped.stdout.split("\n").some(line => line.startsWith("{") && JSON.parse(line).event === "group_roster_skipped"));
+    const saved = JSON.parse(await readFile(statePath, "utf8")) as GroupProgress;
+    assert.deepEqual({ ...saved, updatedAt: previous.updatedAt }, previous, "A skipped refresh must preserve identities, checkpoints and the last successful roster timestamp");
+    await assert.rejects(launch(401), /Roster request failed \(HTTP 401\)/);
+    await assert.rejects(launch(200, true), /Invalid official roster/);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), saved, "Other failures must not replace the saved progress");
+    await launch(200);
+    const refreshed = JSON.parse(await readFile(statePath, "utf8")) as GroupProgress;
+    assert.deepEqual(refreshed.entries.find(entry => entry.member?.id === "11")?.sources, previous.entries[0]?.sources);
+    assert.ok(refreshed.entries.some(entry => entry.candidate.name === "New member"), "The next run must retry roster refresh");
+    await rm(statePath);
+    await assert.rejects(launch(502), /Roster request failed \(HTTP 502\)/, "Without saved members a gateway error must not create an empty successful run");
+    await assert.rejects(readFile(statePath), { code: "ENOENT" });
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+});
 
 // Run 39701333160 failed on a single upstream 502. Skip only that read, keep
 // all pagination evidence, and never turn transient gateway failures into a

@@ -67,8 +67,15 @@ try {
   }
   applyGroupScope(state, since);
   if (process.argv.includes("--update-roster") && !initialized) {
-    const roster = await readGroupRoster(rosterOptions);
-    state = { ...state, entries: reconcileGroupEntries(state.entries, roster), officialRows: roster.officialRows, excluded: roster.excluded, rosterRefreshedAt: new Date().toISOString() };
+    try {
+      const roster = await readGroupRoster(rosterOptions);
+      state = { ...state, entries: reconcileGroupEntries(state.entries, roster), officialRows: roster.officialRows, excluded: roster.excluded, rosterRefreshedAt: new Date().toISOString() };
+    } catch (error) {
+      if (!(error instanceof SourceRequestSkipped)) throw error;
+      // Reuse the restored roster and checkpoints only for this transient read;
+      // keep rosterRefreshedAt unchanged so a skipped refresh is not a success.
+      console.log(JSON.stringify({ event: "group_roster_skipped", message: error.message, candidates: state.entries.length, rosterRefreshedAt: state.rosterRefreshedAt ?? null }));
+    }
   }
   const save = async () => {
     state.updatedAt = new Date().toISOString();
