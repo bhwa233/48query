@@ -10,7 +10,7 @@ import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
 import { runBatch } from "./run";
 import type { CollectorStore, SourceSync } from "./types";
-import { CollectorStoreError, SourceAuthenticationError } from "./types";
+import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped } from "./types";
 import type { CollectorProgress } from "@starter/shared";
 import { CollectionBudget, CollectionStopped } from "./budget";
 import { collectMelee } from "./melee";
@@ -155,6 +155,7 @@ try {
         else entry.lastHistoryAt = attemptedAt;
         await persist(entry);
         console.log(JSON.stringify({ event: "group_member_started", phase, memberId: entry.member?.id ?? null, name: entry.candidate.name, elapsedSeconds: Math.round((Date.now() - started) / 1000) }));
+        const previousIdentity = entry.identity;
         try {
           const previousMemberId = entry.member?.id;
           entry.identity = "pending";
@@ -199,6 +200,11 @@ try {
           }
         } catch (error) {
           if (error instanceof CollectionStopped || activeBudget.stopped) { budgetReached = true; }
+          else if (error instanceof SourceRequestSkipped) {
+            entry.identity = previousIdentity;
+            entry.identityError = error.message;
+            console.log(JSON.stringify({ event: "group_member_skipped", memberId: entry.member?.id ?? null, phase, error: error.message }));
+          }
           else {
             failures += 1;
             entry.identityError = error instanceof Error ? error.message : "Group member verification interrupted.";

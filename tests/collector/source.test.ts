@@ -18,6 +18,81 @@ import type { MeleePage, MeleeProgress } from "../../packages/shared";
 import type { SourceSync } from "../../apps/collector/src/types";
 import type { ImageAttachment, VideoAttachment } from "../../packages/shared";
 
+// Run 39701333160 failed on a single upstream 502. Skip only that read, keep
+// all pagination evidence, and never turn transient gateway failures into a
+// persisted three-strike source suspension.
+test("Pocket48 HTTP 502 skips this read without advancing or suspending a source", async () => {
+  const member = { id: "1", name: "Owner", groupName: "SNH48" };
+  const initial: SourceSync = { source: "posts", historyCursor: "older", historyDone: false,
+    latestAt: "2026-10-01T00:00:00Z", latestIds: ["known"], incrementalCursor: "newer-page",
+    pendingLatestAt: "2026-10-20T00:00:00Z", pendingLatestIds: ["new"], status: "failed", lastError: "Earlier failure",
+    lastSuccessAt: "2026-10-01T00:00:00Z", lastNonemptyAt: "2026-10-01T00:00:00Z", failureCount: 2 };
+  let saved = [structuredClone(initial)];
+  let unavailable = true;
+  let skippedReads = 0;
+  let healthyReads = 0;
+  const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, sources: ["posts", "post_images"], fetchImpl: async url => {
+    if (String(url).endsWith("/posts/img/list")) {
+      healthyReads++;
+      return Response.json({ status: 200, content: { list: [], next: "0" } });
+    }
+    if (unavailable) { skippedReads++; return new Response("Bad Gateway", { status: 502 }); }
+    return Response.json({ status: 200, content: String(url).endsWith("/user/info/home")
+      ? { baseUserInfo: { userId: 1, isStar: true, followers: 10 } } : { list: [], nextId: "0" } });
+  } });
+  const single = { sources: source.sources, listMembers: async () => [member], readFollowers: source.readFollowers.bind(source),
+    listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source) };
+  const options = { since: collectionSince(), maxHistoryPagesPerMember: 0, checkpoints: {
+    read: () => saved, write: async (_id: string, sync: SourceSync) => { saved = [...saved.filter(item => item.source !== sync.source), structuredClone(sync)]; },
+  } };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const result = await runBatch(single, new DryRunStore(), options);
+    assert.equal(result.errorCount, 0);
+    assert.equal(result.scopeComplete, false);
+    const pending = saved.find(sync => sync.source === "posts")!;
+    assert.deepEqual({ ...pending, status: initial.status, lastError: initial.lastError }, initial,
+      "A gateway skip must preserve cursors, boundaries, success evidence and the previous failure streak");
+    assert.equal(pending.status, "pending");
+    assert.equal(pending.skippedAt, undefined);
+  }
+  assert.equal(skippedReads, 8, "One follower request and one source request per run, with no retry");
+  assert.equal(healthyReads, 4, "Other sources must continue");
+  assert.deepEqual(await collectMelee(source, null, new CollectionBudget()), { pages: 0, errors: 0, pending: true });
+  unavailable = false;
+  await runBatch(single, new DryRunStore(), { ...options, maxHistoryPagesPerMember: 1 });
+  assert.equal(saved.find(sync => sync.source === "posts")?.failureCount, 0);
+  assert.equal(saved.find(sync => sync.source === "posts")?.historyDone, true);
+});
+
+// The live album and post-image APIs return an empty raw list and echo the
+// requested cursor at their tail. A nonempty repeated page is still a stall,
+// including when none of its rows can be attributed to a member.
+test("empty repeated photo catalog cursors finish history while nonempty repeats remain failures", async () => {
+  for (const scenario of [{ stream: "album", nonempty: false }, { stream: "post_images", nonempty: false }, { stream: "post_images", nonempty: true }] as const) {
+    const cursor = scenario.stream === "album" ? "1792560819906" : "1268991750209081344";
+    const member = { id: "1", name: "Owner", groupName: "SNH48" };
+    let saved: SourceSync = { source: scenario.stream, historyCursor: cursor, historyDone: false, latestAt: "2026-10-20T00:00:00Z", latestIds: ["newest"],
+      incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "failed", lastError: "Previous cursor failure",
+      lastSuccessAt: null, lastNonemptyAt: null, failureCount: 1 };
+    const source = new Pocket48Source({ token: "synthetic", pa: "synthetic", minIntervalMs: 0, sources: [scenario.stream], fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/jump")) return Response.json({ status: 200, content: { channelId: 22, serverId: 33 } });
+      const body = JSON.parse(String(init?.body));
+      assert.equal(String(body.nextTime ?? body.nextId), cursor);
+      return Response.json({ status: 200, content: scenario.stream === "album" ? { imgAndVideoList: [], nextTime: Number(cursor) }
+        : { list: scenario.nonempty ? [{ imgId: "unattributed", createAt: Date.parse("2026-10-19T00:00:00Z") }] : [], next: cursor } });
+    } });
+    const result = await runBatch({ sources: source.sources, listMembers: async () => [member], listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source) }, new DryRunStore(), {
+      since: collectionSince(), historyOnly: true, maxHistoryPagesPerMember: 1,
+      checkpoints: { read: () => [saved], write: async (_id, sync) => { saved = structuredClone(sync); } },
+    });
+    assert.equal(result.errorCount, scenario.nonempty ? 1 : 0, JSON.stringify(scenario));
+    assert.equal(saved.historyDone, !scenario.nonempty);
+    assert.equal(saved.historyCursor, scenario.nonempty ? cursor : null);
+    assert.deepEqual(saved.latestIds, ["newest"], "Finishing a history tail must not reset its newest boundary");
+    if (!scenario.nonempty) assert.equal(saved.failureCount, 0, "The repaired empty tail must recover from its earlier failed state");
+  }
+});
+
 // Production resumed its own legacy-video:end marker as a numeric timestamp,
 // failing every later run after both attributable media feeds were exhausted.
 test("legacy media exhaustion remains pending and repeated gaps are skipped across restarts", async () => {

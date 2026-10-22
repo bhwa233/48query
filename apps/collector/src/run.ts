@@ -1,6 +1,6 @@
 import type { CatalogEntry } from "@starter/shared";
 import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStore, IngestUnit, SourceSync } from "./types";
-import { CollectorStoreError, SourceAuthenticationError, SourceVerificationPending } from "./types";
+import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
 import type { ScopedCheckpoints } from "./collection-scope";
 import { CollectionStopped, type CollectionBudget } from "./budget";
 
@@ -47,17 +47,18 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     };
     const recordIssue = async (sync: SourceSync, error: unknown) => {
       const reason = error instanceof Error ? error.message : "Collection failed.";
-      const failureCount = Math.min(3, (sync.failureCount ?? (sync.status === "failed" ? 1 : 0)) + 1);
-      const skippedAt = failureCount >= 3 ? new Date().toISOString() : null;
+      const requestSkipped = error instanceof SourceRequestSkipped;
+      const failureCount = requestSkipped ? sync.failureCount ?? 0 : Math.min(3, (sync.failureCount ?? (sync.status === "failed" ? 1 : 0)) + 1);
+      const skippedAt = requestSkipped ? sync.skippedAt : failureCount >= 3 ? new Date().toISOString() : null;
       const pending = error instanceof SourceVerificationPending;
-      const next: SourceSync = { ...sync, failureCount, skippedAt, status: pending ? "pending" : "failed", lastError: reason.slice(0, 1000) };
-      // A skipped source remains incomplete. Infrastructure/authentication errors
+      const next: SourceSync = { ...sync, ...(!requestSkipped ? { failureCount, skippedAt } : {}), status: pending ? "pending" : "failed", lastError: reason.slice(0, 1000) };
+      // A skipped source remains incomplete. Durable-write/authentication errors
       // never enter this path, even when a source has reached its failure limit.
       await persist([], next);
       if (!pending && !skippedAt) { errorCount += 1; lastError = reason; }
       if (skippedAt) sourcesSkipped += 1;
       pendingStreams.add(sync.source);
-      console[!pending && !skippedAt ? "error" : "log"](JSON.stringify({ event: skippedAt ? "source_skipped" : pending ? "source_pending" : "source_failed", memberId: member.id, source: sync.source, failureCount, error: reason }));
+      console[!pending && !skippedAt ? "error" : "log"](JSON.stringify({ event: requestSkipped ? "source_request_skipped" : skippedAt ? "source_skipped" : pending ? "source_pending" : "source_failed", memberId: member.id, source: sync.source, failureCount, error: reason }));
       return next;
     };
     // Register before any source can fail, preserving the original error on completion.
@@ -70,9 +71,12 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
       } catch (error) {
         if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
         if (error instanceof SourceAuthenticationError || error instanceof CollectorStoreError) throw error;
-        errorCount += 1;
-        lastError = error instanceof Error ? error.message : "Follower collection failed.";
-        console.error(JSON.stringify({ event: "followers_failed", memberId: member.id, error: lastError }));
+        if (error instanceof SourceRequestSkipped) console.log(JSON.stringify({ event: "followers_skipped", memberId: member.id, error: error.message }));
+        else {
+          errorCount += 1;
+          lastError = error instanceof Error ? error.message : "Follower collection failed.";
+          console.error(JSON.stringify({ event: "followers_failed", memberId: member.id, error: lastError }));
+        }
       }
     }
     for (const stream of streams) {
@@ -163,7 +167,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
                 lastSuccessAt: now, lastNonemptyAt: retried.items.length ? now : sync.lastNonemptyAt }, retried.catalog);
             } catch (error) {
               options.budget?.check();
-              if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError) throw error;
+              if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError || error instanceof SourceRequestSkipped) throw error;
               catalogReadError = error instanceof Error ? error : new Error("Catalog verification request failed.");
               // Rotate failed lookups without letting one old item block new
               // discovery. Originals remain private and the source stays failed.

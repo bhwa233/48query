@@ -2,7 +2,7 @@ import type { CatalogEntry, FollowerSnapshot, MeleePeriod, MeleeEntry } from "@s
 import { MeleePeriodSchema, MeleeEntrySchema } from "@starter/shared/schemas";
 import { createHash } from "node:crypto";
 import type { CollectionSource, CollectorMember, CollectorMessage, CollectorPage, CollectorSource } from "./types";
-import { SourceAuthenticationError, SourceVerificationPending } from "./types";
+import { SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
 import { contentList, normalizeMessage, imageUrl, object, parsePocketJson, postObject, sourceFlags, string, timestamp, unsignedInteger } from "./pocket48-content";
 import { directoryEntries, readHistoricalDirectory, rosterName, type RosterCandidate } from "./group-roster";
 import { collectionSince } from "./collection-scope";
@@ -103,7 +103,8 @@ export class Pocket48Source implements CollectorSource {
     const payload = object(parsePocketJson(await response.text()));
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
       // Do not include upstream free-form error text, which can contain user data.
-      const Failure = [401, 403].includes(response.status) || ["401", "403", "1001", "2001"].includes(string(payload.status) ?? "") ? SourceAuthenticationError : Error;
+      const Failure = [401, 403].includes(response.status) || ["401", "403", "1001", "2001"].includes(string(payload.status) ?? "")
+        ? SourceAuthenticationError : response.status === 502 ? SourceRequestSkipped : Error;
       throw new Failure(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status } });
     }
     if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
@@ -249,6 +250,7 @@ export class Pocket48Source implements CollectorSource {
             team: string(info.starTeamName) ?? (candidate.teams.length === 1 ? candidate.teams[0] : previous?.team),
             pinyin: string(info.pinyin) ?? previous?.pinyin, status: previous?.status ?? "active" });
         } catch (error) {
+          if (error instanceof SourceRequestSkipped) throw error;
           const cause = object(error instanceof Error ? error.cause : null);
           if ([401, 403].includes(Number(cause.http)) || [401, 403, 1001, 2001].includes(Number(cause.business))) throw error;
           failure = error;
@@ -641,6 +643,7 @@ export class Pocket48Source implements CollectorSource {
               if (next !== null && Number(next) < oldest) break;
             }
           } catch (error) {
+            if (error instanceof SourceRequestSkipped) throw error;
             if (error instanceof Error && ([401, 403].includes(Number(object(error.cause).http)) || [401, 403, 1001, 2001].includes(Number(object(error.cause).business)))) throw error;
             console.error(JSON.stringify({ event: "legacy_media_lookup_failed", memberId: member.id, kind, error: error instanceof Error ? error.message : "Legacy media lookup failed." }));
           }
@@ -762,8 +765,14 @@ export class Pocket48Source implements CollectorSource {
     const result = [...retained.values()].filter(message => this.inRange(message.occurredAt));
     console.log(JSON.stringify({ event: "source_page", memberId: member.id, source, unverified, observed: values.length, accepted: result.length, images: result.reduce((count, item) => count + (item.images?.length ?? 0), 0), videos: result.reduce((count, item) => count + (item.videos?.length ?? 0), 0), ownerMessages: result.filter(item => item.memberId === member.id).length }));
     const root = object(content);
-    const rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
-    if (rawCursor !== null && rawCursor !== "0" && rawCursor !== "-1" && rawCursor === cursor) throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
+    let rawCursor = string(root.nextTime ?? root.nextId ?? root.next);
+    if (rawCursor !== null && rawCursor !== "0" && rawCursor !== "-1" && rawCursor === cursor) {
+      // Verified live: both photo catalogs echo the requested cursor at an
+      // empty tail. Check the raw list, never the date/author-filtered results.
+      // Historical rooms still require their independent mapping/author checks.
+      if ((source === "album" || source === "post_images") && allValues.length === 0) rawCursor = null;
+      else throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
+    }
     const boundary = allValues.flatMap(value => {
       const item = object(value);
       const post = postObject(item);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { MeleePage, MeleeProgress } from "@starter/shared";
 import type { Pocket48Source } from "./pocket48-source";
 import { type CollectionBudget, CollectionStopped } from "./budget";
+import { SourceRequestSkipped } from "./types";
 
 type MeleeStore = {
   meleeProgress(periodId: number): Promise<MeleeProgress | null>;
@@ -36,6 +37,10 @@ export async function collectMelee(source: Pick<Pocket48Source, "readMeleePeriod
     return { pages, errors: 0, pending: store === null };
   } catch (error) {
     if (error instanceof CollectionStopped || budget.stopped) return { pages, errors: 0, pending: true };
+    if (error instanceof SourceRequestSkipped) {
+      console.log(JSON.stringify({ event: "melee_skipped", error: error.message }));
+      return { pages, errors: 0, pending: true };
+    }
     console.error(JSON.stringify({ event: "melee_failed", error: error instanceof Error ? error.message : "Weekly ranking collection failed." }));
     return { pages, errors: 1, pending: true };
   }

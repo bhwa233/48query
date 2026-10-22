@@ -3,6 +3,9 @@ export type { CollectionSource, SourceSync } from "@starter/shared";
 
 // Coverage gaps are neither transport failures nor evidence of complete history.
 export class SourceVerificationPending extends Error {}
+// A transient upstream read is skipped only for this run, without consuming
+// the verification-failure streak or certifying an empty/complete source.
+export class SourceRequestSkipped extends SourceVerificationPending {}
 export class SourceAuthenticationError extends Error {}
 export class CollectorStoreError extends Error {}
 
