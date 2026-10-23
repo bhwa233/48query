@@ -122,7 +122,7 @@ const reportCheckpoints = checkpoints ? { read: (id: string) => checkpoints.read
   await checkpoints.write(id, sync);
   healthEntries.set(id, checkpoints.read(id));
 } } : undefined;
-Object.assign(runOptions, { checkpoints: reportCheckpoints, runId: process.env.GITHUB_RUN_ID
+Object.assign(runOptions, { checkpoints: reportCheckpoints, invocationId: process.env.GITHUB_RUN_ID
   ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `local-${randomUUID()}` });
 if (backfillOnly) {
   if (mediaOnly || dryRun || !(source instanceof Pocket48Source)) throw new Error("Backfill requires a writable Pocket48 source.");

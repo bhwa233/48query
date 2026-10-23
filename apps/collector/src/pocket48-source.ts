@@ -616,7 +616,15 @@ export class Pocket48Source implements CollectorSource {
     // is an empty page; other missing list shapes remain protocol errors.
     const emptyPostTail = source === "posts" && cursor !== null && Object.keys(object(content)).length === 1
       && string(object(content).nextId) === cursor;
-    const allValues = emptyPostTail || source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    let allValues: unknown[];
+    try {
+      allValues = emptyPostTail || source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "source_protocol_shape", memberId: member.id, source,
+        fields: Object.entries(object(content)).filter(([key]) => /^[a-zA-Z][a-zA-Z0-9_]{0,40}$/.test(key)).slice(0, 40)
+          .map(([key, value]) => ({ key, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value, count: Array.isArray(value) ? value.length : undefined })) }));
+      throw error;
+    }
     const rawTime = (value: unknown) => { const item = object(value), post = postObject(item); return timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? item.createAt ?? post.createAt ?? post.ctime); };
     // Discard old catalog entries BEFORE any original-message lookup or media
     // request. Keep the original boundary solely to stop reverse pagination.
@@ -798,7 +806,10 @@ export class Pocket48Source implements CollectorSource {
       // Run 39897019166 also verified an empty ordinary room tail at its saved
       // cursor. Never apply this to a filtered-empty but nonempty raw page.
       if ((source === "album" || source === "post_images" || source === "room_posts" || source === "room" || emptyPostTail) && allValues.length === 0) rawCursor = null;
-      else throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
+      else {
+        console.error(JSON.stringify({ event: "source_cursor_stalled", memberId: member.id, source, rawRows: allValues.length, acceptedRows: result.length }));
+        throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
+      }
     }
     const boundary = allValues.flatMap(value => {
       const item = object(value);

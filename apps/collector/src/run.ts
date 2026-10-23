@@ -9,12 +9,12 @@ import { randomUUID } from "node:crypto";
 export const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; recovery?: RecoveryAllowance; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; invocationId?: string; recovery?: RecoveryAllowance; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
   const batchId = options.batchId ?? `batch-${statDate}-${Date.now()}`;
-  const invocationId = options.runId ?? `local-${randomUUID()}`;
+  const invocationId = options.invocationId ?? options.runId ?? `local-${randomUUID()}`;
   const recovery = options.recovery ?? { remaining: 10, spentMs: 0, maxMs: 180_000 };
   const maxPages = options.maxPagesPerMember ?? 10;
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000) throw new Error("Collector page budget must be between 1 and 1000.");

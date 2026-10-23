@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import type { IngestUnit } from "../../apps/collector/src/types";
 import { collectionSince, openScopedCheckpoints } from "../../apps/collector/src/collection-scope";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
 
 // A real Pocket48 page exceeded the API's 128 KiB body limit. Keep real HTTP/D1
 // writes, inject a transport failure after the first chunk, and verify resume.
@@ -105,4 +108,19 @@ try {
   const other = await openScopedCheckpoints(join(progressDirectory, "other-scope.json"), otherSince, new HttpIngestStore(endpoint, key, otherSince));
   assert.deepEqual(other.read(unit.member.id), []);
   console.log("PASS collector transport: fresh runner restores D1 cursor without touching all-history state");
+  // Run 39898269151 exposed a real FK failure: the targeted CLI attached its
+  // health counter ID as a run_id without registering that monitored run.
+  // Launch the actual CLI against the smoke runner's real migrated local D1.
+  const report = join(progressDirectory, "cli-health.json");
+  const tsx = createRequire(new URL("../../apps/collector/package.json", import.meta.url)).resolve("tsx");
+  // The earlier first-failure fixture intentionally isolated this demo source.
+  await promisify(execFile)(process.execPath, ["--import", tsx, new URL("../../apps/collector/src/cli.ts", import.meta.url).pathname, "--retry-skipped"], {
+    env: { ...process.env, COLLECTOR_SOURCE: "demo", COLLECTOR_MAX_PAGES: "1", COLLECTOR_MAX_MEMBERS: "1", COLLECTOR_HISTORY_PAGES: "0",
+      COLLECTOR_REPORT_PATH: report, GITHUB_STEP_SUMMARY: "", GITHUB_RUN_ID: "smoke-targeted-cli", GITHUB_RUN_ATTEMPT: "1" }, timeout: 20000,
+  });
+  const cliHealth = JSON.parse(await readFile(report, "utf8"));
+  assert.equal(cliHealth.interrupted, false);
+  assert.equal(cliHealth.execution, "completed");
+  assert.equal(cliHealth.failures, 0);
+  console.log("PASS targeted collector CLI: health invocation ID does not create an unregistered task foreign key");
 } finally { await rm(progressDirectory, { recursive: true, force: true }); }

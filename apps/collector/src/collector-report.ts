@@ -19,7 +19,10 @@ export function collectorHealth(entries: { memberId: string; sources: (SourceHea
 }
 
 export async function writeCollectorReport(health: ReturnType<typeof collectorHealth>, metrics: Record<string, unknown> = {}) {
-  const report = { ...metrics, ...health };
+  const failed = health.failures > 0 || Number(metrics.failures ?? metrics.errorCount ?? 0) > 0
+    || Number(metrics.retryFailures ?? 0) > 0 || Number(metrics.rankingErrors ?? 0) > 0;
+  const execution = metrics.interrupted === true ? "interrupted" : failed ? "failed" : "completed";
+  const report = { ...metrics, ...health, execution };
   console.log(JSON.stringify({ event: "collector_health", ...report, sources: undefined }));
   const file = process.env.COLLECTOR_REPORT_PATH;
   if (file) {
@@ -28,7 +31,7 @@ export async function writeCollectorReport(health: ReturnType<typeof collectorHe
   }
   if (process.env.GITHUB_STEP_SUMMARY) {
     const rows = health.sources.filter(row => row.failed || row.freshness !== "healthy" || row.nextRetryAt).slice(0, 100);
-    await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n## Collector health\n\n${health.totalSources} sources; ${health.failures} failed; ${health.warnings} stale warnings; ${health.isolated} isolated; ${health.paused} paused; ${health.pendingHistory} pending history.\n\n${Number(metrics.pagesCommitted ?? 0)} committed pages; ${Number(metrics.recoveryProbes ?? 0)} recovery probes.\n\n`
+    await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n## Collector health\n\nExecution: **${execution}**.\n\n${health.totalSources} sources; ${health.failures} failed; ${health.warnings} stale warnings; ${health.isolated} isolated; ${health.paused} paused; ${health.pendingHistory} pending history.\n\n${Number(metrics.pagesCommitted ?? 0)} committed pages; ${Number(metrics.recoveryProbes ?? 0)} recovery probes.\n\n`
       + `| Member | Source | Freshness | Failure | Next probe |\n| --- | --- | --- | --- | --- |\n`
       + rows.map(row => `| ${row.memberId.replace(/[^a-zA-Z0-9_-]/g, "")} | ${row.source} | ${row.freshness} | ${row.failureKind ?? "none"} (${row.failureCount}) | ${row.nextRetryAt ?? "none"} |`).join("\n") + "\n");
   }
