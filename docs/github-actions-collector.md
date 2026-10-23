@@ -33,7 +33,7 @@ INGEST_KEY
 
 ## 调度与行为
 
-配置为每两小时一次，北京时间 00:17、02:17、04:17……22:17（UTC `17 */2 * * *`）。并发组为 `48query-production-collector`，不取消正在写入的上一批次。全团模式执行 `group --collect --update-roster`；指定成员或关注成员模式使用：
+配置为每小时一次，北京时间每小时的第 17 分钟（UTC `17 * * * *`）。并发组为 `48query-production-collector`，不取消正在写入的上一批次。全团模式执行 `group --collect --update-roster`；指定成员或关注成员模式使用：
 
 ```sh
 pnpm --filter @starter/collector run run

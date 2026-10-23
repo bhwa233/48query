@@ -235,7 +235,7 @@ WSL 终端若继承了 Windows 的 `APPDATA`，而登录凭证存放在 Linux �
 
 ## 限时轮转与持久断点
 
-定时配置见 [GitHub Actions 采集](github-actions-collector.md)：每两小时触发，正文采集每轮预算一小时，媒体 job 独立补传十五分钟。全团采集先轮转增量，再用剩余预算推进历史；每页的内容／私有待核验目录提交成功后才保存 D1 范围检查点，预算打断的未提交页可以安全重放。相册和动态图片的一页最多核验十二次原消息请求，其余项继续留在私有队列，不因核验预算有限而公开无法归属的附件。
+定时配置见 [GitHub Actions 采集](github-actions-collector.md)：每小时触发，正文采集每轮预算一小时，媒体 job 独立补传十五分钟。全团采集先轮转增量，再用剩余预算推进历史；每页的内容／私有待核验目录提交成功后才保存 D1 范围检查点，预算打断的未提交页可以安全重放。相册和动态图片的一页最多核验十二次原消息请求，其余项继续留在私有队列，不因核验预算有限而公开无法归属的附件。
 
 `COLLECTOR_MAX_SECONDS` 可限制普通采集或媒体补传，0 表示本地不设时间预算；全团入口使用 `COLLECTOR_GROUP_MAX_SECONDS`。停止信号和预算到期均停止新请求，当前持久化提交完成后退出。日志包含 `group_member_started`、`source_page_started`、`source_page_committed` 和 `catalog_pending`，用于区分仍在工作、已提交进度和待核验积压，不输出正文或凭证。
 

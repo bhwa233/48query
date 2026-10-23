@@ -2,8 +2,8 @@ name: Daily collector
 
 on:
   schedule:
-    # Every two hours, at :17 to avoid the busiest start-of-hour queue.
-    - cron: "17 */2 * * *"
+    # Every hour, at :17 to avoid the busiest start-of-hour queue.
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       max_pages:
