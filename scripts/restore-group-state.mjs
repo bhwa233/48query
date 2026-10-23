@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+
+import { tmpdir } from "node:os";
 
 const repository = process.env.GITHUB_REPOSITORY;
 const branch = process.env.GITHUB_REF_NAME;
@@ -16,23 +18,44 @@ const gh = async (args) => (await exec("gh", args, { maxBuffer: 4 * 1024 * 1024 
 const runs = JSON.parse(await gh(["run", "list", "--repo", repository, "--workflow", "collector.yml", "--branch", branch,
   "--limit", "30", "--json", "databaseId,status"]));
 let restored = false;
+let restoredScoped = false;
+const checkpointFile = process.env.COLLECTOR_CHECKPOINT_STATE;
+const requireRoster = process.env.COLLECTOR_MEMBER_SCOPE === "all" && !process.env.COLLECTOR_MEMBER_ID;
+const readState = async path => {
+  try { return JSON.parse(await readFile(path, "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+};
 for (const run of runs) {
   if (run.status !== "completed" || String(run.databaseId) === process.env.GITHUB_RUN_ID) continue;
   const response = JSON.parse(await gh(["api", `repos/${repository}/actions/runs/${run.databaseId}/artifacts?per_page=100`]));
   if (!response.artifacts.some(item => item.name === artifact && !item.expired)) continue;
-  await mkdir(dirname(resolve(file)), { recursive: true });
-  await gh(["run", "download", String(run.databaseId), "--repo", repository, "--name", artifact, "--dir", dirname(resolve(file))]);
-  let state;
+  const candidate = await mkdtemp(join(tmpdir(), "48query-restore-"));
   try {
-    state = JSON.parse(await readFile(file, "utf8"));
-    if (state.version !== 1 || !Array.isArray(state.entries) || !state.entries.length) throw new Error("Restored group progress is invalid.");
-  } catch (error) {
-    if (error.code !== "ENOENT" || !process.env.COLLECTOR_CHECKPOINT_STATE) throw error;
-    const checkpoints = JSON.parse(await readFile(process.env.COLLECTOR_CHECKPOINT_STATE, "utf8"));
-    if (checkpoints.version !== 1 || !checkpoints.members || typeof checkpoints.members !== "object") throw new Error("Restored scoped progress is invalid.");
-  }
-  console.log(`Restored collector progress from workflow run ${run.databaseId}.`);
-  restored = true;
-  break;
+    await gh(["run", "download", String(run.databaseId), "--repo", repository, "--name", artifact, "--dir", candidate]);
+    const state = await readState(join(candidate, basename(file)));
+    const checkpoints = checkpointFile ? await readState(join(candidate, basename(checkpointFile))) : null;
+    if (state && (state.version !== 1 || !Array.isArray(state.entries) || !state.entries.length)) throw new Error("Restored group progress is invalid.");
+    if (checkpoints && (checkpoints.version !== 1 || !checkpoints.members || typeof checkpoints.members !== "object")) throw new Error("Restored scoped progress is invalid.");
+    // Reports uploaded by a failed cold start are not resumable progress. A
+    // targeted run's scoped file also must not hide an older full-group roster.
+    if (!state && !checkpoints) {
+      console.log(`Skipping workflow run ${run.databaseId}: artifact has no checkpoint files.`);
+      continue;
+    }
+    if (checkpoints && checkpointFile && !restoredScoped) {
+      await mkdir(dirname(resolve(checkpointFile)), { recursive: true });
+      await copyFile(join(candidate, basename(checkpointFile)), checkpointFile);
+      restoredScoped = true;
+    }
+    if (state) {
+      await mkdir(dirname(resolve(file)), { recursive: true });
+      await copyFile(join(candidate, basename(file)), file);
+    }
+    if (state || !requireRoster && restoredScoped) {
+      console.log(`Restored collector progress from workflow run ${run.databaseId}.`);
+      restored = true;
+      break;
+    }
+  } finally { await rm(candidate, { recursive: true, force: true }); }
 }
-if (!restored) console.log("No previous group progress artifact found; this run will initialize the official roster.");
+if (!restored) console.log("No previous group roster artifact found; this run will initialize the official roster.");

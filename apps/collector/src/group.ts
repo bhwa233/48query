@@ -52,6 +52,7 @@ let failures = 0;
 const invocationId = process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `run-${randomUUID()}`;
 const recovery = { remaining: 10, spentMs: 0, maxMs: 180_000 };
 let reportEntries: () => { memberId: string; sources: SourceSync[] }[] = () => [];
+let reportSources = [...COLLECTION_SOURCES];
 let reportRoster: () => Record<string, unknown> = () => ({});
 let pagesCommitted = 0;
 let messagesWrittenIncludingReplay = 0;
@@ -76,7 +77,7 @@ try {
     state.rosterRefreshedAt = now;
   }
   reportEntries = () => state.entries.flatMap(entry => entry.member && entry.identity === "verified"
-    ? [{ memberId: entry.member.id, sources: dryRun ? entry.inspectionSources ?? [] : entry.sources ?? [] }] : []);
+    ? [{ memberId: entry.member.id, sources: (dryRun ? entry.inspectionSources ?? [] : entry.sources ?? []).filter(sync => reportSources.includes(sync.source)) }] : []);
   reportRoster = () => ({ rosterFailures: state.rosterFailures ?? 0, rosterRefreshedAt: state.rosterRefreshedAt ?? null,
     rosterAgeSeconds: Math.round((Date.now() - Date.parse(state.rosterRefreshedAt ?? state.createdAt)) / 1000) });
   applyGroupScope(state, since);
@@ -152,9 +153,11 @@ try {
       if (!COLLECTION_SOURCES.includes(value as typeof COLLECTION_SOURCES[number])) throw new Error(`Unsupported source: ${value}`);
       return value as typeof COLLECTION_SOURCES[number];
     });
+    reportSources = sources;
     for (const entry of state.entries) {
       if (entry.identity !== "verified" || !entry.member || dryRun) continue;
-      entry.sources = sources.map(stream => initializeSourceHealth(entry.sources?.find(sync => sync.source === stream) ?? emptySync(stream)));
+      entry.sources = [...(entry.sources ?? []).filter(sync => !sources.includes(sync.source)),
+        ...sources.map(stream => initializeSourceHealth(entry.sources?.find(sync => sync.source === stream) ?? emptySync(stream)))];
     }
     await save();
     const source = new Pocket48Source({ token, since, deviceId: process.env.POCKET48_DEVICE_ID ?? credential?.deviceId,

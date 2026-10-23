@@ -154,7 +154,14 @@ jobs:
           path: |
             ${{ env.COLLECTOR_GROUP_STATE }}
             ${{ env.COLLECTOR_CHECKPOINT_STATE }}
-            ${{ env.COLLECTOR_REPORT_PATH }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Save collector health report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: collector-health-2026
+          path: ${{ env.COLLECTOR_REPORT_PATH }}
           if-no-files-found: warn
           retention-days: 30
   media:

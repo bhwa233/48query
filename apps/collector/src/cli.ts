@@ -120,7 +120,7 @@ const checkpoints = since && !mediaOnly ? dryRun ? {
 const runOptions = { since, checkpoints, budget, maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", retrySkipped: process.argv.includes("--retry-skipped"), catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
 const reportCheckpoints = checkpoints ? { read: (id: string) => checkpoints.read(id), write: async (id: string, sync: SourceSync) => {
   await checkpoints.write(id, sync);
-  healthEntries.set(id, checkpoints.read(id));
+  healthEntries.set(id, checkpoints.read(id).filter(sync => sourceOptions.sources.includes(sync.source)));
 } } : undefined;
 Object.assign(runOptions, { checkpoints: reportCheckpoints, invocationId: process.env.GITHUB_RUN_ID
   ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `local-${randomUUID()}` });
