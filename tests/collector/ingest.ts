@@ -141,6 +141,8 @@ try {
         pendingLatestAt: null, pendingLatestIds: [], status: "failed", lastError: "Pocket48 unknown content list shape.",
         lastSuccessAt: null, lastNonemptyAt: null, skippedAt: "2026-10-21T00:00:00Z", nextRetryAt: "2026-10-22T00:00:00Z",
         healthVersion: 1, failureKind: "protocol", failureCount: 3 }] },
+    { candidate: { ...candidate, officialIds: ["legacy-identity"] }, member: null, identity: "failed",
+      lastAttemptAt: new Date().toISOString(), identityError: "Multiple official Pocket48 identities match this name; manual reconciliation required." },
   ] };
   const pocket = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -175,6 +177,8 @@ try {
     assert.equal(health.recoveryProbes, 1);
     assert.equal(after.entries[0]?.identity, "unverified");
     assert.ok(after.entries[0]?.checkedAt);
+    assert.equal(after.entries[2]?.identity, "unverified", "Known legacy ambiguity must migrate out of hard failure");
+    assert.equal(after.entries[2]?.checkedAt, groupState.entries[2]?.lastAttemptAt, "Migration must preserve the real prior verification time");
     assert.equal(health.identityIssues[0]?.status, "unverified");
     assert.ok(health.identityIssues[0]?.nextCheckAt);
     assert.equal(after.entries[1]?.sources?.[0]?.failureCount, 0);

@@ -87,6 +87,14 @@ try {
       officialIds: entry.candidate.officialIds, candidateIds: entry.candidate.candidateIds, status: entry.identity,
       reason: entry.identityError, checkedAt: entry.checkedAt ?? null,
       nextCheckAt: entry.checkedAt ? new Date(Date.parse(entry.checkedAt) + 7 * 86400_000).toISOString() : null })) });
+  // Older runners stored a known identity ambiguity as a hard failure without
+  // checkedAt. Preserve that actual attempt as the weekly verification clock.
+  for (const entry of state.entries) {
+    if (entry.identity === "failed" && entry.identityError?.startsWith("Multiple official Pocket48 identities match this name;")) {
+      entry.identity = "unverified";
+      entry.checkedAt ??= entry.lastAttemptAt;
+    }
+  }
   applyGroupScope(state, since);
   if (process.argv.includes("--update-roster") && !initialized) {
     try {
