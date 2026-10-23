@@ -6,6 +6,7 @@ import type { ArchiveMembers } from "@starter/shared";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useHydrated } from "@/lib/use-hydrated";
 import { archiveLabels, useArchiveQuery } from "./ArchiveData";
 
 export type ArchiveFilters = { query: string; member: string; kind: string; source: string; from: string; to: string };
@@ -15,6 +16,7 @@ export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, ima
   locale: string; apiBaseUrl?: string; value: ArchiveFilters; onChange: (value: ArchiveFilters) => void; imagesOnly?: boolean; memberId?: string;
 }) {
   const t = archiveLabels(locale);
+  const hydrated = useHydrated();
   const { query, member, kind, source, from, to } = value;
   const [draft, setDraft] = useState(query);
   const [previousQuery, setPreviousQuery] = useState(query);
@@ -33,6 +35,7 @@ export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, ima
   const setTo = (to: string) => onChange({ ...value, to });
   return (
     <section aria-label={t.messageFilters} className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2 sm:p-3">
+      <fieldset disabled={!hydrated || !state.configured} className="contents">
       <div className="flex min-w-0 flex-col gap-2 md:flex-row">
         <form className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 md:flex-1" onSubmit={event => { event.preventDefault(); setQuery(draft); }}>
           <Input className="h-11 sm:h-9" disabled={!state.configured} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
@@ -51,6 +54,7 @@ export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, ima
         <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">{t.to}<Input className="h-11 sm:h-9" type="date" min={from || undefined} value={to} onChange={event => { setTo(event.target.value); }} /></label>
       </fieldset>
       {summary ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><p className="min-w-0 break-words">{summary}</p><Button type="button" variant="ghost" size="xs" onClick={() => { onChange({ ...value, source: "", from: "", to: "" }); }}>{t.clearExtraFilters}</Button></div> : null}
+      </fieldset>
     </section>
   );
 }

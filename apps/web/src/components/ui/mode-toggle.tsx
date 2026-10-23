@@ -1,7 +1,7 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
 import { Moon, Sun } from "lucide-react";
+import { useHydrated } from "@/lib/use-hydrated";
 import { useTheme } from "./theme-provider";
 import { Button } from "./button";
 import {
@@ -10,10 +10,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "./dropdown-menu";
-
-const subscribeToHydration = () => () => {};
-const hydratedSnapshot = () => true;
-const serverSnapshot = () => false;
 
 export function ModeToggle({
   toggleLabel,
@@ -27,7 +23,7 @@ export function ModeToggle({
   themeSystemLabel: string;
 }) {
   const { setTheme } = useTheme();
-  const mounted = useSyncExternalStore(subscribeToHydration, hydratedSnapshot, serverSnapshot);
+  const mounted = useHydrated();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>

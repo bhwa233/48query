@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 
 const errors = new WeakMap<Page, string[]>();
 const expectedMissing = new WeakMap<Page, Set<string>>();
@@ -41,6 +41,26 @@ test("archive loading keeps content width and filter geometry across slow reques
     if (pending) await pending;
     await route.continue();
   });
+  // Server-rendered controls must not accept typing before their handlers are
+  // attached: hydration can otherwise discard those edits without searching.
+  // Hold scripts to make that window deterministic instead of adding a sleep.
+  let releaseScripts = () => {};
+  const scriptsReady = new Promise<void>(resolve => { releaseScripts = resolve; });
+  const holdScripts = async (route: Route) => {
+    if (route.request().resourceType() === "script") await scriptsReady;
+    await route.continue();
+  };
+  await page.route("**/*", holdScripts);
+  try {
+    await page.goto("/zh/messages", { waitUntil: "commit" });
+    await expect(page.getByRole("textbox", { name: "搜索消息或提问内容" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "搜索", exact: true })).toBeDisabled();
+  } finally {
+    releaseScripts();
+    await page.unroute("**/*", holdScripts);
+  }
+  await expect(page.getByRole("textbox", { name: "搜索消息或提问内容" })).toBeEnabled();
+  await expect(page.locator("article").first()).toBeVisible({ timeout: 15000 });
   try {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
@@ -142,10 +162,21 @@ test("dashboard search and archive navigation work", async ({ page }) => {
   await expect(page.getByRole("link", { name: /对照成员/ })).toHaveCount(0);
   await page.getByRole("link", { name: /验证成员/ }).first().click();
   await expect(page).toHaveURL(/\/zh\/members\/e2e-member$/);
-  await expect(page.getByRole("region", { name: "统计概览", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "统计概览", exact: true })).toBeVisible({ timeout: 15000 });
   await page.getByRole("link", { name: "消息", exact: true }).click();
-  await page.getByRole("textbox", { name: "搜索消息或提问内容" }).fill("验证公开提问");
+  // Member and global views now share this search form. Wait for the destination
+  // before filling it, otherwise the old member form can intercept the input.
+  await expect(page).toHaveURL(/\/zh\/messages$/);
+  await expect(page.getByRole("heading", { name: "消息", level: 1, exact: true })).toBeVisible();
+  const keyword = "验证公开提问";
+  const searched = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/query/message-pages" && url.searchParams.get("q") === keyword;
+  });
+  await page.getByRole("textbox", { name: "搜索消息或提问内容" }).fill(keyword);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await expect(page).toHaveURL(url => url.pathname === "/zh/messages" && url.searchParams.get("q") === keyword);
+  expect((await searched).ok()).toBe(true);
   await expect(page.getByText("验证成员回答", { exact: true })).toBeVisible();
   await expect(page.getByText("验证文字归档", { exact: true })).toHaveCount(0);
   const advanced = page.getByRole("button", { name: "更多筛选", exact: true });
