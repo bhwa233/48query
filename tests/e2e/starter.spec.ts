@@ -198,9 +198,28 @@ test("mobile pages fit the viewport and expose navigation and theme controls", a
   });
 });
 
-test("rankings change metric, period and scope while preserving shared ranks", async ({ page }, testInfo) => {
+test("rankings sort columns and change metric, period and scope while preserving shared ranks", async ({ page, request }, testInfo) => {
+  test.setTimeout(60000);
   await page.goto("/zh");
+  await expect(page.locator('main:visible [aria-busy="true"]:visible')).toHaveCount(0, { timeout: 20000 });
   const list = page.getByRole("list", { name: "成员排行", exact: true });
+  await expect(list.getByRole("link").first()).toHaveText(/验证成员/);
+  const ranking = page.getByRole("region", { name: "成员排行", exact: true });
+  // Sorting another column must keep the selected cohort and its original ranks,
+  // including members with zero replies, rather than switching ranking tabs.
+  await ranking.getByRole("button", { name: "图片数: 降序排列", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await expect(page.getByRole("tab", { name: "消息榜", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(list.locator("li").first().locator('[aria-label="排名 2"]')).toBeVisible();
+  await ranking.getByRole("button", { name: "图片数: 升序排列", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/验证成员/);
+  await ranking.getByRole("button", { name: "公开回复: 降序排列", exact: true }).click();
+  await ranking.getByRole("button", { name: "公开回复: 升序排列", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await expect(list.getByRole("link")).toHaveCount(2);
+  await ranking.getByRole("button", { name: "成员: 升序排列", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await ranking.getByRole("button", { name: "成员: 降序排列", exact: true }).click();
   await expect(list.getByRole("link").first()).toHaveText(/验证成员/);
   await page.getByRole("tab", { name: "粉丝榜", exact: true }).click();
   await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
@@ -251,6 +270,11 @@ test("rankings change metric, period and scope while preserving shared ranks", a
   const melee = page.getByRole("region", { name: "鸡腿周榜", exact: true });
   const meleeList = melee.getByRole("list", { name: "鸡腿周榜", exact: true });
   await expect(meleeList.locator("li").first()).toContainText("鸡腿验证一");
+  await melee.getByRole("button", { name: "鸡腿值: 降序排列", exact: true }).click();
+  await melee.getByRole("button", { name: "鸡腿值: 升序排列", exact: true }).click();
+  await expect(meleeList.locator("li").first()).toContainText("鸡腿验证二");
+  await expect(meleeList.locator("li").first().locator('[aria-label="排名 2"]')).toBeVisible();
+  await melee.getByRole("button", { name: "排名: 升序排列", exact: true }).click();
   await melee.getByRole("combobox", { name: "官方榜单期次", exact: true }).click();
   await page.getByRole("option", { name: "#425 · 测试上一期", exact: true }).click();
   await expect(meleeList.locator("li").first()).toContainText("鸡腿验证二");
@@ -262,6 +286,41 @@ test("rankings change metric, period and scope while preserving shared ranks", a
   await expect(page.getByRole("button", { name: "刷新排行", exact: true })).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("rankings-mobile-dark.png"), fullPage: true });
+
+  const apiOrigin = process.env.STARTER_E2E_API_URL;
+  if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
+  const occurredAt = new Date(Date.now() - 86400_000).toISOString();
+  const seed = await request.post(`${apiOrigin}/api/query/ingest/unit`, {
+    headers: { "X-Ingest-Key": "test-e2e-ingest" },
+    data: { batchId: "e2e-sort", statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+      member: { id: "e2e-no-followers", name: "缺少粉丝数据成员", groupName: "SNH48" },
+      messages: [{ id: "e2e-sort-text", memberId: "e2e-no-followers", senderId: "e2e-no-followers", type: "TEXT", text: "排序验证", occurredAt }],
+      recordings: [], totalMembers: 3, membersCovered: 3, errorCount: 0 },
+  });
+  expect(seed.ok(), await seed.text()).toBe(true);
+  // The seed changes local D1 after the first request; bypass its public HTTP
+  // cache and wait for the hydrated result before opening a Radix menu.
+  await page.route("**/api/query/rankings?*", route => route.continue());
+  await page.reload();
+  await expect(list.getByRole("link").last()).toHaveText(/缺少粉丝数据成员/);
+  await ranking.getByRole("combobox", { name: "排序列", exact: true }).click();
+  await page.getByRole("option", { name: "粉丝数", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/对照成员/);
+  await expect(list.getByRole("link").last()).toHaveText(/缺少粉丝数据成员/);
+  await ranking.getByRole("button", { name: "升序排列", exact: true }).click();
+  await expect(list.getByRole("link").first()).toHaveText(/验证成员/);
+  await expect(list.getByRole("link").last()).toHaveText(/缺少粉丝数据成员/);
+
+  await page.goto("/zh/members");
+  const members = page.getByRole("table", { name: "成员", exact: true });
+  await expect(members.getByRole("link", { name: /缺少粉丝数据成员/ })).toBeVisible();
+  await page.getByRole("combobox", { name: "排序列", exact: true }).click();
+  await page.getByRole("option", { name: "图片数", exact: true }).click();
+  await expect(members.getByRole("link").first()).toContainText("对照成员");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await members.getByRole("button", { name: "图片数: 升序排列", exact: true }).click();
+  await expect(members.getByRole("columnheader", { name: /图片数/ })).toHaveAttribute("aria-sort", "ascending");
+  await expect(members.locator("tbody tr").first().getByRole("cell").nth(3)).toHaveText("0");
 });
 
 test("member history keeps messages on failure, resumes its cursor and resets for another member", async ({ page, request }) => {

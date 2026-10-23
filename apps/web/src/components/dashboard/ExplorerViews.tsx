@@ -11,19 +11,28 @@ import { ArchiveDataRegion, archiveLabels, QueryStatus, useArchiveQuery } from "
 import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton, MessageListSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
 import { MemberMessageHistory } from "./MemberMessageHistory";
+import { compareColumnValues, nextColumnSort, TableSortButton, TableSortControls, type ColumnSort } from "./TableSort";
+
+type MemberSortKey = "name" | "affiliation" | "messages" | "images" | "replies" | "activeDays";
 
 export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl?: string }) {
   const t = archiveLabels(locale);
   const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en");
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("");
+  const [sort, setSort] = useState<ColumnSort<MemberSortKey>>({ key: "messages", direction: "descending" });
   const state = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
   const groups = [...new Set(state.data?.data.map(member => member.groupName) ?? [])];
-  const members = useMemo(() => state.data?.data.filter(member => (!group || member.groupName === group) && `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) ?? [], [state.data, group, query]);
+  const members = useMemo(() => state.data?.data.filter(member => (!group || member.groupName === group) && `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()))
+    .toSorted((a, b) => compareColumnValues(sort.key === "affiliation" ? `${a.groupName} ${a.team ?? ""}` : a[sort.key], sort.key === "affiliation" ? `${b.groupName} ${b.team ?? ""}` : b[sort.key], sort.direction, locale) || a.name.localeCompare(b.name, locale) || a.id.localeCompare(b.id)) ?? [], [state.data, group, query, sort, locale]);
   const metrics = [
     { key: "messages", label: t.messageCount!, mobileLabel: t.messages! }, { key: "images", label: t.imageCount!, mobileLabel: t.images! },
     { key: "replies", label: t.replyCount!, mobileLabel: t.shortReplies! }, { key: "activeDays", label: t.activeDayCount!, mobileLabel: t.shortActiveDays! },
   ] as const;
+  const sortOptions: { key: MemberSortKey; label: string; initial?: "ascending" }[] = [{ key: "name", label: t.memberColumn!, initial: "ascending" }, { key: "affiliation", label: t.memberAffiliation!, initial: "ascending" }, ...metrics.map(metric => ({ key: metric.key, label: metric.label }))];
+  function chooseSort(key: MemberSortKey) {
+    setSort(value => nextColumnSort(value, key, key === "name" || key === "affiliation" ? "ascending" : "descending"));
+  }
 
   return <>
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] items-center gap-2 sm:grid-cols-[minmax(0,24rem)_10rem_1fr]">
@@ -34,9 +43,12 @@ export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl
     <QueryStatus state={state} locale={locale} />
     {state.loading ? <MembersTableSkeleton label={t.loading} /> : null}
     {state.data ? <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <TableSortControls options={sortOptions} sort={sort} onChange={setSort} locale={locale} className="border-b p-2 md:hidden" />
       <table className="w-full text-sm" aria-label={t.members}>
         <thead className="hidden bg-muted/40 text-xs text-muted-foreground md:table-header-group">
-          <tr><th scope="col" className="px-3 py-2 text-left font-medium">{t.memberColumn}</th><th scope="col" className="px-3 py-2 text-left font-medium">{t.memberAffiliation}</th>{metrics.map(metric => <th key={metric.key} scope="col" className="px-3 py-2 text-right font-medium">{metric.label}</th>)}</tr>
+          <tr>{sortOptions.map(column => <th key={column.key} scope="col" aria-sort={sort.key === column.key ? sort.direction : "none"} className={column.key === "name" || column.key === "affiliation" ? "px-3 py-1 text-left font-medium" : "px-3 py-1 text-right font-medium"}>
+            <TableSortButton label={column.label} direction={sort.key === column.key ? sort.direction : undefined} initial={column.initial} onClick={() => chooseSort(column.key)} locale={locale} />
+          </th>)}</tr>
         </thead>
         <tbody className="divide-y divide-border/60">
           {members.map(member => <tr key={member.id} className="hover:bg-muted/40">

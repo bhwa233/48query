@@ -11,23 +11,30 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
+import { compareColumnValues, nextColumnSort, TableSortButton, type ColumnSort } from "./TableSort";
 
 export function MeleeRankingDashboard({ locale, apiBaseUrl }: { locale: string; apiBaseUrl?: string }) {
   const t = archiveLabels(locale);
   const [period, setPeriod] = useState("latest");
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<ColumnSort<"rank" | "name" | "score">>({ key: "rank", direction: "ascending" });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const state = useArchiveQuery<QueryMelee>(apiBaseUrl, `/api/query/melee${period === "latest" ? "" : `?periodId=${period}`}`);
   const data = state.data?.data;
   const periods = data?.periods ?? state.previousData?.data.periods ?? [];
-  const ranked = (data?.entries ?? []).filter(entry => entry.name.toLowerCase().includes(search.trim().toLowerCase()));
+  const ranked = (data?.entries ?? []).filter(entry => entry.name.toLowerCase().includes(search.trim().toLowerCase()))
+    .toSorted((a, b) => compareColumnValues(a[sort.key], b[sort.key], sort.direction, locale) || a.rank - b.rank || a.memberId.localeCompare(b.memberId));
   const pages = Math.max(1, Math.ceil(ranked.length / pageSize));
   const currentPage = Math.min(page, pages);
   const visible = ranked.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en");
   const time = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-  const columns = "grid grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2";
+  const columns = "grid grid-cols-[3rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2";
+  function chooseSort(key: typeof sort.key) {
+    setSort(value => nextColumnSort(value, key, key === "score" ? "descending" : "ascending"));
+    setPage(1);
+  }
 
   return <section aria-labelledby="melee-ranking-title" className="min-w-0 rounded-lg border border-border">
     <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
@@ -48,7 +55,9 @@ export function MeleeRankingDashboard({ locale, apiBaseUrl }: { locale: string; 
         <span>{t.followersObservedAt}: <time dateTime={data.snapshot.updatedAt}>{time.format(new Date(data.snapshot.updatedAt))}</time> ({t.beijingTime})</span>
       </> : null}
     </div>
-    <div aria-hidden="true" className={cn(columns, "border-y bg-muted/30 text-xs text-muted-foreground")}><span>{t.rankPosition}</span><span>{t.memberColumn}</span><span>{t.meleeScore}</span></div>
+    <div className={cn(columns, "border-y bg-muted/30 py-1 text-xs text-muted-foreground")}>
+      {([{ key: "rank", label: t.rankPosition! }, { key: "name", label: t.memberColumn! }, { key: "score", label: t.meleeScore! }] as const).map(column => <TableSortButton key={column.key} label={column.label} direction={sort.key === column.key ? sort.direction : undefined} initial={column.key === "score" ? "descending" : "ascending"} onClick={() => chooseSort(column.key)} locale={locale} className={column.key === "score" ? "justify-self-end" : "justify-self-start"} />)}
+    </div>
     <ArchiveDataRegion loading={state.loading} fallback={<div aria-label={t.meleeLoading} className="divide-y">{Array.from({ length: 5 }, (_, index) => <div key={index} className={columns}><Skeleton className="h-4 w-5" /><Skeleton className="h-5 w-24 max-w-full" /><Skeleton className="h-4 w-16" /></div>)}</div>}>
       {state.failed || !state.configured ? <div className="p-5"><Alert variant={state.failed ? "destructive" : "default"}><AlertTitle>{state.failed ? t.meleeFailed : t.dataNotReady}</AlertTitle>{state.failed ? <AlertDescription><Button variant="outline" size="sm" onClick={state.retry}>{t.retry}</Button></AlertDescription> : null}</Alert></div>
         : visible.length ? <ol aria-label={t.meleeTitle} className="divide-y divide-border">{visible.map(entry => <li key={entry.memberId} className={cn(columns, "hover:bg-muted/40")}>

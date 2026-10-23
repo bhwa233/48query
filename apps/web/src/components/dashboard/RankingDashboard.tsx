@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowDown, CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
 import type { QueryRankings } from "@starter/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,11 @@ import { cn } from "@/lib/utils";
 import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
 import { ActivitySkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
 import { MeleeRankingDashboard } from "./MeleeRankingDashboard";
+import { compareColumnValues, nextColumnSort, TableSortButton, TableSortControls, type ColumnSort } from "./TableSort";
 
 const metrics = ["followers", "messages", "images", "replies", "activeDays"] as const;
 type Metric = typeof metrics[number];
+type SortKey = Metric | "rank" | "name";
 const metricLabels = { followers: "followerRank", messages: "messageRank", images: "imageRank", replies: "replyRank", activeDays: "activityRank" };
 const columnLabels = { followers: "followerCount", messages: "messageCount", images: "imageCount", replies: "replyCount", activeDays: "activeDayCount" };
 const metricIcons = { followers: Users, messages: FileText, images: ImageIcon, replies: MessageCircle, activeDays: CalendarDays };
@@ -33,6 +35,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   const [team, setTeam] = useState("all");
   const [search, setSearch] = useState("");
   const [metric, setMetric] = useState<Metric>("messages");
+  const [sort, setSort] = useState<ColumnSort<SortKey>>({ key: "messages", direction: "descending" });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const params = new URLSearchParams(range);
@@ -53,7 +56,13 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
     const rank = positions.get(value) ?? index + 1;
     positions.set(value, rank);
     return { member, rank };
-  }).filter(({ member }) => `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
+  }).filter(({ member }) => `${member.name} ${member.pinyin ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()))
+    .toSorted((a, b) => compareColumnValues(sort.key === "rank" ? a.rank : a.member[sort.key], sort.key === "rank" ? b.rank : b.member[sort.key], sort.direction, locale) || a.rank - b.rank || a.member.id.localeCompare(b.member.id));
+  const sortOptions = [{ key: "rank", label: t.rankPosition!, initial: "ascending" }, { key: "name", label: t.memberColumn!, initial: "ascending" }, ...metrics.map(key => ({ key, label: t[columnLabels[key]]! }))] satisfies { key: SortKey; label: string; initial?: "ascending" }[];
+  function chooseSort(key: SortKey) {
+    setSort(value => nextColumnSort(value, key, key === "rank" || key === "name" ? "ascending" : "descending"));
+    setPage(1);
+  }
   const pages = Math.max(1, Math.ceil(ranked.length / pageSize));
   const currentPage = Math.min(page, pages);
   const visible = ranked.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -106,7 +115,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
       </section>
 
       <section id="rankings" aria-label={t.rankings} className="flex min-w-0 flex-col rounded-lg border border-border">
-        <Tabs value={metric} onValueChange={value => { setMetric(value as Metric); setPage(1); }} className="flex-col gap-0">
+        <Tabs value={metric} onValueChange={value => { setMetric(value as Metric); setSort({ key: value as Metric, direction: "descending" }); setPage(1); }} className="flex-col gap-0">
           <div className="flex items-center justify-between gap-2 border-b px-2 pt-1 sm:px-3">
             <TabsList variant="line" aria-label={t.rankMetric} className="rank-tabs h-10 w-0 min-w-0 flex-1 justify-between gap-0 sm:w-auto sm:flex-none sm:gap-1">
               {metrics.map(key => {
@@ -141,6 +150,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
                 <Input className="h-8 pl-8" aria-label={t.searchMembers} placeholder={t.searchMembers} value={search} onChange={event => { setSearch(event.target.value); setPage(1); }} />
               </div>
             </div>
+            <TableSortControls options={sortOptions} sort={sort} onChange={value => { setSort(value); setPage(1); }} locale={locale} className="sm:hidden" />
             {period === "custom" ? (
               <form className="grid grid-cols-2 items-end gap-2 sm:flex sm:flex-wrap" onSubmit={event => {
                 event.preventDefault();
@@ -164,9 +174,10 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
               {t.followerSnapshotNote}{!pending && followerCoverage ? ` ${t.followersCovered}: ${number.format(followerCoverage.membersCovered)}` : ""}
               {!pending && followerCoverage?.latestObservedAt ? <> · {t.followersObservedAt}: <time dateTime={followerCoverage.latestObservedAt}>{followerCoverage.earliestObservedAt !== followerCoverage.latestObservedAt && followerCoverage.earliestObservedAt ? `${observationTime.format(new Date(followerCoverage.earliestObservedAt))} — ` : ""}{observationTime.format(new Date(followerCoverage.latestObservedAt))}</time> ({t.beijingTime})</> : null}
             </p>
-            <div className="rank-columns border-y bg-muted/30 px-3 py-2 text-xs text-muted-foreground" aria-hidden="true">
-              <span>{t.rankPosition}</span><span>{t.memberColumn}</span>
-              {metrics.map(key => <span key={key} className={cn("ranking-metric justify-self-end", key !== metric ? "hidden sm:block" : "sm:block")} data-selected={key === metric}>{t[columnLabels[key]]}{key === metric ? <ArrowDown className="ml-1 inline size-3" /> : null}</span>)}
+            <div className="rank-columns border-y bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
+              <TableSortButton label={t.rankPosition!} direction={sort.key === "rank" ? sort.direction : undefined} initial="ascending" onClick={() => chooseSort("rank")} locale={locale} className="justify-self-start" />
+              <TableSortButton label={t.memberColumn!} direction={sort.key === "name" ? sort.direction : undefined} initial="ascending" onClick={() => chooseSort("name")} locale={locale} className="justify-self-start" />
+              {metrics.map(key => <TableSortButton key={key} label={t[columnLabels[key]]!} direction={sort.key === key ? sort.direction : undefined} onClick={() => chooseSort(key)} locale={locale} className={cn("justify-self-end", key !== metric && "hidden sm:inline-flex")} />)}
             </div>
             <ArchiveDataRegion loading={pending} fallback={<RankingRowsSkeleton label={t.rankingLoading} rows={state.previousData ? Math.max(1, visible.length) : 5} />}>
             {state.failed || !state.configured ? (
