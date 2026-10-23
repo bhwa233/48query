@@ -97,7 +97,9 @@ jobs:
       COLLECTOR_MAX_SECONDS: "3600"
       COLLECTOR_DEFER_MEDIA: ${{ (inputs.defer_media || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id)) && '1' || '0' }}
       COLLECTOR_GROUP_REFRESH: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
-      COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ github.event_name == 'schedule' && '1' || '0' }}
+      # The persisted checkedAt still enforces the seven-day interval. A manual
+      # group refresh should exercise the same due-identity path as the cron.
+      COLLECTOR_GROUP_WEEKLY_RECHECK: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
     steps:
       - name: Check required configuration
         shell: bash

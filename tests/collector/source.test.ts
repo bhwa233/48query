@@ -10,7 +10,7 @@ import { contentList, normalizeMessage, parsePocketJson } from "../../apps/colle
 import { runBatch } from "../../apps/collector/src/run";
 import { DryRunStore } from "../../apps/collector/src/dry-run-store";
 import { DemoSource } from "../../apps/collector/src/demo-source";
-import type { IngestUnit } from "../../apps/collector/src/types";
+import { SourceVerificationPending, type IngestUnit } from "../../apps/collector/src/types";
 import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { GalleryUploader } from "../../apps/collector/src/gallery";
 import { retryMedia } from "../../apps/collector/src/media-retry";
@@ -533,7 +533,7 @@ test("group identity rejects same-name fans and conflicting official accounts", 
   const candidate = { name: "Member", officialIds: ["10001"], officialPocketIds: [], candidateIds: ["11", "999", "12"], groups: ["SNH48"], teams: [], officialStatuses: ["44"] };
   assert.equal((await source.resolveGroupCandidate(candidate))?.id, "12", "A same-name fan is not a member");
   assert.equal((await source.resolveGroupCandidate({ ...candidate, candidateIds: [] }))?.id, "12", "Missing IDs must use official search plus profile verification");
-  await assert.rejects(source.resolveGroupCandidate({ ...candidate, candidateIds: ["12", "13"] }), /Multiple official Pocket48 identities/);
+  await assert.rejects(source.resolveGroupCandidate({ ...candidate, candidateIds: ["12", "13"] }), SourceVerificationPending);
 });
 
 // Variable signing latency must not let simultaneous callers send a burst

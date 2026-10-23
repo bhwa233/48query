@@ -58,20 +58,27 @@ export function reconcileGroupEntries(previous: GroupEntry[], roster: ReturnType
 // The existing source cursors resume pages; they do not choose which member
 // runs next. Rotate this persisted group queue by attempts, including failures,
 // so a bounded recurring run cannot keep retrying only its first members.
-export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean; recheckDue?: boolean; retrySkipped?: boolean; phase?: "incremental" | "history" }) {
+export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean; recheckDue?: boolean; retrySkipped?: boolean; phase?: "recovery" | "incremental" | "history"; sources?: readonly SourceSync["source"][] }) {
+  const now = Date.now();
   return entries.map((entry, index) => {
     const identity = entry.identity === "pending" || entry.identity !== "verified" && (options.retryUnverified || options.recheckDue
       && (!entry.checkedAt || Date.now() - Date.parse(entry.checkedAt) >= 7 * 86400_000));
     const collect = options.collect && entry.identity === "verified" && (options.refresh || !entry.collectedAt || entry.scopeComplete === false);
-    return { entry, index, identity, collect };
-  }).filter(item => options.phase === "history" ? options.collect && item.entry.identity === "verified" && item.entry.scopeComplete !== true
-    && item.entry.sources?.some(source => !source.paused && (!source.nextRetryAt || Date.parse(source.nextRetryAt) <= Date.now() || options.retrySkipped)
+    const sources = entry.sources?.filter(source => !options.sources || options.sources.includes(source.source)) ?? [];
+    const dueAt = sources.filter(source => !source.paused && source.skippedAt
+      && (options.retrySkipped || source.nextRetryAt && Date.parse(source.nextRetryAt) <= now))
+      .reduce((at, source) => Math.min(at, Date.parse(source.nextRetryAt ?? source.skippedAt!)), Infinity);
+    return { entry, index, identity, collect, sources, dueAt };
+  }).filter(item => options.phase === "recovery" ? options.collect && item.entry.identity === "verified" && Number.isFinite(item.dueAt)
+    : options.phase === "history" ? options.collect && item.entry.identity === "verified" && item.entry.scopeComplete !== true
+    && item.sources.some(source => !source.paused && (!source.nextRetryAt || Date.parse(source.nextRetryAt) <= Date.now() || options.retrySkipped)
       && (!source.historyRetryAt || Date.parse(source.historyRetryAt) <= Date.now()) && (!source.historyDone || source.incrementalCursor !== null || source.lastError)) : item.identity || item.collect).sort((a, b) => {
     if (options.phase) {
+      if (options.phase === "recovery") return a.dueAt - b.dueAt || a.index - b.index;
       if (options.phase === "incremental") {
-        const priority = (entry: GroupEntry) => entry.sources?.some(source => sourceFreshness(source) === "failed") ? 0
-          : entry.sources?.some(source => sourceFreshness(source) === "warning") ? 1 : 2;
-        const difference = priority(a.entry) - priority(b.entry);
+        const priority = (sources: SourceSync[]) => sources.some(source => sourceFreshness(source) === "failed") ? 0
+          : sources.some(source => sourceFreshness(source) === "warning") ? 1 : 2;
+        const difference = priority(a.sources) - priority(b.sources);
         if (difference) return difference;
       }
       const key = options.phase === "history" ? "lastHistoryAt" : "lastIncrementalAt";

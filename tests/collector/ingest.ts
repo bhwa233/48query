@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { HttpIngestStore } from "../../apps/collector/src/http-store";
 import type { IngestUnit } from "../../apps/collector/src/types";
 import { collectionSince, openScopedCheckpoints } from "../../apps/collector/src/collection-scope";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import type { GroupProgress } from "../../apps/collector/src/group-progress";
 
 // A real Pocket48 page exceeded the API's 128 KiB body limit. Keep real HTTP/D1
 // writes, inject a transport failure after the first chunk, and verify resume.
@@ -123,4 +126,75 @@ try {
   assert.equal(cliHealth.execution, "completed");
   assert.equal(cliHealth.failures, 0);
   console.log("PASS targeted collector CLI: health invocation ID does not create an unregistered task foreign key");
+
+  // Scheduled run 39903245375 failed on an identity ambiguity and an untouched
+  // old isolation. Exercise the actual group CLI, persisted local D1 state and
+  // final report together; source-only tests cannot catch the group catch path.
+  const groupPath = join(progressDirectory, "group.json");
+  const groupReport = join(progressDirectory, "group-health.json");
+  const candidate = { name: "Namesake", officialIds: ["10020"], officialPocketIds: [], candidateIds: ["4", "530431"], groups: ["SNH48"], teams: [], officialStatuses: [] };
+  const dueMember = { id: "smoke-group-recovery", name: "Recovery", groupName: "SNH48" };
+  const groupState: GroupProgress = { version: 1, since, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), officialRows: 2, excluded: [], entries: [
+    { candidate, member: null, identity: "pending" },
+    { candidate: { ...candidate, name: dueMember.name, candidateIds: [dueMember.id] }, member: dueMember, identity: "verified", scopeComplete: false,
+      sources: [{ source: "posts", historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null,
+        pendingLatestAt: null, pendingLatestIds: [], status: "failed", lastError: "Pocket48 unknown content list shape.",
+        lastSuccessAt: null, lastNonemptyAt: null, skippedAt: "2026-10-21T00:00:00Z", nextRetryAt: "2026-10-22T00:00:00Z",
+        healthVersion: 1, failureKind: "protocol", failureCount: 3 }] },
+  ] };
+  const pocket = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    let content: unknown;
+    if (request.url === "/directory") content = { roomId: [] };
+    else if (request.url?.startsWith("/malformed")) content = undefined;
+    else if (request.url?.endsWith("/user/info/home")) content = { baseUserInfo: { userId: body.userId, nickname: "Namesake", isStar: true } };
+    else if (request.url?.endsWith("/star/archives")) content = { starInfo: { starGroupName: "SNH48" } };
+    else if (request.url?.endsWith("/getMeleeRankPage")) content = { weekRankList: [] };
+    else if (request.url?.endsWith("/home/new")) content = { postsInfo: [], nextId: "0" };
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify(request.url === "/directory" ? content : { status: 200, ...(content === undefined ? {} : { content }) }));
+  });
+  await new Promise<void>(resolve => pocket.listen(0, "127.0.0.1", resolve));
+  const pocketUrl = `http://127.0.0.1:${(pocket.address() as AddressInfo).port}`;
+  const groupEnv = { ...process.env, POCKET48_TOKEN: "synthetic", POCKET48_PA: "synthetic", POCKET48_API_BASE_URL: pocketUrl,
+    COLLECTOR_CREDENTIALS_URL: "", COLLECTOR_CREDENTIAL_READ_TOKEN: "", COLLECTOR_SOURCES: "posts", POCKET48_MIN_INTERVAL_MS: "0",
+    POCKET48_DIRECTORY_URL: `${pocketUrl}/directory`, POCKET48_HISTORY_DIRECTORY_URL: `${pocketUrl}/directory`,
+    COLLECTOR_GROUP_STATE: groupPath, COLLECTOR_REPORT_PATH: groupReport, COLLECTOR_GROUP_LIMIT: "1", COLLECTOR_GROUP_MAX_SECONDS: "15",
+    COLLECTOR_GROUP_WEEKLY_RECHECK: "1", GITHUB_STEP_SUMMARY: "", GITHUB_RUN_ID: "smoke-group-cli", GITHUB_RUN_ATTEMPT: "1" };
+  const groupArgs = ["--import", tsx, new URL("../../apps/collector/src/group.ts", import.meta.url).pathname, "--collect"];
+  try {
+    await writeFile(groupPath, JSON.stringify(groupState));
+    const { stdout } = await promisify(execFile)(process.execPath, groupArgs, { env: groupEnv, timeout: 20000 });
+    const health = JSON.parse(await readFile(groupReport, "utf8"));
+    const after = JSON.parse(await readFile(groupPath, "utf8")) as GroupProgress;
+    assert.equal(health.execution, "completed");
+    assert.equal(health.runErrors, 0);
+    assert.equal(health.sourceFailures, 0);
+    assert.equal(health.recoveryProbes, 1);
+    assert.equal(after.entries[0]?.identity, "unverified");
+    assert.ok(after.entries[0]?.checkedAt);
+    assert.equal(health.identityIssues[0]?.status, "unverified");
+    assert.ok(health.identityIssues[0]?.nextCheckAt);
+    assert.equal(after.entries[1]?.sources?.[0]?.failureCount, 0);
+    assert.equal(after.entries[1]?.scopeComplete, false, "A successful probe does not certify all member sources/history");
+    assert.ok(stdout.indexOf('"phase":"recovery"') < stdout.indexOf('"event":"group_identity_pending"'));
+    const again = await promisify(execFile)(process.execPath, groupArgs, { env: { ...groupEnv, GITHUB_RUN_ATTEMPT: "2" }, timeout: 20000 });
+    assert.ok(!again.stdout.includes('"event":"group_identity_pending"'), "An identity gap must not be checked again before its due date");
+    // A malformed protocol response must still fail even when the persisted
+    // source health is green. Previously health.failures overwrote run errors.
+    const broken = JSON.parse(await readFile(groupPath, "utf8")) as GroupProgress;
+    broken.entries.unshift({ candidate: { ...candidate, candidateIds: ["bad-profile"] }, member: null, identity: "pending" });
+    await writeFile(groupPath, JSON.stringify(broken));
+    await assert.rejects(promisify(execFile)(process.execPath, groupArgs, { env: { ...groupEnv, POCKET48_API_BASE_URL: `${pocketUrl}/malformed`, GITHUB_RUN_ATTEMPT: "3" }, timeout: 20000 }));
+    const failedHealth = JSON.parse(await readFile(groupReport, "utf8"));
+    assert.equal(failedHealth.execution, "failed");
+    assert.ok(failedHealth.runErrors > 0);
+    assert.equal(failedHealth.sourceFailures, 0);
+    console.log("PASS group CLI: bounded due recovery, identity gap backoff, D1 persistence and distinct run/source errors");
+  } finally {
+    pocket.closeAllConnections();
+    await new Promise<void>((resolve, reject) => pocket.close(error => error ? reject(error) : resolve()));
+  }
 } finally { await rm(progressDirectory, { recursive: true, force: true }); }

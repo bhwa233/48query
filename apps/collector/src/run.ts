@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 export const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; invocationId?: string; recovery?: RecoveryAllowance; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; invocationId?: string; recovery?: RecoveryAllowance; recoveryOnly?: boolean; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
@@ -63,7 +63,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     };
     // Register before any source can fail, preserving the original error on completion.
     await store.ingestUnit(unit([]));
-    if (source.readFollowers) {
+    if (source.readFollowers && !options.recoveryOnly) {
       try {
         const followerSnapshot = await source.readFollowers(member);
         if (followerSnapshot) await store.ingestUnit({ ...unit([]), followerSnapshot });
@@ -83,6 +83,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
       if (options.budget?.stopped) { budgetReached = true; break; }
       let sync = initializeSourceHealth(structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream)));
       const probing = Boolean(sync.skippedAt);
+      if (options.recoveryOnly && !probing) continue;
       const blocked = sync.paused || sync.lastFailureRunId === invocationId
         || probing && (!options.retrySkipped && Date.parse(sync.nextRetryAt ?? "9999-01-01") > Date.now()
           || recovery.remaining <= 0 || recovery.spentMs >= recovery.maxMs);

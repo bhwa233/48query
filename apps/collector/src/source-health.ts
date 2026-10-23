@@ -26,7 +26,7 @@ export function recordSourceIssue<T extends SourceHealth>(sync: T, error: unknow
   const reason = (error instanceof Error ? error.message : "Collection failed.").slice(0, 1000);
   const at = new Date(now).toISOString();
   if (error instanceof SourceVerificationPending && !(error instanceof SourceRequestSkipped)) {
-    return { ...sync, status: "pending", historyError: reason, historyRetryAt: new Date(now + 2 * 3600_000).toISOString() };
+    return { ...sourceRecovered(sync, false, now), status: "pending", historyError: reason, historyRetryAt: new Date(now + 2 * 3600_000).toISOString() };
   }
   const kind = error instanceof SourceRequestSkipped ? "transient" : "protocol";
   const count = Math.min(3, (sync.failureCount ?? 0) + (sync.lastFailureRunId === runId ? 0 : 1));

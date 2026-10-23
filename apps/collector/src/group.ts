@@ -12,7 +12,7 @@ import { runBatch, emptySync } from "./run";
 import { initializeSourceHealth } from "./source-health";
 import { collectorHealth, writeCollectorReport } from "./collector-report";
 import type { CollectorStore, SourceSync } from "./types";
-import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped } from "./types";
+import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
 import type { CollectorProgress } from "@starter/shared";
 import { CollectionBudget, CollectionStopped } from "./budget";
 import { collectMelee } from "./melee";
@@ -49,11 +49,13 @@ await lock.close();
 let monitorRun: CollectorRun | undefined;
 let monitorStore: HttpIngestStore | null = null;
 let failures = 0;
+let runErrors = 0;
 const invocationId = process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `run-${randomUUID()}`;
 const recovery = { remaining: 10, spentMs: 0, maxMs: 180_000 };
 let reportEntries: () => { memberId: string; sources: SourceSync[] }[] = () => [];
 let reportSources = [...COLLECTION_SOURCES];
 let reportRoster: () => Record<string, unknown> = () => ({});
+let reportIdentities: () => Record<string, unknown> = () => ({});
 let pagesCommitted = 0;
 let messagesWrittenIncludingReplay = 0;
 let finished = false;
@@ -80,6 +82,11 @@ try {
     ? [{ memberId: entry.member.id, sources: (dryRun ? entry.inspectionSources ?? [] : entry.sources ?? []).filter(sync => reportSources.includes(sync.source)) }] : []);
   reportRoster = () => ({ rosterFailures: state.rosterFailures ?? 0, rosterRefreshedAt: state.rosterRefreshedAt ?? null,
     rosterAgeSeconds: Math.round((Date.now() - Date.parse(state.rosterRefreshedAt ?? state.createdAt)) / 1000) });
+  reportIdentities = () => ({ identityPending: state.entries.filter(entry => entry.identity !== "verified").length,
+    identityIssues: state.entries.filter(entry => entry.identityError).slice(0, 100).map(entry => ({
+      officialIds: entry.candidate.officialIds, candidateIds: entry.candidate.candidateIds, status: entry.identity,
+      reason: entry.identityError, checkedAt: entry.checkedAt ?? null,
+      nextCheckAt: entry.checkedAt ? new Date(Date.parse(entry.checkedAt) + 7 * 86400_000).toISOString() : null })) });
   applyGroupScope(state, since);
   if (process.argv.includes("--update-roster") && !initialized) {
     try {
@@ -166,27 +173,29 @@ try {
       readVerifiedMedia: store?.verifiedRoomMedia?.bind(store), readVerifiedPostImages: store?.verifiedPostImages?.bind(store),
       budget: () => activeBudget, maxOriginalLookups: 12,
       minIntervalMs: Number(process.env.POCKET48_MIN_INTERVAL_MS ?? 5000), sources });
-    if (collect) {
-      activeBudget = budget.slice(180);
-      const melee = await collectMelee(source, remoteStore, activeBudget);
-      failures += melee.errors;
-      activeBudget = budget;
-    }
     try { await source.prepareGroupDirectory(state.entries.flatMap(entry => entry.identity === "verified" && entry.member ? [entry.member] : [])); }
     catch (error) { if (!budget.stopped) throw error; }
-    const incrementalBudget = maxSeconds ? budget.slice(Math.max(0, (budget.deadline - Date.now()) / 1000) * 0.75) : budget;
-    for (const phase of ["incremental", "history"] as const) {
-      const phaseBudget = phase === "incremental" ? incrementalBudget : budget;
+    // A reserved allowance inside runBatch cannot reach members at the back of
+    // the normal queue. Drain due probes first, using the existing global cap.
+    for (const phase of ["recovery", "incremental", "history"] as const) {
+      if (phase === "incremental" && collect) {
+        activeBudget = budget.slice(180);
+        const melee = await collectMelee(source, remoteStore, activeBudget);
+        failures += melee.errors;
+      }
+      const phaseBudget = phase === "recovery" ? budget.slice(recovery.maxMs / 1000)
+        : phase === "incremental" && maxSeconds ? budget.slice(Math.max(0, (budget.deadline - Date.now()) / 1000) * 0.75) : budget;
       let phaseProcessed = 0;
       for (const { entry } of groupWork(state.entries, { collect, refresh,
-        retryUnverified, recheckDue: process.env.COLLECTOR_GROUP_WEEKLY_RECHECK === "1", retrySkipped, phase })) {
+        retryUnverified, recheckDue: process.env.COLLECTOR_GROUP_WEEKLY_RECHECK === "1", retrySkipped, phase, sources })) {
+        if (phase === "recovery" && (recovery.remaining <= 0 || recovery.spentMs >= recovery.maxMs)) break;
         if (phaseBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
         phaseProcessed += 1; processed += 1;
         activeBudget = phaseBudget.slice(300);
         const attemptedAt = new Date().toISOString();
         entry.lastAttemptAt = attemptedAt;
         if (phase === "incremental") entry.lastIncrementalAt = attemptedAt;
-        else entry.lastHistoryAt = attemptedAt;
+        else if (phase === "history") entry.lastHistoryAt = attemptedAt;
         await persist(entry);
         console.log(JSON.stringify({ event: "group_member_started", phase, memberId: entry.member?.id ?? null, name: entry.candidate.name, elapsedSeconds: Math.round((Date.now() - started) / 1000) }));
         const previousIdentity = entry.identity;
@@ -208,7 +217,7 @@ try {
             if (previous) restore(entry, previous);
             entry.lastAttemptAt = attemptedAt;
             if (phase === "incremental") entry.lastIncrementalAt = attemptedAt;
-            else entry.lastHistoryAt = attemptedAt;
+            else if (phase === "history") entry.lastHistoryAt = attemptedAt;
             await persist(entry);
             if (dryStore) dryStore.units.length = 0;
             const singleSource = { sources: source.sources, listMembers: async () => [member], readFollowers: phase === "incremental" ? source.readFollowers.bind(source) : undefined, listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
@@ -221,8 +230,8 @@ try {
                 if (!dryRun) { entry.sources = localSources; await persist(entry); }
               },
             };
-            const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
-              runId: invocationId, recovery, phase, batchId: monitorRun ? `${monitorRun.id}:${phase}:${member.id}` : undefined,
+            const result = await runBatch(singleSource, store, { maxPagesPerMember: phase === "recovery" ? 1 : Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
+              runId: invocationId, recovery, recoveryOnly: phase === "recovery", phase: phase === "history" ? "history" : "incremental", batchId: monitorRun ? `${monitorRun.id}:${phase}:${member.id}` : undefined,
               since, checkpoints, budget: activeBudget, historyOnly: phase === "history", retrySkipped,
               maxHistoryPagesPerMember: phase === "history" ? Number(process.env.COLLECTOR_HISTORY_PAGES ?? 1) : 0,
               catalogRetryLimit: phase === "history" ? 2 : 0 });
@@ -232,8 +241,11 @@ try {
             if (dryStore) {
               entry.inspectionSources = localSources; entry.inspectionErrorCount = result.errorCount; entry.inspectedAt = new Date().toISOString(); entry.inspectionScopeComplete = result.scopeComplete;
             } else {
-              entry.sources = localSources; entry.scopeComplete = result.scopeComplete;
-              entry.errorCount = result.errorCount; entry.collectedAt = new Date().toISOString();
+              entry.sources = localSources;
+              if (phase !== "recovery") {
+                entry.scopeComplete = result.scopeComplete;
+                entry.errorCount = result.errorCount; entry.collectedAt = new Date().toISOString();
+              }
             }
             budgetReached ||= result.budgetReached;
           }
@@ -243,6 +255,13 @@ try {
             entry.identity = previousIdentity;
             entry.identityError = error.message;
             console.log(JSON.stringify({ event: "group_member_skipped", memberId: entry.member?.id ?? null, phase, error: error.message }));
+          }
+          else if (error instanceof SourceVerificationPending) {
+            entry.identity = "unverified";
+            entry.checkedAt = new Date().toISOString();
+            entry.identityError = error.message;
+            console.log(JSON.stringify({ event: "group_identity_pending", officialIds: entry.candidate.officialIds,
+              candidateIds: entry.candidate.candidateIds, phase, error: error.message, checkedAt: entry.checkedAt }));
           }
           else {
             failures += 1;
@@ -260,6 +279,7 @@ try {
       }
     }
   }
+  runErrors = failures;
   failures = Math.max(failures, collectorHealth(reportEntries()).failures);
   console.log(JSON.stringify(summary()));
   if (monitorRun) {
@@ -272,8 +292,8 @@ try {
 } finally {
   try {
     const health = collectorHealth(reportEntries());
-    try { await writeCollectorReport(health, { runId: invocationId, dryRun, failures, interrupted: !finished,
-      ...reportRoster(), pagesCommitted, messagesWrittenIncludingReplay, recoveryProbes: 10 - recovery.remaining }); }
+    try { await writeCollectorReport(health, { runId: invocationId, dryRun, runErrors: finished ? runErrors : failures,
+      interrupted: !finished, ...reportRoster(), ...reportIdentities(), pagesCommitted, messagesWrittenIncludingReplay, recoveryProbes: 10 - recovery.remaining }); }
     catch {
       failures += 1;
       process.exitCode = 1;

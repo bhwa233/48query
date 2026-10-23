@@ -231,7 +231,7 @@ export class Pocket48Source implements CollectorSource {
   }
 
   async resolveGroupCandidate(candidate: RosterCandidate): Promise<CollectorMember | null> {
-    if (candidate.ambiguousName) return null;
+    if (candidate.ambiguousName) throw new SourceVerificationPending("Roster name matches multiple identities; member retained for verification.");
     const ids = new Set(candidate.candidateIds);
     // Missing/stale Pocket48 IDs need official search results, never a website
     // sid used as a userId. Every proposed identity is checked again below.
@@ -277,7 +277,7 @@ export class Pocket48Source implements CollectorSource {
         }
       }
     }
-    if (verified.length > 1) throw new Error("Multiple official Pocket48 identities match this name; manual reconciliation required.");
+    if (verified.length > 1) throw new SourceVerificationPending("Multiple official Pocket48 identities match this name; manual reconciliation required.");
     const member = verified[0] ?? null;
     if (!member && failure) throw failure instanceof Error ? failure : new Error("Pocket48 member verification failed.");
     if (member) this.directory.set(member.id, member);

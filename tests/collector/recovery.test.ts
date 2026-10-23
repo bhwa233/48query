@@ -8,11 +8,51 @@ import { Pocket48Source } from "../../apps/collector/src/pocket48-source";
 import { collectorHealth } from "../../apps/collector/src/collector-report";
 import { retryMedia } from "../../apps/collector/src/media-retry";
 import type { MediaRetryProgress, VideoAttachment } from "../../packages/shared";
+import { groupWork, type GroupEntry } from "../../apps/collector/src/group-progress";
 
 const member = { id: "1", name: "Owner", groupName: "SNH48" };
 const checkpoint = (source: SourceSync["source"] = "posts"): SourceSync => ({ source, historyCursor: "older", historyDone: false,
   latestAt: "2026-10-22T00:00:00.000Z", latestIds: ["latest"], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [],
   status: "ok", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
+
+// Run 39903245375 left a due album isolated behind the normal member queue,
+// spent none of its recovery allowance, and failed on that untouched old state.
+test("due isolated sources get a separate bounded queue without polling paused or disabled sources", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-23T00:00:00Z") });
+  const candidate = { name: "Owner", officialIds: [], officialPocketIds: [], candidateIds: [], groups: [], teams: [], officialStatuses: [] };
+  const isolated: SourceSync = { ...checkpoint(), healthVersion: 1, failureCount: 3, failureKind: "protocol",
+    skippedAt: "2026-10-22T00:00:00Z", nextRetryAt: "2026-10-22T02:00:00Z" };
+  const entries: GroupEntry[] = [
+    { candidate, member, identity: "verified", scopeComplete: false, sources: [checkpoint()] },
+    { candidate, member: { ...member, id: "due" }, identity: "verified", scopeComplete: false,
+      lastIncrementalAt: "2026-10-22T23:00:00Z", sources: [isolated, checkpoint("room")] },
+    { candidate, member, identity: "verified", sources: [{ ...isolated, paused: true }] },
+    { candidate, member, identity: "verified", sources: [{ ...isolated, nextRetryAt: "2026-10-24T00:00:00Z" }] },
+    { candidate, member, identity: "verified", sources: [{ ...isolated, source: "album" }] },
+  ];
+  const work = groupWork(entries, { collect: true, refresh: true, retryUnverified: false, phase: "recovery", sources: ["posts", "room"] });
+  assert.deepEqual(work.map(item => item.entry.member?.id), ["due"]);
+  let saved = entries[1]!.sources!;
+  const reads: string[] = [];
+  const result = await runBatch({ sources: ["posts", "room"], listMembers: async () => [member], listMessages: async () => { throw new Error("room must not be polled"); },
+    listContent: async (_member, source) => { reads.push(source); return { items: [], nextCursor: null }; } }, new DryRunStore(), {
+    recoveryOnly: true, maxHistoryPagesPerMember: 0,
+    checkpoints: { read: () => saved, write: async (_id, sync) => { saved = saved.map(item => item.source === sync.source ? sync : item); } },
+  });
+  assert.equal(result.errorCount, 0);
+  assert.deepEqual(reads, ["posts"]);
+  assert.equal(saved[0]?.failureCount, 0);
+  assert.equal(saved[0]?.historyCursor, "older");
+  saved = [isolated];
+  const pending = await runBatch({ sources: ["posts"], listMembers: async () => [member], listMessages: async () => {
+    throw new SourceVerificationPending("Historical authorship remains unverified");
+  } }, new DryRunStore(), { recoveryOnly: true, maxHistoryPagesPerMember: 0,
+    checkpoints: { read: () => saved, write: async (_id, sync) => { saved = [sync]; } } });
+  assert.equal(pending.errorCount, 0, "A confirmed verification gap must replace the obsolete protocol fault");
+  assert.equal(saved[0]?.skippedAt, null);
+  assert.ok(saved[0]?.historyError);
+  assert.equal(saved[0]?.lastIncrementalSuccessAt, undefined, "A gap is not a successful incremental read");
+});
 
 // Scheduled runs previously either ignored every 502 forever or suspended a
 // source permanently on its third failure. Neither behavior implements recovery.
