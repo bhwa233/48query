@@ -119,12 +119,13 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: node scripts/install-build-dependencies.mjs
       - name: Set collector progress paths
         shell: bash
         run: |
           echo "COLLECTOR_GROUP_STATE=$RUNNER_TEMP/48query-group/progress.json" >> "$GITHUB_ENV"
           echo "COLLECTOR_CHECKPOINT_STATE=$RUNNER_TEMP/48query-group/scoped-sync.json" >> "$GITHUB_ENV"
+          echo "COLLECTOR_REPORT_PATH=$RUNNER_TEMP/48query-group/health.json" >> "$GITHUB_ENV"
       - name: Restore collector progress
         env:
           GH_TOKEN: ${{ github.token }}
@@ -140,9 +141,6 @@ jobs:
             flags=(--collect --update-roster)
             [[ "$COLLECTOR_DRY_RUN" == "1" ]] && flags+=(--dry-run)
             [[ "$COLLECTOR_GROUP_REFRESH" == "1" ]] && flags+=(--refresh)
-            if [[ "$COLLECTOR_GROUP_WEEKLY_RECHECK" == "1" && "$(TZ=Asia/Shanghai date +%u)" == "7" && "$(TZ=Asia/Shanghai date +%H)" == "00" ]]; then
-              flags+=(--retry-unverified)
-            fi
             pnpm --filter @starter/collector group "${flags[@]}"
           else
             export COLLECTOR_MAX_SECONDS="$((COLLECTOR_GROUP_MINUTES * 60))"
@@ -156,6 +154,7 @@ jobs:
           path: |
             ${{ env.COLLECTOR_GROUP_STATE }}
             ${{ env.COLLECTOR_CHECKPOINT_STATE }}
+            ${{ env.COLLECTOR_REPORT_PATH }}
           if-no-files-found: warn
           retention-days: 30
   media:
@@ -181,7 +180,17 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: node scripts/install-build-dependencies.mjs
       - name: Retry media within its own budget
         timeout-minutes: 20
-        run: pnpm --filter @starter/collector run run --retry-media
+        run: |
+          export COLLECTOR_REPORT_PATH="$RUNNER_TEMP/media-health.json"
+          pnpm --filter @starter/collector run run --retry-media
+      - name: Save media health report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: media-health-2026
+          path: ${{ runner.temp }}/media-health.json
+          if-no-files-found: warn
+          retention-days: 30

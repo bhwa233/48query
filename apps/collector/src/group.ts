@@ -8,7 +8,9 @@ import { loadProductionCredential } from "./credentials";
 import { createPocket48Pa } from "./pocket48-auth.mjs";
 import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
-import { runBatch } from "./run";
+import { runBatch, emptySync } from "./run";
+import { initializeSourceHealth } from "./source-health";
+import { collectorHealth, writeCollectorReport } from "./collector-report";
 import type { CollectorStore, SourceSync } from "./types";
 import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped } from "./types";
 import type { CollectorProgress } from "@starter/shared";
@@ -47,6 +49,13 @@ await lock.close();
 let monitorRun: CollectorRun | undefined;
 let monitorStore: HttpIngestStore | null = null;
 let failures = 0;
+const invocationId = process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `run-${randomUUID()}`;
+const recovery = { remaining: 10, spentMs: 0, maxMs: 180_000 };
+let reportEntries: () => { memberId: string; sources: SourceSync[] }[] = () => [];
+let reportRoster: () => Record<string, unknown> = () => ({});
+let pagesCommitted = 0;
+let messagesWrittenIncludingReplay = 0;
+let finished = false;
 try {
   const started = Date.now();
   let processed = 0;
@@ -64,17 +73,25 @@ try {
     state = { version: 1, createdAt: now, updatedAt: now, officialRows: roster.officialRows, excluded: roster.excluded,
       entries: roster.candidates.map(candidate => ({ candidate, member: null, identity: "pending" })) };
     initialized = true;
+    state.rosterRefreshedAt = now;
   }
+  reportEntries = () => state.entries.flatMap(entry => entry.member && entry.identity === "verified"
+    ? [{ memberId: entry.member.id, sources: dryRun ? entry.inspectionSources ?? [] : entry.sources ?? [] }] : []);
+  reportRoster = () => ({ rosterFailures: state.rosterFailures ?? 0, rosterRefreshedAt: state.rosterRefreshedAt ?? null,
+    rosterAgeSeconds: Math.round((Date.now() - Date.parse(state.rosterRefreshedAt ?? state.createdAt)) / 1000) });
   applyGroupScope(state, since);
   if (process.argv.includes("--update-roster") && !initialized) {
     try {
       const roster = await readGroupRoster(rosterOptions);
       state = { ...state, entries: reconcileGroupEntries(state.entries, roster), officialRows: roster.officialRows, excluded: roster.excluded, rosterRefreshedAt: new Date().toISOString() };
+      state.rosterFailures = 0;
     } catch (error) {
       if (!(error instanceof SourceRequestSkipped)) throw error;
       // Reuse the restored roster and checkpoints only for this transient read;
       // keep rosterRefreshedAt unchanged so a skipped refresh is not a success.
       console.log(JSON.stringify({ event: "group_roster_skipped", message: error.message, candidates: state.entries.length, rosterRefreshedAt: state.rosterRefreshedAt ?? null }));
+      state.rosterFailures = Math.min(3, (state.rosterFailures ?? 0) + 1);
+      if (state.rosterFailures >= 3) failures += 1;
     }
   }
   const save = async () => {
@@ -100,14 +117,15 @@ try {
     if (remoteStore) {
       monitorStore = remoteStore;
       const startedAt = new Date(started).toISOString();
-      monitorRun = { id: process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `run-${randomUUID()}`,
+      monitorRun = { id: invocationId,
         statDate: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(started)),
         startedAt, completedAt: null, status: "running", totalMembers: state.entries.length, errorCount: 0 };
       await remoteStore.saveRun(monitorRun);
     }
     const durable = remoteStore ? await remoteStore.collectionProgress() : new Map<string, CollectorProgress>();
     const restore = (entry: typeof state.entries[number], progress: CollectorProgress) => {
-      entry.sources = structuredClone(progress.sources);
+      entry.sources = structuredClone(progress.sources).map(sync => initializeSourceHealth({ ...sync,
+        enabledAt: sync.enabledAt ?? entry.sources?.find(previous => previous.source === sync.source)?.enabledAt }));
       entry.lastAttemptAt = progress.lastAttemptAt ?? undefined;
       entry.lastIncrementalAt = progress.lastIncrementalAt ?? undefined;
       entry.lastHistoryAt = progress.lastHistoryAt ?? undefined;
@@ -134,6 +152,11 @@ try {
       if (!COLLECTION_SOURCES.includes(value as typeof COLLECTION_SOURCES[number])) throw new Error(`Unsupported source: ${value}`);
       return value as typeof COLLECTION_SOURCES[number];
     });
+    for (const entry of state.entries) {
+      if (entry.identity !== "verified" || !entry.member || dryRun) continue;
+      entry.sources = sources.map(stream => initializeSourceHealth(entry.sources?.find(sync => sync.source === stream) ?? emptySync(stream)));
+    }
+    await save();
     const source = new Pocket48Source({ token, since, deviceId: process.env.POCKET48_DEVICE_ID ?? credential?.deviceId,
       pa: process.env.POCKET48_PA, paFactory: process.env.POCKET48_PA ? undefined : createPocket48Pa, apiBaseUrl: process.env.POCKET48_API_BASE_URL,
       memberScope: "all", directoryUrl: process.env.POCKET48_DIRECTORY_URL, historyDirectoryUrl: process.env.POCKET48_HISTORY_DIRECTORY_URL ?? HISTORICAL_DIRECTORY_URL,
@@ -152,7 +175,8 @@ try {
     for (const phase of ["incremental", "history"] as const) {
       const phaseBudget = phase === "incremental" ? incrementalBudget : budget;
       let phaseProcessed = 0;
-      for (const { entry } of groupWork(state.entries, { collect, refresh, retryUnverified, retrySkipped, phase })) {
+      for (const { entry } of groupWork(state.entries, { collect, refresh,
+        retryUnverified, recheckDue: process.env.COLLECTOR_GROUP_WEEKLY_RECHECK === "1", retrySkipped, phase })) {
         if (phaseBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
         phaseProcessed += 1; processed += 1;
         activeBudget = phaseBudget.slice(300);
@@ -166,7 +190,10 @@ try {
         try {
           const previousMemberId = entry.member?.id;
           entry.identity = "pending";
-          const member = await source.resolveGroupCandidate(entry.candidate);
+          // Roster reconciliation already resets changed identities to pending.
+          // Reuse verified identities; followers and actual source authors are
+          // still checked, without spending two profile reads on every phase.
+          const member = previousIdentity === "verified" && entry.member ? entry.member : await source.resolveGroupCandidate(entry.candidate);
           entry.member = member; entry.checkedAt = new Date().toISOString();
           entry.identity = member ? "verified" : "unverified"; delete entry.identityError;
           if (member?.id !== previousMemberId || !member) {
@@ -181,7 +208,7 @@ try {
             else entry.lastHistoryAt = attemptedAt;
             await persist(entry);
             if (dryStore) dryStore.units.length = 0;
-            const singleSource = { sources: source.sources, listMembers: async () => [member], readFollowers: source.readFollowers.bind(source), listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
+            const singleSource = { sources: source.sources, listMembers: async () => [member], readFollowers: phase === "incremental" ? source.readFollowers.bind(source) : undefined, listMessages: source.listMessages.bind(source), listContent: source.listContent.bind(source), retryCatalog: source.retryCatalog.bind(source) };
             const localSources = dryRun ? [] : entry.sources ?? [];
             const checkpoints = {
               read: () => localSources,
@@ -192,11 +219,13 @@ try {
               },
             };
             const result = await runBatch(singleSource, store, { maxPagesPerMember: Number(process.env.COLLECTOR_MAX_PAGES ?? 1),
-              runId: monitorRun?.id, phase, batchId: monitorRun ? `${monitorRun.id}:${phase}:${member.id}` : undefined,
+              runId: invocationId, recovery, phase, batchId: monitorRun ? `${monitorRun.id}:${phase}:${member.id}` : undefined,
               since, checkpoints, budget: activeBudget, historyOnly: phase === "history", retrySkipped,
               maxHistoryPagesPerMember: phase === "history" ? Number(process.env.COLLECTOR_HISTORY_PAGES ?? 1) : 0,
               catalogRetryLimit: phase === "history" ? 2 : 0 });
             failures += result.errorCount;
+            pagesCommitted += result.pagesCommitted;
+            messagesWrittenIncludingReplay += result.messagesWritten;
             if (dryStore) {
               entry.inspectionSources = localSources; entry.inspectionErrorCount = result.errorCount; entry.inspectedAt = new Date().toISOString(); entry.inspectionScopeComplete = result.scopeComplete;
             } else {
@@ -228,6 +257,7 @@ try {
       }
     }
   }
+  failures = Math.max(failures, collectorHealth(reportEntries()).failures);
   console.log(JSON.stringify(summary()));
   if (monitorRun) {
     monitorRun.status = failures > 0 ? "failed" : budgetReached || stopping ? "bounded" : "completed";
@@ -235,8 +265,18 @@ try {
   }
   // A bounded batch can succeed with remaining work; actual request/write errors fail.
   if (!manifestOnly && failures > 0) process.exitCode = 1;
+  finished = true;
 } finally {
   try {
+    const health = collectorHealth(reportEntries());
+    try { await writeCollectorReport(health, { runId: invocationId, dryRun, failures, interrupted: !finished,
+      ...reportRoster(), pagesCommitted, messagesWrittenIncludingReplay, recoveryProbes: 10 - recovery.remaining }); }
+    catch {
+      failures += 1;
+      process.exitCode = 1;
+      if (monitorRun) monitorRun.status = "failed";
+      console.error(JSON.stringify({ event: "collector_report_failed" }));
+    }
     if (monitorRun && monitorStore) await monitorStore.saveRun({ ...monitorRun, completedAt: new Date().toISOString(),
       status: monitorRun.status === "running" ? "failed" : monitorRun.status,
       errorCount: monitorRun.status === "running" ? Math.max(1, failures) : failures });

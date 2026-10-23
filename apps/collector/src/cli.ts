@@ -13,6 +13,8 @@ import { collectionSince, openScopedCheckpoints } from "./collection-scope";
 import { dirname, join } from "node:path";
 import { CollectionBudget } from "./budget";
 import { collectMelee } from "./melee";
+import { collectorHealth, writeCollectorReport } from "./collector-report";
+import { randomUUID } from "node:crypto";
 
 const backfillOnly = process.argv.includes("--backfill");
 const mediaOnly = process.argv.includes("--retry-media");
@@ -33,6 +35,13 @@ if (memberScope !== "followed" && memberScope !== "all") throw new Error("COLLEC
 const endpoint = process.env["INGEST_API_URL"];
 const authKey = process.env["INGEST_KEY"];
 const store: CollectorStore = !dryRun && endpoint && authKey ? new HttpIngestStore(endpoint, authKey, since, budget) : new DryRunStore();
+const healthEntries = new Map<string, SourceSync[]>();
+let retries: Awaited<ReturnType<typeof retryMedia>> = { imageAttempts: 0, videoAttempts: 0, failures: 0, persistentFailures: 0, health: [], budgetReached: false };
+let melee = { errors: 0 };
+let errorCount = 0;
+let pagesCommitted = 0;
+let complete = false;
+try {
 const stored = sourceName === "pocket48" && !mediaOnly ? await loadProductionCredential() : null;
 const sourceOptions = {
   budget: () => activeBudget,
@@ -74,7 +83,6 @@ const batchSource = memberId
 
 if (!mediaOnly && sourceName === "pocket48" && !sourceOptions["token"]) throw new Error(`Pocket48 credential not found. Run the login command first: ${CREDENTIAL_PATH}`);
 if (!dryRun && (!endpoint || !authKey)) throw new Error("INGEST_API_URL and INGEST_KEY are required for writes; use --dry-run to inspect safely.");
-let melee = { errors: 0 };
 if (!mediaOnly && !backfillOnly && source instanceof Pocket48Source) {
   activeBudget = budget.slice(180);
   try { melee = await collectMelee(source, store instanceof HttpIngestStore ? store : null, activeBudget); }
@@ -100,18 +108,22 @@ const archiveVideo = !dryRun && process.env.COLLECTOR_DEFER_MEDIA !== "1" && sou
     video.status = "skipped"; video.skipReason = "too_large";
   }
 } : undefined;
-const retries = await retryMedia(store, { archiveImage, archiveVideo, mediaOnly,
-  budget,
+retries = await retryMedia(store, { archiveImage, archiveVideo, mediaOnly,
+  budget, since,
   imageLimit: Number(process.env.COLLECTOR_IMAGE_RETRY_LIMIT ?? (mediaOnly ? 100 : 25)),
   maxBatches: mediaOnly ? Number(process.env.COLLECTOR_MEDIA_RETRY_BATCHES ?? 100) : 1 });
-const retryFailures = retries.failures;
 const memoryCheckpoints = new Map<string, SourceSync[]>();
 const checkpoints = since && !mediaOnly ? dryRun ? {
   read: (id: string) => memoryCheckpoints.get(id) ?? [],
   write: async (id: string, sync: SourceSync) => { memoryCheckpoints.set(id, [...(memoryCheckpoints.get(id) ?? []).filter(item => item.source !== sync.source), sync]); },
 } : await openScopedCheckpoints(process.env.COLLECTOR_CHECKPOINT_STATE ?? join(dirname(CREDENTIAL_PATH), "collection-scope.json"), since, store instanceof HttpIngestStore ? store : undefined) : undefined;
 const runOptions = { since, checkpoints, budget, maxMembers, maxPagesPerMember, maxHistoryPagesPerMember, historyOnly: backfillOnly || process.env.COLLECTOR_HISTORY_ONLY === "1", retrySkipped: process.argv.includes("--retry-skipped"), catalogRetryLimit: Number(process.env.COLLECTOR_CATALOG_RETRY_LIMIT ?? 10), archiveImage, archiveVideo };
-let errorCount = 0;
+const reportCheckpoints = checkpoints ? { read: (id: string) => checkpoints.read(id), write: async (id: string, sync: SourceSync) => {
+  await checkpoints.write(id, sync);
+  healthEntries.set(id, checkpoints.read(id));
+} } : undefined;
+Object.assign(runOptions, { checkpoints: reportCheckpoints, runId: process.env.GITHUB_RUN_ID
+  ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : `local-${randomUUID()}` });
 if (backfillOnly) {
   if (mediaOnly || dryRun || !(source instanceof Pocket48Source)) throw new Error("Backfill requires a writable Pocket48 source.");
   const allMembers = await batchSource.listMembers();
@@ -128,6 +140,7 @@ if (backfillOnly) {
         if (sync?.historyDone && !pending.length) continue;
         const result = await runBatch(singleSource, store, runOptions);
         errorCount += result.errorCount;
+        pagesCommitted += result.pagesCommitted;
         if (since && !result.scopeComplete) console.log(JSON.stringify({ event: "collection_pending", batchId: result.batchId }));
         console.log(JSON.stringify({ event: "backfill_source_finished", memberId: member.id, source: stream, ...result }));
       } catch (error) {
@@ -142,10 +155,18 @@ if (backfillOnly) {
 } else if (!mediaOnly && !budget.stopped) {
   const result = await runBatch(batchSource, store, runOptions);
   errorCount = result.errorCount;
+  pagesCommitted += result.pagesCommitted;
   if (since && !result.scopeComplete) console.log(JSON.stringify({ event: "collection_pending", batchId: result.batchId }));
   console.log(JSON.stringify({ event: "batch_finished", ...result }));
 } else if (!mediaOnly) {
   console.log(JSON.stringify({ event: "collection_pending", reason: "budget_reached_before_content" }));
 }
-console.log(JSON.stringify({ event: "collector_finished", errorCount, rankingErrors: melee.errors, retryFailures, budgetReached: budget.stopped || retries.budgetReached }));
-if ((errorCount > 0 || retryFailures > 0 || melee.errors > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;
+console.log(JSON.stringify({ event: "collector_finished", errorCount, rankingErrors: melee.errors, retryFailures: retries.persistentFailures, budgetReached: budget.stopped || retries.budgetReached }));
+if ((errorCount > 0 || retries.persistentFailures > 0 || melee.errors > 0) && process.env["COLLECTOR_FAIL_ON_ERROR"] !== "0") process.exitCode = 1;
+complete = true;
+} finally {
+  const health = collectorHealth([...([...healthEntries].map(([memberId, sources]) => ({ memberId, sources }))),
+    ...retries.health.map(progress => ({ memberId: `media-${progress.kind}`, sources: [{ ...progress.health, source: progress.kind }] }))]);
+  await writeCollectorReport(health, { dryRun, errorCount, rankingErrors: melee.errors, retryFailures: retries.persistentFailures, interrupted: !complete, pagesCommitted, transientMediaFailures: retries.failures, budgetReached: budget.stopped || retries.budgetReached });
+  if (health.failures > 0 && process.env.COLLECTOR_FAIL_ON_ERROR !== "0") process.exitCode = 1;
+}

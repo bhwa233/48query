@@ -81,9 +81,23 @@ try {
   const legacyBefore = await store.getSyncState(unit.member.id);
   const scopedStore = new HttpIngestStore(endpoint, key, since);
   const first = await openScopedCheckpoints(join(progressDirectory, "first.json"), since, scopedStore);
+  let lostProgressReply = false;
+  globalThis.fetch = async (url, options) => {
+    const response = await originalFetch(url, options);
+    if (!lostProgressReply && options?.method === "POST" && String(url).endsWith("/ingest/progress") && response.ok) {
+      lostProgressReply = true;
+      await response.body?.cancel();
+      return new Response('{"ok":', { status: 200 });
+    }
+    return response;
+  };
+  try {
   await first.write(unit.member.id, { source: "posts", historyCursor: "durable-older", historyDone: false,
     latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [],
     status: "ok", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
+  } finally { globalThis.fetch = originalFetch; }
+  assert.ok(lostProgressReply);
+  assert.equal((await scopedStore.collectionProgress()).get(unit.member.id)?.revision, 1, "A lost reply must confirm the original commit, not apply a second revision");
   const resumed = await openScopedCheckpoints(join(progressDirectory, "new-runner.json"), since, new HttpIngestStore(endpoint, key, since));
   assert.equal(resumed.read(unit.member.id)[0]?.historyCursor, "durable-older");
   assert.equal((await store.getSyncState(unit.member.id)).messageCursor, legacyBefore.messageCursor);

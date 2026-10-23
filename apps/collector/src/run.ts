@@ -3,15 +3,19 @@ import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStor
 import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
 import type { ScopedCheckpoints } from "./collection-scope";
 import { CollectionStopped, type CollectionBudget } from "./budget";
+import { initializeSourceHealth, recordSourceIssue, sourceIsFailed, sourceFreshness, sourceRecovered, type RecoveryAllowance } from "./source-health";
+import { randomUUID } from "node:crypto";
 
-const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
+export const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
 const shanghaiDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
+export async function runBatch(source: CollectorSource, store: CollectorStore, options: { since?: string; checkpoints?: ScopedCheckpoints; budget?: CollectionBudget; statDate?: string; batchId?: string; runId?: string; recovery?: RecoveryAllowance; phase?: "incremental" | "history"; maxPagesPerMember?: number; maxHistoryPagesPerMember?: number; maxMembers?: number; historyOnly?: boolean; retrySkipped?: boolean; catalogRetryLimit?: number; archiveImage?: (image: NonNullable<CollectorMessage["images"]>[number]) => Promise<void>; archiveVideo?: (video: NonNullable<CollectorMessage["videos"]>[number]) => Promise<void> } = {}) {
   if (options.since && (!Number.isFinite(Date.parse(options.since)) || !options.checkpoints)) throw new Error("Date-limited collection requires valid, separate scoped checkpoints.");
   const startedAt = new Date().toISOString();
   const statDate = options.statDate ?? shanghaiDate();
   const batchId = options.batchId ?? `batch-${statDate}-${Date.now()}`;
+  const invocationId = options.runId ?? `local-${randomUUID()}`;
+  const recovery = options.recovery ?? { remaining: 10, spentMs: 0, maxMs: 180_000 };
   const maxPages = options.maxPagesPerMember ?? 10;
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000) throw new Error("Collector page budget must be between 1 and 1000.");
   const historyPages = options.maxHistoryPagesPerMember ?? maxPages;
@@ -25,6 +29,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   let errorCount = 0;
   let lastError: string | null = null;
   let messagesWritten = 0;
+  let pagesCommitted = 0;
   let imageFailures = 0;
   let videoFailures = 0;
   let sourcesPending = 0;
@@ -47,18 +52,13 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     };
     const recordIssue = async (sync: SourceSync, error: unknown) => {
       const reason = error instanceof Error ? error.message : "Collection failed.";
-      const requestSkipped = error instanceof SourceRequestSkipped;
-      const failureCount = requestSkipped ? sync.failureCount ?? 0 : Math.min(3, (sync.failureCount ?? (sync.status === "failed" ? 1 : 0)) + 1);
-      const skippedAt = requestSkipped ? sync.skippedAt : failureCount >= 3 ? new Date().toISOString() : null;
-      const pending = error instanceof SourceVerificationPending;
-      const next: SourceSync = { ...sync, ...(!requestSkipped ? { failureCount, skippedAt } : {}), status: pending ? "pending" : "failed", lastError: reason.slice(0, 1000) };
+      const next = recordSourceIssue(sync, error, invocationId);
       // A skipped source remains incomplete. Durable-write/authentication errors
       // never enter this path, even when a source has reached its failure limit.
       await persist([], next);
-      if (!pending && !skippedAt) { errorCount += 1; lastError = reason; }
-      if (skippedAt) sourcesSkipped += 1;
       pendingStreams.add(sync.source);
-      console[!pending && !skippedAt ? "error" : "log"](JSON.stringify({ event: requestSkipped ? "source_request_skipped" : skippedAt ? "source_skipped" : pending ? "source_pending" : "source_failed", memberId: member.id, source: sync.source, failureCount, error: reason }));
+      console[sourceIsFailed(next) ? "error" : "log"](JSON.stringify({ event: sourceIsFailed(next) ? "source_failed" : "source_pending", memberId: member.id,
+        source: sync.source, failureCount: next.failureCount ?? 0, error: reason, nextRetryAt: next.nextRetryAt ?? next.historyRetryAt ?? null }));
       return next;
     };
     // Register before any source can fail, preserving the original error on completion.
@@ -81,18 +81,20 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     }
     for (const stream of streams) {
       if (options.budget?.stopped) { budgetReached = true; break; }
-      let sync = structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream));
-      sync.failureCount ??= sync.status === "failed" ? 1 : 0;
-      if (sync.skippedAt && options.retrySkipped) {
-        sync = { ...sync, failureCount: 0, skippedAt: null };
-        await persist([], sync);
-      }
-      if (sync.skippedAt) {
+      let sync = initializeSourceHealth(structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream)));
+      const probing = Boolean(sync.skippedAt);
+      const blocked = sync.paused || sync.lastFailureRunId === invocationId
+        || probing && (!options.retrySkipped && Date.parse(sync.nextRetryAt ?? "9999-01-01") > Date.now()
+          || recovery.remaining <= 0 || recovery.spentMs >= recovery.maxMs);
+      if (blocked) {
         sourcesSkipped += 1;
         pendingStreams.add(stream);
-        console.log(JSON.stringify({ event: "source_skipped", memberId: member.id, source: stream, failureCount: sync.failureCount, error: sync.lastError }));
+        if (sourceIsFailed(sync) || sourceFreshness(sync) === "failed") { errorCount += 1; lastError = sync.lastError ?? "Incremental source is stale."; }
+        console.log(JSON.stringify({ event: "source_skipped", memberId: member.id, source: stream, failureCount: sync.failureCount, nextRetryAt: sync.nextRetryAt ?? null, paused: sync.paused ?? false }));
         continue;
       }
+      if (probing) recovery.remaining -= 1;
+      const probeStarted = Date.now();
       let catalogPending = false;
       let sourceFailure = false;
       let sourceRead = false;
@@ -161,7 +163,6 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
           if (pending.length) {
             try {
               const retried = await source.retryCatalog(member, stream, pending);
-              sourceRead = true;
               const now = new Date().toISOString();
               await write(retried.items, { ...sync, status: retried.unverified ? "pending" : "ok", lastError: retried.unverified ? sync.lastError : null,
                 lastSuccessAt: now, lastNonemptyAt: retried.items.length ? now : sync.lastNonemptyAt }, retried.catalog);
@@ -179,7 +180,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
         // Each source has independent newest-page and backfill progress. When a
         // budget expires mid-increment, retain its cursor AND the old boundary.
         const initial = !sync.latestAt;
-        let cursor = initial ? sync.historyCursor ?? sync.incrementalCursor : sync.incrementalCursor;
+        let cursor = initial && options.historyOnly ? sync.historyCursor ?? sync.incrementalCursor : sync.incrementalCursor;
         for (let pageNumber = 0; pageNumber < (options.historyOnly && (sync.latestAt || sync.historyDone) ? 0 : maxPages); pageNumber++) {
           const page = await readPage(cursor);
           if (page.unverified && !(page.catalog && store.pendingCatalog)) {
@@ -195,19 +196,20 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
           const reached = Boolean(sync.latestAt && boundary.some(item => item.occurredAt < sync.latestAt!));
           const finished = initial || reached || page.nextCursor === null;
           const now = new Date().toISOString();
-          const next: SourceSync = { ...sync, status: page.items.length ? "ok" : "empty", lastError: null, lastSuccessAt: now,
+          const next: SourceSync = { ...sourceRecovered(sync, !options.historyOnly), status: page.items.length ? "ok" : "empty", lastSuccessAt: now,
             lastNonemptyAt: page.items.some(item => !["event", "excluded", "unknown"].includes(item.kind ?? "text")) ? now : sync.lastNonemptyAt,
             ...(finished ? { latestAt: newestAt ?? sync.latestAt, latestIds: newestIds.length ? newestIds : sync.latestIds, incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [] }
               : { incrementalCursor: page.nextCursor, pendingLatestAt: newestAt, pendingLatestIds: newestIds }),
-            ...(initial && (options.since || observed > 0 || page.nextCursor !== null) ? { historyCursor: page.nextCursor, historyDone: page.nextCursor === null } : {}),
+            ...(initial && sync.historyCursor === null && (options.since || observed > 0 || page.nextCursor !== null) ? { historyCursor: page.nextCursor, historyDone: page.nextCursor === null } : {}),
           };
           await write(page.items, next, page.catalog);
+          pagesCommitted += 1;
           console.log(JSON.stringify({ event: "source_page_committed", memberId: member.id, source: stream, messages: page.items.length, historyDone: next.historyDone }));
           if (finished) break;
           cursor = page.nextCursor;
         }
         // Never start a fresh backfill at null after a successful exhaustion.
-        if (!sync.historyDone && sync.historyCursor !== null) {
+        if (!sync.historyDone && sync.historyCursor !== null && (!sync.historyRetryAt || Date.parse(sync.historyRetryAt) <= Date.now())) {
           for (let pageNumber = 0; pageNumber < historyPages; pageNumber++) {
             const page = await readPage(sync.historyCursor);
             if (page.unverified && !(page.catalog && store.pendingCatalog)) {
@@ -219,8 +221,9 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
             const latestAt = boundary.reduce<string | null>((at, item) => !at || item.occurredAt > at ? item.occurredAt : at, null);
             const latestIds = boundary.filter(item => item.occurredAt === latestAt).map(item => item.id);
             if (!sync.latestAt && latestIds.length > 100) throw new Error("Too many messages share a sync boundary; refusing to lose boundary IDs.");
-            await write(page.items, { ...sync, ...(!sync.latestAt && latestAt ? { latestAt, latestIds } : {}), historyCursor: page.nextCursor, historyDone: page.nextCursor === null,
+            await write(page.items, { ...sourceRecovered(sync, false), historyError: null, historyRetryAt: null, ...(!sync.latestAt && latestAt ? { latestAt, latestIds } : {}), historyCursor: page.nextCursor, historyDone: page.nextCursor === null,
               status: page.items.length ? "ok" : "empty", lastError: null, lastSuccessAt: now, lastNonemptyAt: page.items.some(item => !["event", "excluded", "unknown"].includes(item.kind ?? "text")) ? now : sync.lastNonemptyAt }, page.catalog);
+            pagesCommitted += 1;
             if (sync.historyDone) break;
           }
         }
@@ -229,22 +232,22 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
           console.log(JSON.stringify({ event: "catalog_pending", memberId: member.id, source: stream }));
           if (catalogReadError) { sourceFailure = true; throw catalogReadError; }
         }
-        if (sourceRead && sync.failureCount && (stream !== "room" || sync.lastNonemptyAt || verifiedRoomContent || options.since && sync.historyDone)) {
-          sync = { ...sync, failureCount: 0, skippedAt: null };
-          await persist([], sync);
-        }
+        if (sourceRead && options.historyOnly && !sync.lastError) { sync = sourceRecovered(sync, false); await persist([], sync); }
         if (stream === "room") roomSync = sync;
       } catch (error) {
         if (error instanceof CollectionStopped || options.budget?.stopped) { budgetReached = true; break; }
         if (error instanceof CollectorStoreError || error instanceof SourceAuthenticationError || (!sourceFailure && !(error instanceof SourceVerificationPending))) throw error;
         sync = await recordIssue(sync, error);
         if (stream === "room") roomSync = sync;
+      } finally {
+        if (probing) recovery.spentMs += Date.now() - probeStarted;
       }
-      if (catalogPending || !sync.historyDone || sync.incrementalCursor !== null || sync.lastError) pendingStreams.add(stream);
+      if (sourceIsFailed(sync) || sourceFreshness(sync) === "failed") { errorCount += 1; lastError = sync.lastError ?? "Incremental source is stale."; }
+      if (catalogPending || !sync.historyDone || sync.incrementalCursor !== null || sync.lastError || sync.historyError) pendingStreams.add(stream);
     }
     // Album verification can find genuine older member messages beyond pages of
     // fan chat. Record that evidence without changing newest/history boundaries.
-    if (!budgetReached && roomSync && !roomSync.lastNonemptyAt && !roomSync.skippedAt) {
+    if (!budgetReached && roomSync && !roomSync.lastNonemptyAt && !roomSync.paused) {
       const now = new Date().toISOString();
       if (verifiedRoomContent) await persist([], { ...roomSync,
         ...(roomSync.lastError ? {} : { status: "ok" as const, lastError: null }), lastNonemptyAt: now });
@@ -260,5 +263,5 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
   if (imageFailures > 0) { errorCount += imageFailures; lastError = `${imageFailures} image uploads failed; retained for retry.`; }
   if (videoFailures > 0) { errorCount += videoFailures; lastError = `${videoFailures} video uploads failed; retained for retry.`; }
   await store.completeBatch({ batchId, completedAt: new Date().toISOString(), membersCovered, totalMembers: members.length, errorCount, errorMessage: lastError });
-  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, imageFailures, videoFailures, sourcesPending, sourcesSkipped, budgetReached, scopeComplete: !budgetReached && sourcesPending === 0 && errorCount === 0 };
+  return { batchId, statDate, totalMembers: members.length, membersCovered, errorCount, messagesWritten, pagesCommitted, imageFailures, videoFailures, sourcesPending, sourcesSkipped, budgetReached, scopeComplete: !budgetReached && sourcesPending === 0 && errorCount === 0 };
 }

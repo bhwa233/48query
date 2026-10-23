@@ -32,10 +32,22 @@ export async function readHistoricalDirectory(options: { url?: string; fetchImpl
 
 export async function readGroupRoster(options: { directoryUrl?: string; historicalUrl?: string } = {}) {
   const read = async (url: string): Promise<unknown> => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-    if (response.status === 502) throw new SourceRequestSkipped("Roster request failed (HTTP 502).");
-    if (!response.ok) throw new Error(`Roster request failed (HTTP ${response.status}).`);
-    return response.json() as Promise<unknown>;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+        if (response.status === 429 || response.status >= 500) {
+          await response.body?.cancel();
+          throw new SourceRequestSkipped(`Roster request failed (HTTP ${response.status}).`);
+        }
+        if (!response.ok) throw new Error(`Roster request failed (HTTP ${response.status}).`);
+        return await response.json() as unknown;
+      } catch (error) {
+        if (!(error instanceof SourceRequestSkipped || error instanceof TypeError || error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))) throw error;
+        if (attempt === 2) throw error instanceof SourceRequestSkipped ? error : new SourceRequestSkipped("Roster connection attempts exhausted.");
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+    throw new Error("Roster request attempts exhausted.");
   };
   const [official, community, historical] = await Promise.all([read(OFFICIAL_ROSTER_URL), read(options.directoryUrl ?? COMMUNITY_DIRECTORY_URL), readHistoricalDirectory({ url: options.historicalUrl })]);
   return buildGroupRoster(official, community, historical);

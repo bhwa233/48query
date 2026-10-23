@@ -254,11 +254,25 @@ try {
     skippedAt: "2026-10-18T01:00:00.000Z", lastError: "Repeated source outage" }] };
   assert.equal((await request(origin, progressPath, 200, saveProgress(advanced))).json().data.revision, 2);
   await request(origin, progressPath, 409, saveProgress(restored));
+  // A lost response must permit an exact replay without weakening stale-writer
+  // protection or accepting another payload under the same operation ID.
+  const operation = { ...advanced, revision: 2, writeId: "af58d008-09e7-4ed2-9c9f-4ce6b7062128" };
+  assert.equal((await request(origin, progressPath, 200, saveProgress(operation))).json().data.revision, 3);
+  assert.equal((await request(origin, progressPath, 200, saveProgress(operation))).json().data.revision, 3);
+  await request(origin, progressPath, 409, saveProgress({ ...operation, errorCount: 1 }));
   const skippedSource = (await request(origin, readProgress(since), 200, imageOptions)).json().data[0].sources[0];
   assert.equal(skippedSource.historyCursor, "oldest");
   assert.equal(skippedSource.failureCount, 3, "Failure counts must survive the real API and D1 JSON checkpoint round trip");
   assert.equal(skippedSource.skippedAt, "2026-10-18T01:00:00.000Z");
   assert.equal(skippedSource.historyDone, false);
+  const mediaProgressPath = "/api/query/ingest/media-progress/video";
+  const mediaState = { since, kind: "video", revision: 0, health: { status: "pending", lastError: "Source timeout",
+    healthVersion: 1, enabledAt: "2026-10-18T00:00:00.000Z", failureKind: "transient", failureCount: 2,
+    nextRetryAt: null, lastFailureRunId: "media-run-2" } };
+  assert.equal((await request(origin, mediaProgressPath, 200, saveProgress(mediaState))).json().data.revision, 1);
+  const mediaHealth = (await request(origin, `${mediaProgressPath}?since=${encodeURIComponent(since)}`, 200, imageOptions)).json().data;
+  assert.equal(mediaHealth.health.failureCount, 2);
+  assert.equal((await request(origin, readProgress(since), 200, imageOptions)).json().data.length, 1, "Media health must not appear as a member checkpoint");
   assert.deepEqual((await request(origin, "/api/query/ingest/state/smoke-member", 200, imageOptions)).json().data.sources, [], "Scoped progress must not replace all-history checkpoints");
   console.log("PASS scoped collector progress: durable resume, persisted source skips, scope isolation and stale writer rejection");
   const pendingEntry = { id: "a".repeat(64), source: "album", rawJson: JSON.stringify({ createTime: 1661327674734, bodys: { url: "https://source.48.cn/unverified.jpg" } }), status: "pending" };

@@ -60,3 +60,12 @@ pnpm --filter @starter/collector run run
 2026-10-20 用户确认转为线上采集：本地任务在当前成员完成后停止，范围检查点另存备份；仓库 Variable `COLLECTOR_MEMBER_SCOPE` 改为 `all`。Actions 的临时进度路径在执行步骤中从 `$RUNNER_TEMP` 写入 `$GITHUB_ENV`，因为任务级 `env` 不支持 `runner` context。线上首次运行从公开名单建立自己的轮转进度，保留生产库已有正文并按稳定 ID 幂等写入；后续运行优先通过 D1 检查点续采，artifact 保留为名单与进度备份。本地进度保留不删除，不表示已上传到 Actions。采集仍严格限制为北京时间 2026 年元旦起；来源失败与尚待续采分别报告，不将有限批次成功当作全量覆盖。
 
 真实 GitHub 运行器访问 `data.gnz.hk` 的历史名单返回 403。默认历史目录不可用时，使用 `apps/collector/data/historical-directory.json` 中 2026-10-20 的公开精简快照；仅保存成员候选 ID、姓名、团／队和房间映射，不包含生日、正文、媒体或凭证。官网与主要社区目录仍实时读取；历史目录可用时优先使用实时内容，显式配置的其他历史目录失败时不会被快照替换。快照只提供候选及查询线索，不代替官方身份、作者及时间范围核验。
+
+
+## 2026-10-23 故障恢复与结果报告
+
+采集来源按连续 3 轮实际失败标红，隔离后 2/6/12/24 小时退避并到期自动探测。运行预算结束本身不算故障；已有持续错误及 48 小时增量过期仍使 job 失败。人工暂停不会被自动解除，历史核验缺口不阻断新增首页。身份周复查按持久化的每成员到期时间执行。
+
+collect job 在原进度 artifact 中增加 health.json，media job 单独保存 media-health-2026；失败时也上传。Actions summary 展示故障、新鲜度、暂停和下次探测时间。完整 JSON 包含所有来源，摘要最多展示 100 项异常，不含正文、媒体 URL 或凭证。媒体状态保存在私有 `/api/query/ingest/media-progress/{image|video}`，API 需先支持该契约再运行新版媒体任务；无需数据库迁移。
+
+GitHub Actions 的安装改用 `node scripts/install-build-dependencies.mjs`，冻结锁文件，只对网络超时/限流/临时网络失败最多尝试三次。Cloudflare Workers Builds 需设置构建变量 `SKIP_DEPENDENCY_INSTALL=1`，并将原 build command 前置 `node scripts/install-build-dependencies.mjs && `。保留原部署命令、Git 仓库、分支和路径过滤。这样 pnpm 版本引导下载也进入受控依赖安装；平台更早的工具准备故障仍需单独处理，不能靠项目脚本消除。

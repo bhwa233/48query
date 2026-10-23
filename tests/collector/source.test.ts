@@ -57,7 +57,7 @@ test("group startup reuses saved progress only for a roster HTTP 502 and can ref
     const skipped = await launch(502);
     assert.ok(skipped.stdout.split("\n").some(line => line.startsWith("{") && JSON.parse(line).event === "group_roster_skipped"));
     const saved = JSON.parse(await readFile(statePath, "utf8")) as GroupProgress;
-    assert.deepEqual({ ...saved, updatedAt: previous.updatedAt }, previous, "A skipped refresh must preserve identities, checkpoints and the last successful roster timestamp");
+    assert.deepEqual({ ...saved, rosterFailures: undefined, updatedAt: previous.updatedAt }, { ...previous, rosterFailures: undefined }, "A skipped refresh must preserve identities, checkpoints and the last successful roster timestamp");
     await assert.rejects(launch(401), /Roster request failed \(HTTP 401\)/);
     await assert.rejects(launch(200, true), /Invalid official roster/);
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), saved, "Other failures must not replace the saved progress");
@@ -72,14 +72,13 @@ test("group startup reuses saved progress only for a roster HTTP 502 and can ref
 });
 
 // Run 39701333160 failed on a single upstream 502. Skip only that read, keep
-// all pagination evidence, and never turn transient gateway failures into a
-// persisted three-strike source suspension.
-test("Pocket48 HTTP 502 skips this read without advancing or suspending a source", async () => {
+// all pagination evidence. The recovery lifecycle is tested in recovery.test.ts.
+test("Pocket48 retries a temporary outage without advancing cursors and resumes on recovery", async () => {
   const member = { id: "1", name: "Owner", groupName: "SNH48" };
   const initial: SourceSync = { source: "posts", historyCursor: "older", historyDone: false,
     latestAt: "2026-10-01T00:00:00Z", latestIds: ["known"], incrementalCursor: "newer-page",
     pendingLatestAt: "2026-10-20T00:00:00Z", pendingLatestIds: ["new"], status: "failed", lastError: "Earlier failure",
-    lastSuccessAt: "2026-10-01T00:00:00Z", lastNonemptyAt: "2026-10-01T00:00:00Z", failureCount: 2 };
+    lastSuccessAt: "2026-10-01T00:00:00Z", lastNonemptyAt: "2026-10-01T00:00:00Z", failureCount: 0 };
   let saved = [structuredClone(initial)];
   let unavailable = true;
   let skippedReads = 0;
@@ -98,18 +97,17 @@ test("Pocket48 HTTP 502 skips this read without advancing or suspending a source
   const options = { since: collectionSince(), maxHistoryPagesPerMember: 0, checkpoints: {
     read: () => saved, write: async (_id: string, sync: SourceSync) => { saved = [...saved.filter(item => item.source !== sync.source), structuredClone(sync)]; },
   } };
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const result = await runBatch(single, new DryRunStore(), options);
-    assert.equal(result.errorCount, 0);
-    assert.equal(result.scopeComplete, false);
-    const pending = saved.find(sync => sync.source === "posts")!;
-    assert.deepEqual({ ...pending, status: initial.status, lastError: initial.lastError }, initial,
-      "A gateway skip must preserve cursors, boundaries, success evidence and the previous failure streak");
-    assert.equal(pending.status, "pending");
-    assert.equal(pending.skippedAt, undefined);
+  const result = await runBatch(single, new DryRunStore(), options);
+  assert.equal(result.errorCount, 0);
+  assert.equal(result.scopeComplete, false);
+  const pending = saved.find(sync => sync.source === "posts")!;
+  for (const key of ["historyCursor", "historyDone", "latestAt", "latestIds", "incrementalCursor", "pendingLatestAt", "pendingLatestIds", "lastSuccessAt"] as const) {
+    assert.deepEqual(pending[key], initial[key], `An exhausted retry must preserve ${key}`);
   }
-  assert.equal(skippedReads, 8, "One follower request and one source request per run, with no retry");
-  assert.equal(healthyReads, 4, "Other sources must continue");
+  assert.equal(pending.failureCount, 1);
+  assert.equal(pending.skippedAt, null);
+  assert.equal(skippedReads, 6, "Followers and source reads each exhaust three bounded transport attempts");
+  assert.equal(healthyReads, 1, "Independent sources continue");
   assert.deepEqual(await collectMelee(source, null, new CollectionBudget()), { pages: 0, errors: 0, pending: true });
   unavailable = false;
   await runBatch(single, new DryRunStore(), { ...options, maxHistoryPagesPerMember: 1 });
@@ -148,7 +146,7 @@ test("empty repeated photo catalog cursors finish history while nonempty repeats
 
 // Production resumed its own legacy-video:end marker as a numeric timestamp,
 // failing every later run after both attributable media feeds were exhausted.
-test("legacy media exhaustion remains pending and repeated gaps are skipped across restarts", async () => {
+test("legacy media exhaustion remains pending without suspending fresh incremental reads", async () => {
   const member = { id: "1", name: "Owner", groupName: "SNH48" };
   let requests = 0;
   const source = new Pocket48Source({ since: null, token: "synthetic", pa: "synthetic", minIntervalMs: 0, sources: ["room"], fetchImpl: async (url, init) => {
@@ -176,47 +174,29 @@ test("legacy media exhaustion remains pending and repeated gaps are skipped acro
   await runBatch(single, store, { ...options, historyOnly: true });
   await runBatch(single, store, { ...options, historyOnly: true });
   const skipped = await runBatch(single, store, options);
-  assert.equal(skipped.sourcesSkipped, 1);
-  assert.equal(skipped.scopeComplete, false, "Skipped history must never certify coverage");
-  assert.ok(saved[0]?.skippedAt);
-  assert.equal(requests, requestsAtEnd, "A persisted skip also suppresses the next incremental refresh");
+  assert.equal(skipped.sourcesSkipped, 0);
+  assert.equal(skipped.scopeComplete, false, "Unverified history must never certify coverage");
+  assert.equal(saved[0]?.skippedAt, null);
+  assert.ok(requests > requestsAtEnd, "An unresolved history tail must not suppress incremental reads");
 });
 
-test("repeated source outages skip only that source and successful recovery resets the streak", async () => {
+// An explicit manual pause is different from an automatic source isolation.
+test("manual source pauses survive forced retries while other sources continue", async () => {
   const member = { id: "1", name: "Owner", groupName: "SNH48" };
-  let saved: SourceSync[] = [];
-  let brokenReads = 0;
-  let healthyReads = 0;
-  let unavailable = true;
-  const checkpoints = { read: () => saved, write: async (_id: string, sync: SourceSync) => {
-    saved = JSON.parse(JSON.stringify([...saved.filter(item => item.source !== sync.source), sync]));
-  } };
+  let saved: SourceSync[] = [{ source: "album", historyCursor: "older", historyDone: false, latestAt: null, latestIds: [],
+    incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null,
+    lastSuccessAt: null, lastNonemptyAt: null, paused: true }];
+  const reads: string[] = [];
   const source = { sources: ["album", "posts"] as const, listMembers: async () => [member], listMessages: async () => ({ items: [], nextCursor: null }),
-    listContent: async (_member: typeof member, stream: string) => {
-      if (stream === "album") { brokenReads++; if (unavailable) throw new Error("Upstream business 500"); }
-      else healthyReads++;
-      return { items: [], nextCursor: null };
-    } };
-  const options = { since: collectionSince(), checkpoints, maxHistoryPagesPerMember: 0 };
-  const store = new DryRunStore();
-  assert.equal((await runBatch(source, store, options)).errorCount, 1);
-  unavailable = false;
-  await runBatch(source, store, options);
-  unavailable = true;
-  assert.equal((await runBatch(source, store, options)).errorCount, 1);
-  assert.equal(saved.find(sync => sync.source === "album")?.failureCount, 1, "A recovered source starts a new failure streak");
-  await runBatch(source, store, options);
-  assert.equal((await runBatch(source, store, options)).errorCount, 0, "The third failure is recorded as a skip");
-  const previousReads = brokenReads;
-  const skipped = await runBatch(source, store, options);
-  assert.equal(brokenReads, previousReads);
-  assert.equal(healthyReads, 6);
-  assert.equal(skipped.sourcesSkipped, 1);
-  assert.equal(skipped.scopeComplete, false);
-  unavailable = false;
-  await runBatch(source, store, { ...options, retrySkipped: true });
-  assert.equal(saved.find(sync => sync.source === "album")?.skippedAt, null);
-  assert.equal(saved.find(sync => sync.source === "album")?.failureCount, 0);
+    listContent: async (_member: typeof member, stream: string) => { reads.push(stream); return { items: [], nextCursor: null }; } };
+  const result = await runBatch(source, new DryRunStore(), { since: collectionSince(), retrySkipped: true,
+    maxHistoryPagesPerMember: 0, checkpoints: { read: () => saved, write: async (_id, sync) => {
+      saved = [...saved.filter(row => row.source !== sync.source), structuredClone(sync)];
+    } } });
+  assert.deepEqual(reads, ["posts"]);
+  assert.equal(result.errorCount, 0);
+  assert.equal(result.scopeComplete, false);
+  assert.equal(saved.find(row => row.source === "album")?.historyCursor, "older");
 });
 
 // A broken source may be skipped; an expired credential or failed durable
@@ -615,7 +595,7 @@ test("resolves stale directory rooms once per member and preserves upstream fail
   });
   const member = { id: "1", name: "Synthetic member", groupName: "SNH48", channelId: "old-channel", serverId: "old-server" };
   await source.listMessages(member, null);
-  await assert.rejects(source.listMessages(member, "123"), /repeated.*cursor/);
+  await source.listMessages(member, "123");
   assert.equal(roomLookups, 1);
   assert.equal(messageRequests, 2);
   denyLookup = true;
@@ -754,7 +734,7 @@ test("keeps latest sync and history independent, with zero recording requests", 
   assert.equal(saved.incrementalCursor, null);
 });
 
-test("an empty room remains pending and repeated unverifiable results are skipped", async () => {
+test("an empty room remains pending without permanently freezing incremental collection", async () => {
   class EmptySource extends DemoSource {
     override async listMessages() { return { items: [], nextCursor: null }; }
   }
@@ -770,7 +750,8 @@ test("an empty room remains pending and repeated unverifiable results are skippe
   assert.equal(saved?.status, "pending");
   await runBatch(new EmptySource(), store);
   await runBatch(new EmptySource(), store);
-  assert.ok(saved?.skippedAt, "Successful empty transport responses must not reset the verification failure streak");
+  assert.equal(saved?.skippedAt, null);
+  assert.ok(saved?.historyError, "A successful empty read must retain the unresolved historical evidence gap");
 });
 
 // Album lookups recovered genuine room text after the room feed had failed,

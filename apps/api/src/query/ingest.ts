@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
 import { drizzle } from "drizzle-orm/d1";
 import type { AppEnv } from "../env";
-import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema, CollectorSinceSchema, CollectorProgressSchema, CollectorRunSchema } from "@starter/shared/schemas";
+import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessageSchema, QueryIngestResponseSchema, QueryIngestUnitSchema, QuerySyncStateSchema, SourceSyncSchema, CatalogEntrySchema, CollectorSinceSchema, CollectorProgressSchema, CollectorRunSchema, MediaRetryProgressSchema } from "@starter/shared/schemas";
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
@@ -44,21 +44,54 @@ app.openapi(createRoute({ method: "post", path: "/runs", request: { body: { requ
 app.openapi(createRoute({ method: "get", path: "/progress", request: { query: z.object({ since: CollectorSinceSchema, after: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) }, responses: { 200: { description: "Private, date-scoped resumable collector progress.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CollectorProgressSchema), nextCursor: z.string().nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
   const { since: rawSince, after, limit } = c.req.valid("query");
   const since = new Date(rawSince).toISOString();
-  const rows = await database(c).prepare("SELECT member_id, revision, state_json FROM query_collector_progress WHERE since = ? AND member_id > ? ORDER BY member_id LIMIT ?").bind(since, after ?? "", limit + 1).all<{ member_id: string; revision: number; state_json: string }>();
+  const rows = await database(c).prepare("SELECT member_id, revision, state_json FROM query_collector_progress WHERE since = ? AND member_id NOT LIKE '@media/%' AND member_id > ? ORDER BY member_id LIMIT ?").bind(since, after ?? "", limit + 1).all<{ member_id: string; revision: number; state_json: string }>();
   const data = rows.results.slice(0, limit).map(row => CollectorProgressSchema.parse({ ...JSON.parse(row.state_json), revision: row.revision }));
   return c.json({ ok: true as const, data, nextCursor: rows.results.length > limit ? data.at(-1)!.memberId : null }, 200);
 });
 app.openapi(createRoute({ method: "post", path: "/progress", request: { body: { required: true, content: { "application/json": { schema: CollectorProgressSchema } } } }, responses: { 200: { description: "Saved only after content ingestion; revision prevents stale collectors overwriting newer cursors.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.object({ revision: z.number().int() }) }) } } }, 400: unavailable, 401: unavailable, 409: unavailable, 503: unavailable } }), async c => {
   const submitted = c.req.valid("json");
   const input = { ...submitted, since: new Date(submitted.since).toISOString() };
-  const row = await database(c).prepare(`INSERT INTO query_collector_progress (since, member_id, revision, state_json, updated_at)
-    SELECT ?, ?, 1, ?, ? WHERE ? = 0 OR EXISTS (SELECT 1 FROM query_collector_progress WHERE since = ? AND member_id = ?)
-    ON CONFLICT(since, member_id) DO UPDATE SET revision = query_collector_progress.revision + 1, state_json = excluded.state_json, updated_at = excluded.updated_at
-    WHERE query_collector_progress.revision = ? RETURNING revision`)
-    .bind(input.since, input.memberId, JSON.stringify(input), new Date().toISOString(), input.revision, input.since, input.memberId, input.revision).first<{ revision: number }>();
+  const row = await writeProgress(database(c), input.since, input.memberId, input.revision, input);
   if (!row) return c.json({ ok: false as const, error: { code: "progress_conflict", message: "Collector progress changed; reload before resuming." } }, 409);
   return c.json({ ok: true as const, data: row }, 200);
 });
+
+// Reuse the scoped JSON progress table without treating a media queue as a
+// Pocket48 member or changing its source enum. Reserved keys are private here.
+const mediaKind = z.object({ kind: z.enum(["image", "video"]) });
+app.openapi(createRoute({ method: "get", path: "/media-progress/{kind}", request: { params: mediaKind, query: z.object({ since: CollectorSinceSchema }) },
+  responses: { 200: { description: "Durable media retry health.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: MediaRetryProgressSchema.nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
+  const since = new Date(c.req.valid("query").since).toISOString();
+  const row = await database(c).prepare("SELECT revision, state_json FROM query_collector_progress WHERE since = ? AND member_id = ?")
+    .bind(since, `@media/${c.req.valid("param").kind}`).first<{ revision: number; state_json: string }>();
+  return c.json({ ok: true as const, data: row ? MediaRetryProgressSchema.parse({ ...JSON.parse(row.state_json), revision: row.revision }) : null }, 200);
+});
+app.openapi(createRoute({ method: "post", path: "/media-progress/{kind}", request: { params: mediaKind, body: { required: true, content: { "application/json": { schema: MediaRetryProgressSchema } } } },
+  responses: { 200: { description: "Saved media health with replay-safe revision protection.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.object({ revision: z.number().int() }) }) } } }, 400: unavailable, 401: unavailable, 409: unavailable, 503: unavailable } }), async c => {
+  const input = c.req.valid("json");
+  if (input.kind !== c.req.valid("param").kind) return c.json({ ok: false as const, error: { code: "invalid_media_kind", message: "Media kind must match the path." } }, 400);
+  const normalized = { ...input, since: new Date(input.since).toISOString() };
+  const row = await writeProgress(database(c), normalized.since, `@media/${input.kind}`, input.revision, normalized);
+  if (!row) return c.json({ ok: false as const, error: { code: "progress_conflict", message: "Media progress changed; reload before resuming." } }, 409);
+  return c.json({ ok: true as const, data: row }, 200);
+});
+
+async function writeProgress(db: D1Database, since: string, key: string, revision: number, input: { writeId?: string }) {
+  const json = JSON.stringify(input);
+  const row = await db.prepare(`INSERT INTO query_collector_progress (since, member_id, revision, state_json, updated_at)
+    SELECT ?, ?, 1, ?, ? WHERE ? = 0 OR EXISTS (SELECT 1 FROM query_collector_progress WHERE since = ? AND member_id = ?)
+    ON CONFLICT(since, member_id) DO UPDATE SET revision = query_collector_progress.revision + 1, state_json = excluded.state_json, updated_at = excluded.updated_at
+    WHERE query_collector_progress.revision = ? RETURNING revision`)
+    .bind(since, key, json, new Date().toISOString(), revision, since, key, revision).first<{ revision: number }>();
+  if (row) return row;
+  // Only an exact replay can confirm a committed operation whose reply was lost.
+  if (input.writeId) {
+    const previous = await db.prepare("SELECT revision, state_json FROM query_collector_progress WHERE since = ? AND member_id = ?")
+      .bind(since, key).first<{ revision: number; state_json: string }>();
+    if (previous?.state_json === json) return { revision: previous.revision };
+  }
+  return null;
+}
 
 type Member = z.infer<typeof QueryIngestUnitSchema>["member"];
 function memberStatement(db: D1Database, member: Member, now: string) {

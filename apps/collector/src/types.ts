@@ -1,10 +1,10 @@
-import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry, FollowerSnapshot } from "@starter/shared";
+import type { CollectionSource, ImageAttachment, VideoAttachment, SourceSync, CatalogEntry, FollowerSnapshot, MediaRetryProgress } from "@starter/shared";
 export type { CollectionSource, SourceSync } from "@starter/shared";
 
 // Coverage gaps are neither transport failures nor evidence of complete history.
 export class SourceVerificationPending extends Error {}
-// A transient upstream read is skipped only for this run, without consuming
-// the verification-failure streak or certifying an empty/complete source.
+// A recoverable transport outage has its own persisted invocation-level streak;
+// it must never certify an empty source or consume a history verification streak.
 export class SourceRequestSkipped extends SourceVerificationPending {}
 export class SourceAuthenticationError extends Error {}
 export class CollectorStoreError extends Error {}
@@ -103,6 +103,8 @@ export type IngestUnit = {
 };
 
 export interface CollectorStore {
+  mediaProgress?(kind: "image" | "video"): Promise<MediaRetryProgress | null>;
+  saveMediaProgress?(progress: MediaRetryProgress): Promise<void>;
   getSyncState(memberId: string): Promise<SyncState | null>;
   ingestUnit(unit: IngestUnit): Promise<void>;
   completeBatch(input: { batchId: string; completedAt: string; membersCovered: number; totalMembers: number; errorCount: number; errorMessage?: string | null }): Promise<void>;

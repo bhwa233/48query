@@ -1,8 +1,9 @@
 import type { CollectorMessage, CollectorStore, IngestUnit, SyncState } from "./types";
 import { CollectorStoreError, SourceVerificationPending } from "./types";
-import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, CollectorRun, MeleePage, MeleeProgress } from "@starter/shared";
+import type { ImageAttachment, VideoAttachment, CatalogEntry, CollectorProgress, CollectorRun, MeleePage, MeleeProgress, MediaRetryProgress } from "@starter/shared";
 import { object, parsePocketJson, timestamp } from "./pocket48-content";
 import type { CollectionBudget } from "./budget";
+import { randomUUID } from "node:crypto";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
@@ -27,12 +28,23 @@ export class HttpIngestStore implements CollectorStore {
   }
 
   async saveCollectionProgress(progress: CollectorProgress) {
-    const saved = await this.request<{ revision: number }>("/api/query/ingest/progress", { method: "POST", body: JSON.stringify(progress) });
+    const saved = await this.request<{ revision: number }>("/api/query/ingest/progress", { method: "POST", body: JSON.stringify({ ...progress, writeId: randomUUID() }) });
     progress.revision = saved.revision;
   }
 
   async saveRun(run: CollectorRun) {
     await this.request("/api/query/ingest/runs", { method: "POST", body: JSON.stringify(run) });
+  }
+
+  async mediaProgress(kind: "image" | "video") {
+    if (!this.since) throw new Error("Media health requires a date scope.");
+    return this.request<MediaRetryProgress | null>(`/api/query/ingest/media-progress/${kind}?since=${encodeURIComponent(this.since)}`);
+  }
+
+  async saveMediaProgress(progress: MediaRetryProgress) {
+    const saved = await this.request<{ revision: number }>(`/api/query/ingest/media-progress/${progress.kind}`,
+      { method: "POST", body: JSON.stringify({ ...progress, writeId: randomUUID() }) });
+    progress.revision = saved.revision;
   }
 
   private async request<T>(path: string, init?: RequestInit, envelope = false): Promise<T> {
@@ -56,7 +68,13 @@ export class HttpIngestStore implements CollectorStore {
         await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
         continue;
       }
-      if (!payload || typeof payload.ok !== "boolean") throw new CollectorStoreError(`Invalid ingest response (HTTP ${response.status}).`);
+      if (!payload || typeof payload.ok !== "boolean") {
+        if (response.ok && attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw new CollectorStoreError(`Invalid ingest response (HTTP ${response.status}).`);
+      }
       if (!response.ok || !payload.ok) throw new CollectorStoreError(payload.ok ? `Ingest request failed: ${response.status}` : `${payload.error.code}: ${payload.error.message}`);
       return (envelope ? payload : payload.data) as T;
     }

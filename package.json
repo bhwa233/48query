@@ -35,7 +35,7 @@
     "build:api:db": "pnpm --filter @starter/api build:db",
     "env:check": "node scripts/check-env.mjs",
     "test:config": "node --test tests/config.test.mjs",
-    "test:collector": "pnpm --filter @starter/collector exec tsx --test ../../tests/collector/source.test.ts",
+    "test:collector": "pnpm --filter @starter/collector exec tsx --test ../../tests/collector/*.test.ts",
     "test:smoke": "node scripts/test-smoke.mjs",
     "test:e2e": "node scripts/test-e2e.mjs",
     "audit:check": "node scripts/audit-dependencies.mjs",

@@ -79,6 +79,24 @@ export class Pocket48Source implements CollectorSource {
   }
 
   private async post(pathname: string, body: Record<string, unknown>) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return await this.postOnce(pathname, body); }
+      catch (error) {
+        this.options.budget?.().check();
+        const transient = error instanceof SourceRequestSkipped || error instanceof TypeError
+          || error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);
+        if (!transient) throw error;
+        if (attempt === 2) throw error instanceof SourceRequestSkipped ? error : new SourceRequestSkipped(`Pocket48 ${pathname} connection attempts exhausted.`);
+        const wait = Math.max(this.options.minIntervalMs ?? 1000, Number(object(error instanceof Error ? error.cause : null).retryAfterMs) || 0) * (attempt + 1);
+        console.log(JSON.stringify({ event: "source_request_retry", path: pathname, attempt: attempt + 1 }));
+        if (this.options.budget) await this.options.budget().wait(wait);
+        else await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    }
+    throw new Error("Source request attempts exhausted.");
+  }
+
+  private async postOnce(pathname: string, body: Record<string, unknown>) {
     const pa = this.options.paFactory ? await this.options.paFactory() : this.options.pa;
     const headers: Record<string, string> = {
       Accept: "application/json", "Content-Type": "application/json;charset=utf-8", "Accept-Language": "zh-Hans-CN;q=1",
@@ -104,8 +122,10 @@ export class Pocket48Source implements CollectorSource {
     if (!response.ok || (payload.status !== undefined && payload.status !== 200) || payload.success === false) {
       // Do not include upstream free-form error text, which can contain user data.
       const Failure = [401, 403].includes(response.status) || ["401", "403", "1001", "2001"].includes(string(payload.status) ?? "")
-        ? SourceAuthenticationError : response.status === 502 ? SourceRequestSkipped : Error;
-      throw new Failure(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status } });
+        ? SourceAuthenticationError : response.status === 429 || response.status >= 500 ? SourceRequestSkipped : Error;
+      const retryAfter = response.headers.get("Retry-After");
+      const retryAfterMs = retryAfter ? Math.min(30_000, Math.max(0, /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now())) : 0;
+      throw new Failure(`Pocket48 ${pathname} failed (HTTP ${response.status}, business ${string(payload.status) ?? "unknown"}).`, { cause: { business: string(payload.status), http: response.status, retryAfterMs } });
     }
     if (!("content" in payload)) throw new Error(`Pocket48 ${pathname} returned no content.`);
     if (process.env.POCKET48_LOG_SCHEMA === "1") {
@@ -591,7 +611,12 @@ export class Pocket48Source implements CollectorSource {
     }
     // Live empty essence lists omit their optional list field entirely. This
     // endpoint is finite (no pagination cursor); other unknown shapes still fail.
-    const allValues = source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
+    // Read-only run 39895325213 confirmed: an exhausted public timeline omits
+    // postsInfo and echoes its requested nonzero nextId. Only this exact shape
+    // is an empty page; other missing list shapes remain protocol errors.
+    const emptyPostTail = source === "posts" && cursor !== null && Object.keys(object(content)).length === 1
+      && string(object(content).nextId) === cursor;
+    const allValues = emptyPostTail || source === "essence" && content !== null && typeof content === "object" && !Array.isArray(content) && Object.keys(content).length === 0 ? [] : contentList(content);
     const rawTime = (value: unknown) => { const item = object(value), post = postObject(item); return timestamp(item.msgTime ?? item.createTime ?? item.ctime ?? item.createAt ?? post.createAt ?? post.ctime); };
     // Discard old catalog entries BEFORE any original-message lookup or media
     // request. Keep the original boundary solely to stop reverse pagination.
@@ -770,7 +795,9 @@ export class Pocket48Source implements CollectorSource {
       // Verified live: both photo catalogs echo the requested cursor at an
       // empty tail. Check the raw list, never the date/author-filtered results.
       // Historical rooms still require their independent mapping/author checks.
-      if ((source === "album" || source === "post_images") && allValues.length === 0) rawCursor = null;
+      // Run 39897019166 also verified an empty ordinary room tail at its saved
+      // cursor. Never apply this to a filtered-empty but nonempty raw page.
+      if ((source === "album" || source === "post_images" || source === "room_posts" || source === "room" || emptyPostTail) && allValues.length === 0) rawCursor = null;
       else throw new Error("Pocket48 repeated a page cursor; refusing to mark history complete.");
     }
     const boundary = allValues.flatMap(value => {

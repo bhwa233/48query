@@ -1,5 +1,6 @@
 import type { buildGroupRoster, RosterCandidate } from "./group-roster";
 import type { CollectorMember, SourceSync } from "./types";
+import { sourceFreshness } from "./source-health";
 
 export type GroupEntry = {
   candidate: RosterCandidate;
@@ -19,7 +20,8 @@ export type GroupEntry = {
   scopeComplete?: boolean;
   inspectionScopeComplete?: boolean;
 };
-export type GroupProgress = { version: 1; since?: string; createdAt: string; updatedAt: string; rosterRefreshedAt?: string; officialRows: number; excluded: { id: string; name: string }[]; entries: GroupEntry[] };
+export type GroupProgress = { version: 1; since?: string; createdAt: string; updatedAt: string; rosterRefreshedAt?: string;
+  rosterFailures?: number; officialRows: number; excluded: { id: string; name: string }[]; entries: GroupEntry[] };
 
 export function applyGroupScope(state: GroupProgress, since: string) {
   if (state.since === since) return;
@@ -56,14 +58,22 @@ export function reconcileGroupEntries(previous: GroupEntry[], roster: ReturnType
 // The existing source cursors resume pages; they do not choose which member
 // runs next. Rotate this persisted group queue by attempts, including failures,
 // so a bounded recurring run cannot keep retrying only its first members.
-export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean; retrySkipped?: boolean; phase?: "incremental" | "history" }) {
+export function groupWork(entries: GroupEntry[], options: { collect: boolean; refresh: boolean; retryUnverified: boolean; recheckDue?: boolean; retrySkipped?: boolean; phase?: "incremental" | "history" }) {
   return entries.map((entry, index) => {
-    const identity = entry.identity === "pending" || (options.retryUnverified && entry.identity !== "verified");
+    const identity = entry.identity === "pending" || entry.identity !== "verified" && (options.retryUnverified || options.recheckDue
+      && (!entry.checkedAt || Date.now() - Date.parse(entry.checkedAt) >= 7 * 86400_000));
     const collect = options.collect && entry.identity === "verified" && (options.refresh || !entry.collectedAt || entry.scopeComplete === false);
     return { entry, index, identity, collect };
   }).filter(item => options.phase === "history" ? options.collect && item.entry.identity === "verified" && item.entry.scopeComplete !== true
-    && item.entry.sources?.some(source => options.retrySkipped && source.skippedAt || !source.skippedAt && (!source.historyDone || source.incrementalCursor !== null || source.lastError)) : item.identity || item.collect).sort((a, b) => {
+    && item.entry.sources?.some(source => !source.paused && (!source.nextRetryAt || Date.parse(source.nextRetryAt) <= Date.now() || options.retrySkipped)
+      && (!source.historyRetryAt || Date.parse(source.historyRetryAt) <= Date.now()) && (!source.historyDone || source.incrementalCursor !== null || source.lastError)) : item.identity || item.collect).sort((a, b) => {
     if (options.phase) {
+      if (options.phase === "incremental") {
+        const priority = (entry: GroupEntry) => entry.sources?.some(source => sourceFreshness(source) === "failed") ? 0
+          : entry.sources?.some(source => sourceFreshness(source) === "warning") ? 1 : 2;
+        const difference = priority(a.entry) - priority(b.entry);
+        if (difference) return difference;
+      }
       const key = options.phase === "history" ? "lastHistoryAt" : "lastIncrementalAt";
       return (a.entry[key] ?? "").localeCompare(b.entry[key] ?? "") || a.index - b.index;
     }

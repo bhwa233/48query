@@ -86,16 +86,30 @@ export const SourceSyncSchema = z.object({
   status: z.enum(["pending", "ok", "empty", "failed"]), lastError: z.string().max(1000).nullable(),
   lastSuccessAt: z.string().nullable(), lastNonemptyAt: z.string().nullable(),
   failureCount: z.number().int().min(0).max(3).optional(), skippedAt: z.string().datetime().nullable().optional(),
+  enabledAt: z.string().datetime().optional(), lastIncrementalSuccessAt: z.string().datetime().nullable().optional(),
+  healthVersion: z.literal(1).optional(),
+  failureKind: z.enum(["transient", "protocol"]).nullable().optional(),
+  lastFailureRunId: z.string().max(200).nullable().optional(), lastFailureAt: z.string().datetime().nullable().optional(),
+  nextRetryAt: z.string().datetime().nullable().optional(), recoveryAttempt: z.number().int().min(0).max(4).optional(),
+  paused: z.boolean().optional(),
+  historyRetryAt: z.string().datetime().nullable().optional(), historyError: z.string().max(1000).nullable().optional(),
 });
 
 export const CollectorSinceSchema = z.string().datetime().refine(value => Date.parse(value) >= Date.parse("2025-12-31T16:00:00.000Z"), "Collection starts no earlier than Beijing New Year 2026.");
 export const CollectorProgressSchema = z.object({
-  memberId: z.string().min(1).max(100), since: CollectorSinceSchema,
+  memberId: z.string().min(1).max(100).refine(value => !value.startsWith("@media/"), "Reserved collector progress key."), since: CollectorSinceSchema,
+  writeId: z.string().uuid().optional(),
   revision: z.number().int().nonnegative(),
   sources: z.array(SourceSyncSchema).max(7).refine(values => new Set(values.map(value => value.source)).size === values.length, "Duplicate source checkpoints."),
   lastAttemptAt: z.string().datetime().nullable(), lastIncrementalAt: z.string().datetime().nullable(), lastHistoryAt: z.string().datetime().nullable(),
   collectedAt: z.string().datetime().nullable(), scopeComplete: z.boolean(), errorCount: z.number().int().nonnegative(),
 });
+
+export const SourceHealthSchema = SourceSyncSchema.pick({ status: true, lastError: true, failureCount: true, skippedAt: true,
+  enabledAt: true, lastIncrementalSuccessAt: true, healthVersion: true, failureKind: true, lastFailureRunId: true,
+  lastFailureAt: true, nextRetryAt: true, recoveryAttempt: true, paused: true, historyError: true, historyRetryAt: true });
+export const MediaRetryProgressSchema = z.object({ since: CollectorSinceSchema, kind: z.enum(["image", "video"]),
+  revision: z.number().int().nonnegative(), health: SourceHealthSchema, writeId: z.string().uuid().optional() });
 
 export const QueryMessageSchema = z.object({
   id: z.string(),
