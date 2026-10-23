@@ -69,3 +69,5 @@ pnpm --filter @starter/collector run run
 collect job 将 health.json 单独保存为 collector-health-2026，media job 单独保存 media-health-2026；失败时也上传。进度恢复跳过旧版仅含报告的 artifact；全团模式还会继续查找有效名单，同时保留较新的独立范围检查点，避免被单成员 artifact 遮蔽。Actions summary 展示故障、新鲜度、暂停和下次探测时间。完整 JSON 包含所有来源，摘要最多展示 100 项异常，不含正文、媒体 URL 或凭证。媒体状态保存在私有 `/api/query/ingest/media-progress/{image|video}`，API 需先支持该契约再运行新版媒体任务；无需数据库迁移。
 
 GitHub Actions 的安装改用 `node scripts/install-build-dependencies.mjs`，冻结锁文件，只对网络超时/限流/临时网络失败最多尝试三次。Cloudflare Workers Builds 需设置构建变量 `SKIP_DEPENDENCY_INSTALL=1`，并将原 build command 前置 `node scripts/install-build-dependencies.mjs && `。保留原部署命令、Git 仓库、分支和路径过滤。这样 pnpm 版本引导下载也进入受控依赖安装；平台更早的工具准备故障仍需单独处理，不能靠项目脚本消除。
+
+2026-10-23 空成员优化：所有启用来源在当前范围内完整成功检查、且实际归档消息和图片都为零的已验证成员，每 30 天复查一次；其余成员继续小时轮转。检查点新增可选 `emptyCheckedAt`，沿用现有 D1 JSON，不需要迁移；待核验、未完成或失败不算空。新内容取消降频，新启用来源使旧证明失效。`group_progress.emptyMembersDeferred` 记录当轮降频成员数；正常 30 天间隔不计作 48 小时过期故障。

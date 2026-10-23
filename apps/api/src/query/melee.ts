@@ -2,6 +2,7 @@ import { createRoute, z, type OpenAPIHono } from "@hono/zod-openapi";
 import { ErrorSchema, MeleePageSchema, MeleeProgressSchema, MeleeSnapshotSchema, QueryMeleeSchema } from "@starter/shared/schemas";
 import type { MeleeProgress } from "@starter/shared";
 import type { AppEnv } from "../env";
+import { publicMessageFilter } from "./archive-pages";
 
 const failure = { description: "Unavailable or invalid ranking request.", content: { "application/json": { schema: ErrorSchema } } };
 const periodParam = z.object({ periodId: z.coerce.number().int().positive() });
@@ -16,8 +17,9 @@ export function registerMeleeQuery(app: OpenAPIHono<AppEnv>) {
       ORDER BY period_id DESC LIMIT 100`).all<{ id: number; label: string }>()).results;
     const selected = periodId ?? periods[0]?.id;
     const row = selected ? await db.prepare("SELECT * FROM query_melee_snapshots WHERE period_id = ? ORDER BY complete DESC, limited ASC, observed_at DESC, id DESC LIMIT 1").bind(selected).first<Record<string, unknown>>() : null;
-    const entries = row ? (await db.prepare(`SELECT e.*, m.id AS known_member FROM query_melee_entries e LEFT JOIN query_members m ON m.id = e.member_id
-      WHERE e.snapshot_id = ? ORDER BY e.rank, e.score DESC, e.member_id`).bind(row.id).all<Record<string, unknown>>()).results.map(entry => ({ memberId: String(entry.member_id), name: String(entry.name), rank: Number(entry.rank), score: Number(entry.score), memberAvailable: entry.known_member != null })) : [];
+    const entries = row ? (await db.prepare(`SELECT e.*, m.id AS known_member FROM query_melee_entries e JOIN query_members m ON m.id = e.member_id
+      WHERE e.snapshot_id = ? AND EXISTS (SELECT 1 FROM query_messages q WHERE q.member_id = m.id AND ${publicMessageFilter})
+      ORDER BY e.rank, e.score DESC, e.member_id`).bind(row.id).all<Record<string, unknown>>()).results.map(entry => ({ memberId: String(entry.member_id), name: String(entry.name), rank: Number(entry.rank), score: Number(entry.score), memberAvailable: entry.known_member != null })) : [];
     return c.json({ ok: true as const, data: { periods, snapshot: row ? MeleeSnapshotSchema.parse(progress(row)) : null, entries } }, 200);
   });
 }

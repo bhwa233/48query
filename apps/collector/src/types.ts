@@ -103,6 +103,7 @@ export type IngestUnit = {
 };
 
 export interface CollectorStore {
+  contentTotals?(memberId: string): Promise<{ messages: number; images: number }>;
   mediaProgress?(kind: "image" | "video"): Promise<MediaRetryProgress | null>;
   saveMediaProgress?(progress: MediaRetryProgress): Promise<void>;
   getSyncState(memberId: string): Promise<SyncState | null>;

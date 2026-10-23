@@ -1,6 +1,6 @@
 import type { buildGroupRoster, RosterCandidate } from "./group-roster";
 import type { CollectorMember, SourceSync } from "./types";
-import { sourceFreshness } from "./source-health";
+import { emptyMemberRecheckAt, sourceFreshness } from "./source-health";
 
 export type GroupEntry = {
   candidate: RosterCandidate;
@@ -63,13 +63,15 @@ export function groupWork(entries: GroupEntry[], options: { collect: boolean; re
   return entries.map((entry, index) => {
     const identity = entry.identity === "pending" || entry.identity !== "verified" && (options.retryUnverified || options.recheckDue
       && (!entry.checkedAt || Date.now() - Date.parse(entry.checkedAt) >= 7 * 86400_000));
-    const collect = options.collect && entry.identity === "verified" && (options.refresh || !entry.collectedAt || entry.scopeComplete === false);
     const sources = entry.sources?.filter(source => !options.sources || options.sources.includes(source.source)) ?? [];
+    const emptyDue = emptyMemberRecheckAt(entry.sources ?? [], options.sources ?? sources.map(sync => sync.source), now);
+    const deferred = entry.identity === "verified" && entry.scopeComplete === true && emptyDue !== null && emptyDue > now;
+    const collect = options.collect && entry.identity === "verified" && (options.refresh || !entry.collectedAt || entry.scopeComplete === false || emptyDue !== null && emptyDue <= now);
     const dueAt = sources.filter(source => !source.paused && source.skippedAt
       && (options.retrySkipped || source.nextRetryAt && Date.parse(source.nextRetryAt) <= now))
       .reduce((at, source) => Math.min(at, Date.parse(source.nextRetryAt ?? source.skippedAt!)), Infinity);
-    return { entry, index, identity, collect, sources, dueAt };
-  }).filter(item => options.phase === "recovery" ? options.collect && item.entry.identity === "verified" && Number.isFinite(item.dueAt)
+    return { entry, index, identity, collect, sources, dueAt, deferred };
+  }).filter(item => !item.deferred).filter(item => options.phase === "recovery" ? options.collect && item.entry.identity === "verified" && Number.isFinite(item.dueAt)
     : options.phase === "history" ? options.collect && item.entry.identity === "verified" && item.entry.scopeComplete !== true
     && item.sources.some(source => !source.paused && (!source.nextRetryAt || Date.parse(source.nextRetryAt) <= Date.now() || options.retrySkipped)
       && (!source.historyRetryAt || Date.parse(source.historyRetryAt) <= Date.now()) && (!source.historyDone || source.incrementalCursor !== null || source.lastError)) : item.identity || item.collect).sort((a, b) => {

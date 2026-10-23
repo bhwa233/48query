@@ -61,13 +61,19 @@ async function coverage(db: Database) {
   // Non-empty samples prove coverage, not complete history or account access.
   return { status: covered > 0 ? "partial" as const : "unavailable" as const, earliestDate: typeof row?.earliest_date === "string" ? row.earliest_date : null, latestDate: typeof row?.latest_date === "string" ? row.latest_date : null, membersCovered: covered, totalMembers: Number(row?.total_members ?? 0), lastBatchCompletedAt: typeof row?.last_batch_completed_at === "string" ? row.last_batch_completed_at : null };
 }
-const memberProjection = (date: string) => sql`m.id, m.name, m.pinyin, m.group_name, m.team,
-  (SELECT COUNT(*) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND date(q.occurred_at, '+8 hours') <= ${date}) AS messages,
-  (SELECT COUNT(DISTINCT date(q.occurred_at, '+8 hours')) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND date(q.occurred_at, '+8 hours') <= ${date}) AS active_days,
-  (SELECT COUNT(DISTINCT link.image_id) FROM query_message_images link JOIN query_messages q ON q.id = link.message_id WHERE q.member_id = m.id AND ${publicKinds} AND date(q.occurred_at, '+8 hours') <= ${date}) AS images,
-  (SELECT COUNT(*) FROM query_messages q WHERE q.member_id = m.id AND q.kind = 'reply' AND date(q.occurred_at, '+8 hours') <= ${date}) AS replies,
-  (SELECT MAX(q.occurred_at) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND date(q.occurred_at, '+8 hours') <= ${date}) AS latest_message_at`;
+const memberProjection = (date?: string) => {
+  const through = date ? sql`date(q.occurred_at, '+8 hours') <= ${date}` : sql`1 = 1`;
+  return sql`m.id, m.name, m.pinyin, m.group_name, m.team,
+  (SELECT COUNT(*) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND ${through}) AS messages,
+  (SELECT COUNT(DISTINCT date(q.occurred_at, '+8 hours')) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND ${through}) AS active_days,
+  (SELECT COUNT(DISTINCT link.image_id) FROM query_message_images link JOIN query_messages q ON q.id = link.message_id WHERE q.member_id = m.id AND ${publicKinds} AND ${through}) AS images,
+  (SELECT COUNT(*) FROM query_messages q WHERE q.member_id = m.id AND q.kind = 'reply' AND ${through}) AS replies,
+  (SELECT MAX(q.occurred_at) FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds} AND ${through}) AS latest_message_at`;
+};
 const memberData = (row: Row) => ({ id: String(row.id), name: String(row.name), pinyin: row.pinyin as string | null, groupName: String(row.group_name), team: row.team as string | null, messages: Number(row.messages), activeDays: Number(row.active_days), images: Number(row.images), replies: Number(row.replies), recordings: 0, latestMessageAt: row.latest_message_at as string | null });
+// Every public attachment belongs to a public message. Existence keeps text-only
+// members and uses cumulative archives, independent of the ranking date range.
+const memberHasContent = sql`EXISTS (SELECT 1 FROM query_messages q WHERE q.member_id = m.id AND ${publicKinds})`;
 
 app.openapi(createRoute({ method: "get", path: "/overview", request: { query: DateQuery }, responses: { 200: { description: "Daily text/image statistics (Asia/Shanghai).", content: { "application/json": { schema: QueryOverviewSchema } } }, 503: unavailable } }), async c => {
   const db = database(c.env);
@@ -98,7 +104,7 @@ app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: Ra
   const start = new Date(`${from}T00:00:00+08:00`).toISOString();
   const end = new Date(Date.parse(`${to}T00:00:00+08:00`) + 86400_000).toISOString();
   const inRange = sql`${publicKinds} AND q.occurred_at >= ${start} AND q.occurred_at < ${end}`;
-  const conditions = [sql`m.status = 'active'`];
+  const conditions = [sql`m.status = 'active'`, memberHasContent];
   if (group) conditions.push(sql`m.group_name = ${group}`);
   if (team) conditions.push(sql`m.team = ${team}`);
   const memberScope = sql.join(conditions, sql` AND `);
@@ -122,7 +128,7 @@ app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: Ra
     db.all<Row>(sql`SELECT q.type, COUNT(*) AS count FROM query_messages q JOIN query_members m ON m.id = q.member_id
       WHERE ${scope} GROUP BY q.type ORDER BY count DESC, q.type`),
     db.all<Row>(sql`SELECT ${projection} FROM ${joins} WHERE ${scope} ORDER BY q.occurred_at DESC, q.id DESC LIMIT 4`),
-    db.all<Row>(sql`SELECT DISTINCT group_name, team FROM query_members WHERE status = 'active' ORDER BY group_name, team`),
+    db.all<Row>(sql`SELECT DISTINCT group_name, team FROM query_members m WHERE m.status = 'active' AND ${memberHasContent} ORDER BY group_name, team`),
     coverage(db),
   ]);
   const members = rows.map(row => ({ ...memberData(row), followers: row.followers == null ? null : Number(row.followers), followersObservedAt: row.followers_observed_at as string | null }));
@@ -140,8 +146,8 @@ app.openapi(createRoute({ method: "get", path: "/rankings", request: { query: Ra
 });
 app.openapi(createRoute({ method: "get", path: "/members", request: { query: DateQuery }, responses: { 200: { description: "Member archive statistics.", content: { "application/json": { schema: QueryMembersSchema } } }, 503: unavailable } }), async c => {
   const db = database(c.env);
-  const date = c.req.valid("query").date ?? previousDate();
-  const rows = await db.all<Row>(sql`SELECT ${memberProjection(date)} FROM query_members m WHERE m.status = 'active' ORDER BY messages DESC, m.name`);
+  const date = c.req.valid("query").date;
+  const rows = await db.all<Row>(sql`SELECT ${memberProjection(date)} FROM query_members m WHERE m.status = 'active' AND ${memberHasContent} ORDER BY messages DESC, m.name`);
   return c.json({ ok: true as const, data: rows.map(memberData), coverage: await coverage(db) }, 200);
 });
 app.openapi(createRoute({ method: "get", path: "/members/{id}", request: { params: z.object({ id: z.string().min(1).max(100) }), query: DateQuery }, responses: { 200: { description: "Member timeline and source status.", content: { "application/json": { schema: QueryMemberDetailSchema } } }, 404: unavailable, 503: unavailable } }), async c => {

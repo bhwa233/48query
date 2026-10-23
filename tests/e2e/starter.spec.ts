@@ -153,6 +153,8 @@ test("dashboard search and archive navigation work", async ({ page }) => {
   await page.getByRole("link", { name: "成员", exact: true }).click();
   await expect(page).toHaveURL(/\/zh\/members$/);
   await expect(page.getByRole("heading", { name: "成员", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: /历史文字607515/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /空归档成员/ })).toHaveCount(0);
   await page.getByRole("combobox", { name: "全部团体", exact: true }).click();
   await page.getByRole("option", { name: "GNZ48", exact: true }).click();
   await expect(page.getByRole("link", { name: /验证成员/ })).toHaveCount(0);
@@ -168,6 +170,10 @@ test("dashboard search and archive navigation work", async ({ page }) => {
   // before filling it, otherwise the old member form can intercept the input.
   await expect(page).toHaveURL(/\/zh\/messages$/);
   await expect(page.getByRole("heading", { name: "消息", level: 1, exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "全部成员", exact: true }).click();
+  await expect(page.getByRole("option", { name: "历史文字607515", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "空归档成员", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   const keyword = "验证公开提问";
   const searched = page.waitForResponse(response => {
     const url = new URL(response.url());
@@ -302,10 +308,12 @@ test("rankings sort columns and change metric, period and scope while preserving
   const melee = page.getByRole("region", { name: "鸡腿周榜", exact: true });
   const meleeList = melee.getByRole("list", { name: "鸡腿周榜", exact: true });
   await expect(meleeList.locator("li").first()).toContainText("鸡腿验证一");
+  await expect(meleeList.locator("li")).toHaveCount(2);
+  await expect(meleeList).not.toContainText("空归档成员");
   await melee.getByRole("button", { name: "鸡腿值: 降序排列", exact: true }).click();
   await melee.getByRole("button", { name: "鸡腿值: 升序排列", exact: true }).click();
   await expect(meleeList.locator("li").first()).toContainText("鸡腿验证二");
-  await expect(meleeList.locator("li").first().locator('[aria-label="排名 2"]')).toBeVisible();
+  await expect(meleeList.locator("li").first().locator('[aria-label="排名 3"]')).toBeVisible();
   await melee.getByRole("button", { name: "排名: 升序排列", exact: true }).click();
   await melee.getByRole("combobox", { name: "官方榜单期次", exact: true }).click();
   await page.getByRole("option", { name: "#425 · 测试上一期", exact: true }).click();

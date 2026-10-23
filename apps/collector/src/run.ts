@@ -3,7 +3,7 @@ import type { CollectionSource, CollectorMessage, CollectorSource, CollectorStor
 import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
 import type { ScopedCheckpoints } from "./collection-scope";
 import { CollectionStopped, type CollectionBudget } from "./budget";
-import { initializeSourceHealth, recordSourceIssue, sourceIsFailed, sourceFreshness, sourceRecovered, type RecoveryAllowance } from "./source-health";
+import { confirmedEmptySources, emptyMemberRecheckAt, initializeSourceHealth, recordSourceIssue, sourceIsFailed, sourceFreshness, sourceRecovered, type RecoveryAllowance } from "./source-health";
 import { randomUUID } from "node:crypto";
 
 export const emptySync = (source: CollectionSource): SourceSync => ({ source, historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "pending", lastError: null, lastSuccessAt: null, lastNonemptyAt: null });
@@ -41,6 +41,17 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     if (options.budget?.stopped) { budgetReached = true; break; }
     const state = await store.getSyncState(member.id);
     if (state && options.checkpoints) state.sources = options.checkpoints.read(member.id);
+    const sourceStates = new Map((options.checkpoints?.read(member.id) ?? state?.sources ?? []).map(sync => [sync.source, sync]));
+    const emptyDue = emptyMemberRecheckAt([...sourceStates.values()], streams);
+    if (emptyDue !== null && emptyDue > Date.now()) {
+      const totals = await store.contentTotals?.(member.id);
+      if (!totals || totals.messages === 0 && totals.images === 0) {
+        console.log(JSON.stringify({ event: "member_empty_skipped", memberId: member.id, nextCheckAt: new Date(emptyDue).toISOString() }));
+        continue;
+      }
+      for (const [key, sync] of sourceStates) sourceStates.set(key, { ...sync, emptyCheckedAt: null });
+    }
+    const memberErrors = errorCount;
     let covered = false;
     let roomSync: SourceSync | undefined;
     let verifiedRoomContent = false;
@@ -49,6 +60,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     const persist = async (messages: CollectorMessage[], sync?: SourceSync, catalog?: CatalogEntry[]) => {
       await store.ingestUnit(unit(messages, sync, catalog));
       if (sync) await options.checkpoints?.write(member.id, sync);
+      if (sync) sourceStates.set(sync.source, sync);
     };
     const recordIssue = async (sync: SourceSync, error: unknown) => {
       const reason = error instanceof Error ? error.message : "Collection failed.";
@@ -81,7 +93,7 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
     }
     for (const stream of streams) {
       if (options.budget?.stopped) { budgetReached = true; break; }
-      let sync = initializeSourceHealth(structuredClone((options.checkpoints?.read(member.id) ?? state?.sources)?.find(item => item.source === stream) ?? emptySync(stream)));
+      let sync = initializeSourceHealth(structuredClone(sourceStates.get(stream) ?? emptySync(stream)));
       const probing = Boolean(sync.skippedAt);
       if (options.recoveryOnly && !probing) continue;
       const blocked = sync.paused || sync.lastFailureRunId === invocationId
@@ -257,6 +269,17 @@ export async function runBatch(source: CollectorSource, store: CollectorStore, o
       }
     }
     sourcesPending += pendingStreams.size;
+    const empty = !options.recoveryOnly && !budgetReached && !covered && errorCount === memberErrors && pendingStreams.size === 0
+      ? confirmedEmptySources([...sourceStates.values()], streams) : null;
+    if (empty && store.contentTotals) {
+      const totals = await store.contentTotals(member.id);
+      if (totals.messages === 0 && totals.images === 0) {
+        const checkedAt = new Date(Math.min(...empty.map(sync => Date.parse(sync.lastSuccessAt!)))).toISOString();
+        for (const sync of empty) await persist([], { ...sync, emptyCheckedAt: checkedAt });
+        console.log(JSON.stringify({ event: "member_empty_confirmed", memberId: member.id, checkedAt,
+          nextCheckAt: new Date(Date.parse(checkedAt) + 30 * 86400_000).toISOString() }));
+      }
+    }
     if (covered) membersCovered += 1;
     await store.ingestUnit(unit([]));
     if (budgetReached) break;

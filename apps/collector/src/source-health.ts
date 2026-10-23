@@ -1,10 +1,28 @@
-import type { SourceHealth } from "@starter/shared";
+import type { CollectionSource, SourceHealth, SourceSync } from "@starter/shared";
 import { SourceRequestSkipped, SourceVerificationPending } from "./types";
 
 // Extend the existing SourceSync JSON and CollectionBudget rather than adding a
 // queue/scheduler dependency: these transitions are specific to collector pages.
 const hours = [2, 6, 12, 24] as const;
+const emptyRecheckMs = 30 * 86400_000;
 export type RecoveryAllowance = { remaining: number; spentMs: number; maxMs: number };
+
+// Source checkpoints already persist scope, history completion and attributable
+// content evidence. Reuse them for empty-member scheduling; no second queue.
+export function confirmedEmptySources(sources: SourceSync[], enabled: readonly CollectionSource[]): SourceSync[] | null {
+  const selected = enabled.map(source => sources.find(sync => sync.source === source));
+  if (!selected.length || selected.some(sync => !sync || !sync.historyDone || sync.historyCursor !== null || sync.incrementalCursor !== null || sync.pendingLatestAt !== null
+    || !["empty", "ok"].includes(sync.status) || !Number.isFinite(Date.parse(sync.lastSuccessAt ?? "")) || sync.lastNonemptyAt
+    || sync.paused || sync.skippedAt || sync.lastError || sync.historyError || sync.failureKind || sync.failureCount)) return null;
+  return selected as SourceSync[];
+}
+
+export function emptyMemberRecheckAt(sources: SourceSync[], enabled: readonly CollectionSource[], now = Date.now()): number | null {
+  const selected = confirmedEmptySources(sources, enabled);
+  if (!selected) return null;
+  const checked = selected.map(sync => Date.parse(sync.emptyCheckedAt ?? ""));
+  return checked.every(at => Number.isFinite(at) && at <= now) ? Math.min(...checked) + emptyRecheckMs : null;
+}
 
 export function initializeSourceHealth<T extends SourceHealth>(sync: T, now = Date.now()): T {
   if (sync.healthVersion === 1) return sync;
@@ -32,7 +50,7 @@ export function recordSourceIssue<T extends SourceHealth>(sync: T, error: unknow
   const count = Math.min(3, (sync.failureCount ?? 0) + (sync.lastFailureRunId === runId ? 0 : 1));
   const isolate = kind === "protocol" || count >= 3;
   const attempt = isolate ? Math.min(4, (sync.recoveryAttempt ?? 0) + (sync.skippedAt && sync.lastFailureRunId !== runId ? 1 : 0)) : 0;
-  return { ...sync, status: kind === "transient" && count < 3 ? "pending" : "failed", lastError: reason,
+  return { ...sync, emptyCheckedAt: null, status: kind === "transient" && count < 3 ? "pending" : "failed", lastError: reason,
     failureKind: kind, failureCount: count, lastFailureRunId: runId, lastFailureAt: at,
     skippedAt: isolate ? sync.skippedAt ?? at : null, recoveryAttempt: attempt,
     nextRetryAt: isolate ? new Date(now + hours[Math.min(attempt, 3)]! * 3600_000).toISOString() : null };
@@ -44,12 +62,15 @@ export function sourceIsFailed(sync: SourceHealth): boolean {
 
 export function sourceFreshness(sync: SourceHealth, now = Date.now()): "healthy" | "warning" | "failed" | "paused" {
   if (sync.paused) return "paused";
-  const at = sync.lastIncrementalSuccessAt ?? sync.enabledAt;
-  const elapsed = at ? now - Date.parse(at) : 0;
+  const at = Date.parse(sync.lastIncrementalSuccessAt ?? sync.enabledAt ?? "");
+  const emptyAt = Date.parse(sync.emptyCheckedAt ?? "");
+  // A scheduled 30-day empty-member interval is not a stale active source.
+  const due = Number.isFinite(emptyAt) && emptyAt <= now ? emptyAt + emptyRecheckMs : 0;
+  const elapsed = now - Math.max(Number.isFinite(at) ? at : now, due);
   return elapsed >= 48 * 3600_000 ? "failed" : elapsed >= 24 * 3600_000 ? "warning" : "healthy";
 }
 
 export function sourceRecovered<T extends SourceHealth>(sync: T, incremental: boolean, now = Date.now()): T {
-  return { ...sync, failureKind: null, failureCount: 0, skippedAt: null, nextRetryAt: null, recoveryAttempt: 0, lastError: null,
+  return { ...sync, emptyCheckedAt: null, failureKind: null, failureCount: 0, skippedAt: null, nextRetryAt: null, recoveryAttempt: 0, lastError: null,
     ...(incremental ? { lastIncrementalSuccessAt: new Date(now).toISOString() } : {}) };
 }

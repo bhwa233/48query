@@ -192,3 +192,52 @@ test("historical verification gaps do not suspend incremental reads or certify f
   await run("history", true);
   assert.equal(saved.lastIncrementalSuccessAt, fresh, "History work must not conceal a stale incremental source");
 });
+
+// Empty archives must not create an hourly scan loop, or hide an unfinished or
+// inaccessible source. Exercise the real batch/checkpoint transitions over time.
+test("confirmed empty members wait thirty days, then content restores normal collection", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-23T00:00:00Z") });
+  let saved: SourceSync[] = [checkpoint("room"), checkpoint("posts")];
+  let reads = 0;
+  let found = false;
+  class ArchiveStore extends DryRunStore {
+    archived = 1;
+    async contentTotals() { return { messages: this.archived, images: 0 }; }
+  }
+  const store = new ArchiveStore();
+  const source = { sources: ["room", "posts"] as const, listMembers: async () => [member], listMessages: async () => ({ items: [], nextCursor: null }),
+    listContent: async (_member: typeof member, stream: SourceSync["source"]) => {
+      reads++;
+      return { items: found && stream === "room" ? [{ id: "new-text", memberId: member.id, senderId: member.id, type: "TEXT", text: "new content", occurredAt: new Date().toISOString() }] : [], nextCursor: null };
+    } };
+  const run = () => runBatch(source, store, { since: collectionSince(),
+    checkpoints: { read: () => saved, write: async (_id, sync) => { saved = saved.map(old => old.source === sync.source ? structuredClone(sync) : old); } } });
+  await run();
+  assert.ok(saved.every(sync => !sync.emptyCheckedAt), "Database content prevents false emptiness after legacy checkpoint loss");
+  store.archived = 0;
+  assert.equal((await run()).scopeComplete, true);
+  assert.ok(saved.every(sync => sync.emptyCheckedAt));
+  const candidate = { name: "Owner", officialIds: [], officialPocketIds: [], candidateIds: [], groups: [], teams: [], officialStatuses: [] };
+  const entry = (): GroupEntry => ({ candidate, member, identity: "verified", scopeComplete: true, collectedAt: new Date().toISOString(), sources: saved });
+  const work = (entries = [entry()]) => groupWork(entries, { collect: true, refresh: true, retryUnverified: false, phase: "incremental", sources: source.sources });
+  const before = reads;
+  t.mock.timers.tick(29 * 86400_000);
+  assert.deepEqual(work(), []);
+  assert.equal(collectorHealth([{ memberId: member.id, sources: saved }]).failures, 0, "Planned monthly checks are not stale active sources");
+  await run();
+  assert.equal(reads, before);
+  for (const patch of [{ historyDone: false }, { historyError: "permission unresolved" }, { lastError: "request failed" }, { paused: true }, { emptyCheckedAt: null }]) {
+    const incomplete = { ...entry(), scopeComplete: false, sources: saved.map((sync, index) => index === 0 ? { ...sync, ...patch } : sync) };
+    assert.equal(work([incomplete]).length, 1);
+  }
+  const extended = groupWork([entry()], { collect: true, refresh: true, retryUnverified: false, phase: "incremental", sources: ["room", "posts", "album"] });
+  assert.equal(extended.length, 1, "Newly enabled sources require verification");
+  t.mock.timers.tick(86400_000);
+  assert.equal(work().length, 1);
+  found = true;
+  await run();
+  assert.ok(reads > before);
+  assert.ok(saved.every(sync => !sync.emptyCheckedAt));
+  assert.ok(saved.find(sync => sync.source === "room")?.lastNonemptyAt);
+  assert.equal(work().length, 1, "A text-only member immediately rejoins hourly collection");
+});

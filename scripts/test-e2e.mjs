@@ -92,13 +92,26 @@ try {
       ], recordings: [], totalMembers: 2, membersCovered: 2, errorCount: 0 }),
   });
   if (!comparison.ok) throw new Error(`E2E comparison seed failed: ${comparison.status}`);
+  for (const id of ["607515", "63566", "88888888"]) {
+    const empty = id === "88888888";
+    const archived = await fetch(`${apiOrigin}/api/query/ingest/unit`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
+      body: JSON.stringify({ batchId: `e2e-archive-${id}`, statDate: occurredAt.slice(0, 10), startedAt: occurredAt,
+        member: { id, name: empty ? "空归档成员" : `历史文字${id}`, groupName: "榜单验证" },
+        ...(empty ? { followerSnapshot: { count: 99999, observedAt: new Date().toISOString() } } : {}),
+        messages: empty ? [] : [{ id: `old-text-${id}`, memberId: id, type: "TEXT", text: "历史文字", occurredAt: "2023-01-01T00:00:00.000Z" }],
+        recordings: [], totalMembers: 5, membersCovered: 4, errorCount: 0 }),
+    });
+    if (!archived.ok) throw new Error(`E2E archived member seed failed: ${archived.status}`);
+  }
   for (const [index, periodId] of [426, 425].entries()) {
     const melee = await fetch(`${apiOrigin}/api/query/ingest/melee`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Ingest-Key": "test-e2e-ingest" },
       body: JSON.stringify({ snapshotId: `20000000-0000-4000-8000-00000000000${index + 1}`, periodId, periodLabel: index ? "测试上一期" : "测试最新一期", observedAt: new Date().toISOString(), cursor: null, nextCursor: null, limited: index === 1,
         entries: [
           { memberId: "607515", name: "鸡腿验证一", rank: index ? 2 : 1, score: index ? 1000 : 1500 },
-          { memberId: "63566", name: "鸡腿验证二", rank: index ? 1 : 2, score: index ? 2000 : 1000 },
+          ...(!index ? [{ memberId: "88888888", name: "空归档成员", rank: 2, score: 1200 }] : []),
+          { memberId: "63566", name: "鸡腿验证二", rank: index ? 1 : 3, score: index ? 2000 : 1000 },
         ] }),
     });
     if (!melee.ok) throw new Error(`E2E weekly ranking seed failed: ${melee.status}`);

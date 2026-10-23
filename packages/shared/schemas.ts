@@ -93,6 +93,7 @@ export const SourceSyncSchema = z.object({
   nextRetryAt: z.string().datetime().nullable().optional(), recoveryAttempt: z.number().int().min(0).max(4).optional(),
   paused: z.boolean().optional(),
   historyRetryAt: z.string().datetime().nullable().optional(), historyError: z.string().max(1000).nullable().optional(),
+  emptyCheckedAt: z.string().datetime().nullable().optional(),
 });
 
 export const CollectorSinceSchema = z.string().datetime().refine(value => Date.parse(value) >= Date.parse("2025-12-31T16:00:00.000Z"), "Collection starts no earlier than Beijing New Year 2026.");
@@ -107,7 +108,7 @@ export const CollectorProgressSchema = z.object({
 
 export const SourceHealthSchema = SourceSyncSchema.pick({ status: true, lastError: true, failureCount: true, skippedAt: true,
   enabledAt: true, lastIncrementalSuccessAt: true, healthVersion: true, failureKind: true, lastFailureRunId: true,
-  lastFailureAt: true, nextRetryAt: true, recoveryAttempt: true, paused: true, historyError: true, historyRetryAt: true });
+  lastFailureAt: true, nextRetryAt: true, recoveryAttempt: true, paused: true, historyError: true, historyRetryAt: true, emptyCheckedAt: true });
 export const MediaRetryProgressSchema = z.object({ since: CollectorSinceSchema, kind: z.enum(["image", "video"]),
   revision: z.number().int().nonnegative(), health: SourceHealthSchema, writeId: z.string().uuid().optional() });
 

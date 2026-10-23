@@ -95,6 +95,14 @@ export class HttpIngestStore implements CollectorStore {
     return this.request<SyncState>(`/api/query/ingest/state/${encodeURIComponent(memberId)}`);
   }
 
+  async contentTotals(memberId: string) {
+    const params = new URLSearchParams({ memberId });
+    // Rounding the lower bound down to its Beijing day is conservative: older
+    // content may prevent deferral, but can never create a false empty result.
+    if (this.since) params.set("from", new Date(Date.parse(this.since) + 8 * 3600_000).toISOString().slice(0, 10));
+    return this.request<{ messages: number; images: number }>(`/api/query/content-summary?${params}`);
+  }
+
   async pendingCatalog(memberId: string, source: "album" | "post_images", limit: number) {
     const entries = await this.request<CatalogEntry[]>(`/api/query/ingest/catalog?memberId=${encodeURIComponent(memberId)}&source=${source}&limit=${this.since ? 50 : limit}`);
     if (!this.since) return entries;

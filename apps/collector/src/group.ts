@@ -9,7 +9,7 @@ import { createPocket48Pa } from "./pocket48-auth.mjs";
 import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
 import { runBatch, emptySync } from "./run";
-import { initializeSourceHealth } from "./source-health";
+import { emptyMemberRecheckAt, initializeSourceHealth } from "./source-health";
 import { collectorHealth, writeCollectorReport } from "./collector-report";
 import type { CollectorStore, SourceSync } from "./types";
 import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
@@ -116,6 +116,7 @@ try {
     await rename(`${statePath}.tmp`, statePath);
   };
   const summary = () => ({ event: "group_progress", since, scopeComplete: state.entries.filter(e => e.scopeComplete).length, officialRows: state.officialRows, candidates: state.entries.length, excluded: state.excluded.length,
+    emptyMembersDeferred: state.entries.filter(e => e.identity === "verified" && e.scopeComplete && (emptyMemberRecheckAt(e.sources ?? [], reportSources) ?? 0) > Date.now()).length,
     verified: state.entries.filter(e => e.identity === "verified").length, unverified: state.entries.filter(e => e.identity === "unverified").length,
     failed: state.entries.filter(e => e.identity === "failed").length, pending: state.entries.filter(e => e.identity === "pending").length,
     collected: state.entries.filter(e => e.collectedAt).length, sourceFailures: state.entries.reduce((sum, e) => sum + (e.errorCount ?? 0), 0),

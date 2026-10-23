@@ -7,6 +7,7 @@ import { ErrorSchema, ImageAttachmentSchema, VideoAttachmentSchema, QueryMessage
 import { imageProjection, imageStatement, readImage } from "./images";
 import { videoProjection, videoStatement, readVideo } from "./videos";
 import { readMessages } from "./messages";
+import { publicMessageFilter } from "./archive-pages";
 import { registerMeleeIngest } from "./melee";
 
 const BatchCompleteSchema = z.object({ completedAt: z.string().max(80), membersCovered: z.number().int().nonnegative(), totalMembers: z.number().int().nonnegative(), errorCount: z.number().int().nonnegative(), errorMessage: z.string().max(2000).nullable().optional() });
@@ -44,8 +45,16 @@ app.openapi(createRoute({ method: "post", path: "/runs", request: { body: { requ
 app.openapi(createRoute({ method: "get", path: "/progress", request: { query: z.object({ since: CollectorSinceSchema, after: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) }, responses: { 200: { description: "Private, date-scoped resumable collector progress.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.array(CollectorProgressSchema), nextCursor: z.string().nullable() }) } } }, 400: unavailable, 401: unavailable, 503: unavailable } }), async c => {
   const { since: rawSince, after, limit } = c.req.valid("query");
   const since = new Date(rawSince).toISOString();
-  const rows = await database(c).prepare("SELECT member_id, revision, state_json FROM query_collector_progress WHERE since = ? AND member_id NOT LIKE '@media/%' AND member_id > ? ORDER BY member_id LIMIT ?").bind(since, after ?? "", limit + 1).all<{ member_id: string; revision: number; state_json: string }>();
-  const data = rows.results.slice(0, limit).map(row => CollectorProgressSchema.parse({ ...JSON.parse(row.state_json), revision: row.revision }));
+  const rows = await database(c).prepare(`SELECT member_id, revision, state_json,
+    EXISTS (SELECT 1 FROM query_messages q WHERE q.member_id = p.member_id AND q.occurred_at >= p.since AND ${publicMessageFilter}) AS has_content
+    FROM query_collector_progress p WHERE since = ? AND member_id NOT LIKE '@media/%' AND member_id > ? ORDER BY member_id LIMIT ?`).bind(since, after ?? "", limit + 1).all<{ member_id: string; revision: number; state_json: string; has_content: number }>();
+  const data = rows.results.slice(0, limit).map(row => {
+    const value = CollectorProgressSchema.parse({ ...JSON.parse(row.state_json), revision: row.revision });
+    // Content found by another invocation immediately cancels an empty-member
+    // cooldown. The stored revision still protects the next checkpoint write.
+    if (row.has_content) value.sources = value.sources.map(sync => ({ ...sync, emptyCheckedAt: null }));
+    return value;
+  });
   return c.json({ ok: true as const, data, nextCursor: rows.results.length > limit ? data.at(-1)!.memberId : null }, 200);
 });
 app.openapi(createRoute({ method: "post", path: "/progress", request: { body: { required: true, content: { "application/json": { schema: CollectorProgressSchema } } } }, responses: { 200: { description: "Saved only after content ingestion; revision prevents stale collectors overwriting newer cursors.", content: { "application/json": { schema: z.object({ ok: z.literal(true), data: z.object({ revision: z.number().int() }) }) } } }, 400: unavailable, 401: unavailable, 409: unavailable, 503: unavailable } }), async c => {
