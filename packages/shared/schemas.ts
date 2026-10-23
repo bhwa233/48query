@@ -209,6 +209,17 @@ export const QueryRecordingsSchema = z.object({
 
 export const QueryMessageSearchSchema = z.object({ ok: z.literal(true), data: z.array(QueryMessageSchema), nextCursor: z.string().nullable(), coverage: QueryCoverageSchema });
 
+export const ArchivePaginationSchema = z.object({ page: z.number().int().positive(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), totalPages: z.number().int().positive() });
+export const ArchiveContentTotalsSchema = z.object({ messages: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() });
+export const QueryMessagePageSchema = z.object({ ok: z.literal(true), data: z.array(QueryMessageSchema), pagination: ArchivePaginationSchema });
+export const QueryImagePageSchema = z.object({ ok: z.literal(true), data: z.array(z.object({ image: ImageAttachmentSchema, message: QueryMessageSchema })), pagination: ArchivePaginationSchema });
+export const QueryContentTotalsSchema = z.object({ ok: z.literal(true), data: ArchiveContentTotalsSchema });
+export const QueryActivitySchema = z.object({ ok: z.literal(true), data: z.object({
+  year: z.number().int(), years: z.array(z.number().int()), asOf: z.string(),
+  days: z.array(z.object({ date: z.string(), messages: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() })),
+  totals: ArchiveContentTotalsSchema.extend({ activeDays: z.number().int().nonnegative() }),
+}) });
+
 const IngestMemberSchema = z.object({
   id: z.string().min(1).max(100), name: z.string().min(1).max(100), pinyin: z.string().max(200).nullable().optional(),
   groupName: z.string().min(1).max(100), team: z.string().max(100).nullable().optional(), roomId: z.string().max(200).nullable().optional(),

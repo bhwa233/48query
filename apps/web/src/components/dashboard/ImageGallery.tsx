@@ -2,25 +2,24 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
-import type { ArchiveMessage, ArchiveMessages, ImageAttachment } from "@starter/shared";
+import type { ArchiveMessage, ArchiveImagePage, ImageAttachment } from "@starter/shared";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { archiveLabels, formatTime, QueryStatus, useArchiveQuery } from "./ArchiveData";
-import { ArchiveMessageFilters, emptyArchiveFilters, type ArchiveFilters } from "./ArchiveMessageFilters";
+import { ArchiveDataRegion, archiveLabels, formatTime, QueryStatus, useArchiveQuery } from "./ArchiveData";
+import { ArchiveMessageFilters } from "./ArchiveMessageFilters";
 import { ImageGallerySkeleton } from "./ArchiveSkeletons";
 import { displayMessageText } from "./MessageList";
+import { ArchivePagination } from "./ArchivePagination";
+import { contentQuery, updateArchiveUrl, useArchiveFilters, useArchivePage } from "./ArchiveUrlState";
 
 type GalleryEntry = { image: ImageAttachment; message: ArchiveMessage };
 
 export function ImageGallery({ locale, apiBaseUrl }: { locale: string; apiBaseUrl?: string }) {
-  const [filters, setFilters] = useState<ArchiveFilters>({ ...emptyArchiveFilters, kind: "image" });
-  const params = new URLSearchParams({ kind: "image", limit: "30" });
-  for (const [key, value] of Object.entries({ q: filters.query, memberId: filters.member, source: filters.source, from: filters.from, to: filters.to })) {
-    if (value) params.set(key, value);
-  }
+  const { filters, setFilters } = useArchiveFilters();
+  const params = contentQuery(filters, { images: true });
   return <>
     <ArchiveMessageFilters locale={locale} apiBaseUrl={apiBaseUrl} value={filters} onChange={setFilters} imagesOnly />
     <GalleryResults key={`${apiBaseUrl}:${params}`} locale={locale} apiBaseUrl={apiBaseUrl} query={params.toString()} />
@@ -28,55 +27,28 @@ export function ImageGallery({ locale, apiBaseUrl }: { locale: string; apiBaseUr
 }
 
 export function MemberImageGallery({ memberId, locale, apiBaseUrl, active, to }: { memberId: string; locale: string; apiBaseUrl?: string; active: boolean; to: string }) {
-  const params = new URLSearchParams({ memberId, kind: "image", limit: "30", to });
-  return <GalleryResults locale={locale} apiBaseUrl={apiBaseUrl} query={params.toString()} enabled={active} />;
+  const { filters } = useArchiveFilters(memberId);
+  const params = contentQuery(filters, { memberId, images: true, to });
+  return <GalleryResults key={`${apiBaseUrl}:${params}`} locale={locale} apiBaseUrl={apiBaseUrl} query={params.toString()} enabled={active} member />;
 }
 
-function GalleryResults({ locale, apiBaseUrl, query, enabled = true }: { locale: string; apiBaseUrl?: string; query: string; enabled?: boolean }) {
+function GalleryResults({ locale, apiBaseUrl, query, enabled = true, member = false }: { locale: string; apiBaseUrl?: string; query: string; enabled?: boolean; member?: boolean }) {
   const t = archiveLabels(locale);
-  const [history, setHistory] = useState<ArchiveMessage[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  if (!enabled && selected !== null) setSelected(null);
-  const opener = useRef<HTMLButtonElement | null>(null);
-  const sentinel = useRef<HTMLDivElement>(null);
+  const control = useArchivePage(true, member);
   const params = new URLSearchParams(query);
-  if (cursor) params.set("before", cursor);
-  // Reuse archive request cancellation/retry and the member-history accumulation pattern.
-  // The keyed results boundary discards history and cancels requests when filters change.
-  const page = useArchiveQuery<ArchiveMessages>(apiBaseUrl, `/api/query/messages?${params}`);
-  const messages = useMemo(() => {
-    const ids = new Set<string>();
-    return [...history, ...(page.data?.data ?? [])].filter(message => {
-      if (ids.has(message.id)) return false;
-      ids.add(message.id);
-      return true;
-    });
-  }, [history, page.data]);
-  const entries = useMemo(() => {
-    const ids = new Set<string>();
-    return messages.flatMap(message => message.images.filter(image => {
-      if (ids.has(image.id)) return false;
-      ids.add(image.id);
-      return true;
-    }).map(image => ({ image, message })));
-  }, [messages]);
-  const nextCursor = page.data?.nextCursor !== cursor ? page.data?.nextCursor : null;
-  const loadMore = useCallback(() => {
-    if (!nextCursor || page.loading || page.failed) return;
-    setHistory(messages);
-    setCursor(nextCursor);
-  }, [messages, nextCursor, page.loading, page.failed]);
-
+  params.set("page", String(control.page)); params.set("pageSize", String(control.pageSize));
+  const requestKey = params.toString();
+  const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key: "", id: null });
+  if (!enabled && selection.id !== null) setSelection({ key: requestKey, id: null });
+  const selected = selection.key === requestKey ? selection.id : null;
+  const setSelected = (id: string | null) => setSelection({ key: requestKey, id });
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const page = useArchiveQuery<ArchiveImagePage>(apiBaseUrl, `/api/query/image-pages?${params}`);
+  const result = page.data ?? page.previousData;
+  const entries = result?.data ?? [];
   useEffect(() => {
-    const target = sentinel.current;
-    if (!enabled || !target || !nextCursor || page.loading || page.failed || selected) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry?.isIntersecting) loadMore();
-    }, { rootMargin: "300px" });
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [enabled, loadMore, nextCursor, page.loading, page.failed, selected]);
+    if (page.data && page.data.pagination.page !== control.page) updateArchiveUrl({ [control.pageKey]: page.data.pagination.page }, true);
+  }, [page.data, control.page, control.pageKey]);
 
   const selectedIndex = entries.findIndex(entry => entry.image.id === selected);
   const active = entries[selectedIndex];
@@ -85,15 +57,15 @@ function GalleryResults({ locale, apiBaseUrl, query, enabled = true }: { locale:
     if (next) setSelected(next.image.id);
   };
 
-  return <div className="gallery-shell flex min-w-0 flex-col gap-3">
-    {!entries.length ? <QueryStatus state={page} locale={locale} /> : null}
-    {page.loading && !entries.length ? <ImageGallerySkeleton label={t.loading} /> : null}
+  return <div data-archive-page className="gallery-shell flex min-w-0 scroll-mt-14 flex-col gap-3">
+    <QueryStatus state={page} locale={locale} />
+    {page.failed && entries.length ? <p className="text-xs text-muted-foreground">{t.previousPageShown}</p> : null}
     {!page.loading && page.data && !entries.length ? <p role="status" className="py-12 text-center text-sm text-muted-foreground">{t.empty}</p> : null}
     <Dialog open={enabled && Boolean(active)} onOpenChange={open => { if (!open) setSelected(null); }}>
-      <GalleryMasonry entries={entries} locale={locale} onSelect={(entry, button) => {
+      <ArchiveDataRegion loading={page.loading} fallback={<ImageGallerySkeleton label={t.loading} />}><GalleryMasonry entries={entries} locale={locale} onSelect={(entry, button) => {
         opener.current = button;
         setSelected(entry.image.id);
-      }} />
+      }} /></ArchiveDataRegion>
       {active ? <DialogContent
         className="flex max-h-[94dvh] w-[calc(100%-1rem)] max-w-5xl flex-col gap-3 overflow-y-auto p-3 pt-12 motion-reduce:animate-none sm:p-5 sm:pt-12"
         closeLabel={t.closePreview}
@@ -130,10 +102,7 @@ function GalleryResults({ locale, apiBaseUrl, query, enabled = true }: { locale:
         </section>
       </DialogContent> : null}
     </Dialog>
-    <div ref={sentinel} className="flex min-h-12 flex-col items-center justify-center gap-2" aria-busy={page.loading}>
-      <p role="status" className="text-center text-xs text-muted-foreground">{page.failed && entries.length ? t.failure : page.loading && entries.length ? t.loading : entries.length && !nextCursor ? `${entries.length} ${t.allImagesLoaded}` : null}</p>
-      {page.failed && entries.length ? <Button variant="outline" size="sm" onClick={page.retry}>{t.retry}</Button> : nextCursor ? <Button variant="outline" size="sm" disabled={page.loading} onClick={loadMore}>{t.loadMoreImages}</Button> : null}
-    </div>
+    {result ? <ArchivePagination pagination={result.pagination} {...control} locale={locale} disabled={page.loading || page.failed} onNavigate={() => setSelected(null)} /> : null}
   </div>;
 }
 

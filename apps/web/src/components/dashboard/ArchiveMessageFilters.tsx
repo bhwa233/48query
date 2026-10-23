@@ -11,16 +11,18 @@ import { archiveLabels, useArchiveQuery } from "./ArchiveData";
 export type ArchiveFilters = { query: string; member: string; kind: string; source: string; from: string; to: string };
 export const emptyArchiveFilters: ArchiveFilters = { query: "", member: "", kind: "", source: "", from: "", to: "" };
 
-export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, imagesOnly = false }: {
-  locale: string; apiBaseUrl?: string; value: ArchiveFilters; onChange: (value: ArchiveFilters) => void; imagesOnly?: boolean;
+export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, imagesOnly = false, memberId }: {
+  locale: string; apiBaseUrl?: string; value: ArchiveFilters; onChange: (value: ArchiveFilters) => void; imagesOnly?: boolean; memberId?: string;
 }) {
   const t = archiveLabels(locale);
   const { query, member, kind, source, from, to } = value;
   const [draft, setDraft] = useState(query);
+  const [previousQuery, setPreviousQuery] = useState(query);
+  if (previousQuery !== query) { setPreviousQuery(query); setDraft(query); }
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedId = useId();
   const state = { configured: Boolean(apiBaseUrl) };
-  const members = useArchiveQuery<ArchiveMembers>(apiBaseUrl, "/api/query/members");
+  const members = useArchiveQuery<ArchiveMembers>(memberId ? undefined : apiBaseUrl, "/api/query/members");
   const sources = ["room", "album", "essence", "posts", "post_images", "weibo", "room_posts"];
   const summary = [source ? t[`source_${source}`] : "", from ? `${t.from}: ${from}` : "", to ? `${t.to}: ${to}` : ""].filter(Boolean).join(" · ");
   const setQuery = (query: string) => onChange({ ...value, query });
@@ -36,8 +38,8 @@ export function ArchiveMessageFilters({ locale, apiBaseUrl, value, onChange, ima
           <Input className="h-11 sm:h-9" disabled={!state.configured} aria-label={t.searchMessages} placeholder={t.searchMessages} value={draft} onChange={event => setDraft(event.target.value)} />
           <Button className="h-11 sm:h-9" disabled={!state.configured} type="submit" size="sm">{t.search}</Button>
         </form>
-        <div className="grid min-w-0 gap-2 md:flex-1" style={{ gridTemplateColumns: imagesOnly ? "minmax(0,1fr) auto" : "minmax(0,1fr) minmax(0,1fr) auto" }}>
-          <ArchiveFilter label={t.allMembers!} value={member} onChange={value => { setMember(value); }} options={members.data?.data.map(item => ({ value: item.id, label: item.name })) ?? []} />
+        <div className={imagesOnly && memberId ? "grid min-w-0 gap-2" : "grid min-w-0 gap-2 md:flex-1"} style={{ gridTemplateColumns: imagesOnly ? memberId ? "auto" : "minmax(0,1fr) auto" : memberId ? "minmax(0,1fr) auto" : "minmax(0,1fr) minmax(0,1fr) auto" }}>
+          {!memberId ? <ArchiveFilter label={t.allMembers!} value={member} onChange={value => { setMember(value); }} options={members.data?.data.map(item => ({ value: item.id, label: item.name })) ?? []} /> : null}
           {!imagesOnly ? <ArchiveFilter label={t.allTypes!} value={kind} onChange={value => { setKind(value); }} options={["text", "image", "reply", "post"].map(value => ({ value, label: t[`kind_${value}`]! }))} /> : null}
           <Button type="button" variant={summary ? "secondary" : "outline"} size="sm" className="h-11 sm:h-9" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal data-icon="inline-start" />{t.moreFilters}</Button>
         </div>

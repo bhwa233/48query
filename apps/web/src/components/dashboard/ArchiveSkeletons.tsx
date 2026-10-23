@@ -67,6 +67,7 @@ export function MemberDetailSkeleton({ label }: { label?: string }) {
     <LoadingRegion label={label} className="rounded-lg border border-border bg-card px-3 py-2.5">
       <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }, (_, index) => <div key={index} className="flex min-w-0 flex-col gap-0.5"><Skeleton className="h-6 w-12 max-w-full sm:h-7" /><Skeleton className="h-4 w-16 max-w-full" /></div>)}</div>
     </LoadingRegion>
+    <div className="rounded-lg border border-border p-3"><ActivitySkeleton /></div>
     <div className="flex flex-col gap-3"><div aria-hidden="true" className="flex h-10 items-center gap-6 border-b px-3"><Skeleton className="h-4 w-20" /><Skeleton className="h-4 w-20" /></div><MessageListSkeleton /></div>
   </div>;
 }
@@ -84,8 +85,7 @@ export function RankingRowsSkeleton({ label, rows = 5 }: { label?: string; rows?
 }
 
 export function ActivitySkeleton() {
-  const heights = ["h-6", "h-12", "h-8", "h-20", "h-14", "h-10", "h-16"];
-  return <div aria-hidden="true" className="flex h-24 items-end justify-around gap-1 overflow-hidden border-b border-border pb-1">{heights.map((height, index) => <Skeleton key={index} className={cn("min-w-0 max-w-8 flex-1 rounded-t-sm", height)} />)}</div>;
+  return <LoadingRegion className="flex min-h-40 flex-col gap-3"><Skeleton className="h-3 w-48 max-w-full" /><Skeleton className="h-24 w-full" /><Skeleton className="h-3 w-72 max-w-full" /></LoadingRegion>;
 }
 
 export function TypeBreakdownSkeleton() {

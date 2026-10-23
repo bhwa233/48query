@@ -8,6 +8,9 @@ export const API_PATHS = {
   queryRankings: "/api/query/rankings",
   queryMembers: "/api/query/members",
   queryMessages: "/api/query/messages",
+  queryMessagePages: "/api/query/message-pages",
+  queryImagePages: "/api/query/image-pages",
+  queryActivity: "/api/query/activity",
   queryRecordings: "/api/query/recordings",
 } as const;
 
@@ -22,6 +25,7 @@ import type {
   QueryOverviewSchema,
   QueryRankingsSchema, FollowerSnapshotSchema, MeleePeriodSchema, MeleeEntrySchema, MeleeProgressSchema, MeleePageSchema, QueryMeleeSchema,
   QueryMessageSchema, QueryMembersSchema, QueryMemberDetailSchema, QueryMessageSearchSchema, ImageAttachmentSchema, VideoAttachmentSchema, CollectionSourceSchema, SourceSyncSchema, SourceHealthSchema, MediaRetryProgressSchema, CatalogEntrySchema, CollectorProgressSchema, CollectorRunSchema,
+  ArchivePaginationSchema, QueryMessagePageSchema, QueryImagePageSchema, QueryContentTotalsSchema, QueryActivitySchema,
 } from "./schemas";
 
 export type ApiErrorResponse = z.infer<typeof ErrorSchema>;
@@ -42,6 +46,11 @@ export type ArchiveMessage = z.infer<typeof QueryMessageSchema>;
 export type ArchiveMembers = z.infer<typeof QueryMembersSchema>;
 export type ArchiveMemberDetail = z.infer<typeof QueryMemberDetailSchema>;
 export type ArchiveMessages = z.infer<typeof QueryMessageSearchSchema>;
+export type ArchivePagination = z.infer<typeof ArchivePaginationSchema>;
+export type ArchiveMessagePage = z.infer<typeof QueryMessagePageSchema>;
+export type ArchiveImagePage = z.infer<typeof QueryImagePageSchema>;
+export type ArchiveContentTotals = z.infer<typeof QueryContentTotalsSchema>;
+export type ArchiveActivity = z.infer<typeof QueryActivitySchema>;
 export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
 export type VideoAttachment = z.infer<typeof VideoAttachmentSchema>;
 export type CollectionSource = z.infer<typeof CollectionSourceSchema>;

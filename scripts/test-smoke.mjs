@@ -122,6 +122,8 @@ try {
       "database_not_configured",
     );
   }
+  for (const path of ["message-pages", "image-pages", "activity", "content-summary"])
+    assert.equal((await request(origin, `/api/query/${path}`, 503)).json().error.code, "database_not_configured");
   const echo = await request(
     origin,
     "/api/echo",
@@ -425,6 +427,46 @@ try {
   for (const range of ["from=2024-01-03&to=2024-01-02", "from=2024-01-01&to=2025-02-01", "from=2024-02-30&to=2024-03-01", "from=2099-01-01&to=2099-01-02"])
     await request(origin, `/api/query/rankings?${range}`, 400);
   console.log("PASS rankings: Beijing ranges, image deduplication, latest fan snapshots, unknown vs zero, fan-only members and filter scope");
+  // Page units differ: messages retain equal-time ID order, while images dedupe
+  // across parent messages before slicing. Calendar totals must not sum daily
+  // distinct-image counts when the same picture was posted on multiple days.
+  const pageImage = id => ({ id: `page-${id}`, sourceUrl: `https://example.com/${id}.png` });
+  const pageMessages = [
+    { id: "page-a", memberId: "page-member", senderId: "page-member", type: "TEXT", text: "calendar first", occurredAt: "2024-02-28T15:59:59.000Z", images: [pageImage("a"), pageImage("b")] },
+    { id: "page-b", memberId: "page-member", senderId: "page-member", type: "REPLY", kind: "reply", question: "calendar question", answer: "calendar answer", occurredAt: "2024-02-28T16:00:00.000Z", images: [pageImage("a"), pageImage("c")] },
+    { id: "page-c", memberId: "page-member", senderId: "page-member", type: "TEXT", text: "calendar third", occurredAt: "2024-02-28T16:00:00.000Z", images: [pageImage("d")] },
+  ];
+  await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...ingestUnit, batchId: "page-batch", member: { id: "page-member", name: "Calendar Member", groupName: "Calendar" }, messages: pageMessages, recordings: [] }) });
+  const pageQuery = "/api/query/message-pages?memberId=page-member&pageSize=2";
+  const direct = (await request(origin, `${pageQuery}&page=2`)).json();
+  assert.deepEqual(direct.data.map(message => message.id), ["page-a"]);
+  assert.deepEqual(direct.pagination, { page: 2, pageSize: 2, total: 3, totalPages: 2 });
+  assert.deepEqual((await request(origin, `${pageQuery}&page=1`)).json().data.map(message => message.id), ["page-c", "page-b"]);
+  assert.equal((await request(origin, `${pageQuery}&page=999`)).json().pagination.page, 2);
+  const picturesOne = (await request(origin, "/api/query/image-pages?memberId=page-member&pageSize=2&page=1")).json();
+  const picturesTwo = (await request(origin, "/api/query/image-pages?memberId=page-member&pageSize=2&page=2")).json();
+  assert.equal(picturesOne.pagination.total, 4);
+  assert.deepEqual([...picturesOne.data, ...picturesTwo.data].map(entry => entry.image.id), ["page-d", "page-a", "page-c", "page-b"]);
+  assert.equal(picturesOne.data[1].message.id, "page-b", "A duplicate picture chooses its newest matching parent");
+  assert.deepEqual((await request(origin, "/api/query/content-summary?memberId=page-member&from=2024-02-29&to=2024-02-29")).json().data, { messages: 2, images: 3, replies: 1 });
+  const activity = (await request(origin, "/api/query/activity?memberId=page-member")).json().data;
+  assert.equal(activity.year, 2024, "An archived member opens the last year with records");
+  assert.deepEqual(activity.days, [{ date: "2024-02-28", messages: 1, images: 2, replies: 0 }, { date: "2024-02-29", messages: 2, images: 3, replies: 1 }]);
+  assert.deepEqual(activity.totals, { messages: 3, images: 4, replies: 1, activeDays: 2 });
+  assert.equal((await request(origin, "/api/query/activity?memberId=page-member&year=2023")).json().data.days.length, 0);
+  assert.equal((await request(origin, "/api/query/message-pages?q=%27%20OR%201%3D1--")).json().pagination.total, 0);
+  for (const invalid of ["page=0", "pageSize=0", "from=2024-02-30", "from=2024-03-01&to=2024-02-28"])
+    await request(origin, `/api/query/message-pages?${invalid}`, 400);
+  // Exercise D1's bound-parameter ceiling with one image per parent message.
+  // A large gallery page must work when its metadata spans more than 100 IDs.
+  const largeGalleryMessages = Array.from({ length: 120 }, (_, index) => ({ id: `large-page-${index}`, memberId: "large-page-member", senderId: "large-page-member", type: "TEXT", text: "large gallery", occurredAt: "2024-03-01T00:00:00.000Z", images: [{ id: `large-image-${index}`, sourceUrl: `https://example.com/large-${index}.png` }] }));
+  for (let offset = 0; offset < largeGalleryMessages.length; offset += 25)
+    await request(origin, "/api/query/ingest/unit", 200, { ...ingestOptions, body: JSON.stringify({ ...ingestUnit, batchId: `large-page-batch-${offset}`, member: { id: "large-page-member", name: "Large Gallery Member", groupName: "Calendar" }, messages: largeGalleryMessages.slice(offset, offset + 25), recordings: [] }) });
+  const largeImages = (await request(origin, "/api/query/image-pages?memberId=large-page-member&pageSize=120")).json();
+  assert.equal(largeImages.data.length, 120);
+  assert.equal(new Set(largeImages.data.map(entry => entry.message.id)).size, 120);
+  assert.equal((await request(origin, "/api/query/message-pages?memberId=large-page-member&pageSize=100")).json().data.length, 100);
+  console.log("PASS archive pages/calendar: direct deep links, equal-time boundaries, distinct images, clamped pages, Beijing leap days and filtered totals");
   // Ranking pages and their cursor must commit together; a partial refresh must
   // not replace the last complete published snapshot.
   const meleePage = { snapshotId: "10000000-0000-4000-8000-000000000001", periodId: 426, periodLabel: "Synthetic official period", observedAt: "2026-10-17T00:00:00.000Z", cursor: null, nextCursor: "2", entries: [{ memberId: "607515", name: "Synthetic One", rank: 1, score: 100 }] };
@@ -508,6 +550,10 @@ try {
   assert.equal((await request(previewOrigin, "/api/query/members/smoke-member")).json().data.id, "smoke-member");
   await request(previewOrigin, "/api/query/rankings?from=invalid", 400);
   assert.equal((await request(previewOrigin, "/api/query/melee")).json().ok, true);
+  assert.equal((await request(previewOrigin, "/api/query/message-pages?memberId=page-member&page=2&pageSize=2")).json().data[0].id, "page-a");
+  assert.equal((await request(previewOrigin, "/api/query/image-pages?memberId=page-member&pageSize=2")).json().pagination.total, 4);
+  assert.equal((await request(previewOrigin, "/api/query/activity?memberId=page-member")).json().data.year, 2024);
+  assert.equal((await request(previewOrigin, "/api/query/content-summary?memberId=page-member")).json().data.messages, 3);
   await request(previewOrigin, "/api/query/ingest/progress", 404, imageOptions);
   await request(previewOrigin, "/api/query/ingest/unit", 405, ingestOptions);
   console.log("PASS same-origin query binding: real D1, pagination, upstream errors/cache headers and private/write route isolation");

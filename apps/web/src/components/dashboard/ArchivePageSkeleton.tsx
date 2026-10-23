@@ -8,13 +8,14 @@ function HomeSkeleton() {
     <HeadingSkeleton action />
     <div aria-busy="true" className="flex min-w-0 flex-col gap-3">
       <section aria-hidden="true" className="grid grid-cols-2 gap-2 sm:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Card key={index} className="gap-1 rounded-lg py-2.5"><CardHeader className="flex flex-row items-center justify-between gap-2 px-3"><Skeleton className="h-4 w-16" /><Skeleton className="size-4" /></CardHeader><CardContent className="px-3"><Skeleton className="h-7 w-20" /></CardContent></Card>)}</section>
+      <div className="rounded-lg border border-border p-3"><ActivitySkeleton /></div>
       <section className="overflow-hidden rounded-lg border border-border">
         <div aria-hidden="true" className="flex flex-col gap-3 border-b px-3 py-2"><div className="flex h-8 justify-between gap-2">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-5 w-16 max-w-full" />)}</div><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-8 w-full" />)}</div></div>
         <div aria-hidden="true" className="rank-columns border-b px-3 py-2"><Skeleton className="h-4 w-5" /><Skeleton className="h-4 w-16" /><Skeleton className="h-4 w-10 justify-self-end" />{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="hidden h-4 w-10 justify-self-end sm:block" />)}</div>
         <RankingRowsSkeleton />
         <div aria-hidden="true" className="flex justify-between border-t px-3 py-2"><Skeleton className="h-8 w-28" /><Skeleton className="h-8 w-32" /></div>
       </section>
-      <div aria-hidden="true" className="grid min-w-0 gap-3 lg:grid-cols-[1.5fr_1fr]">{["activity", "types"].map(kind => <Card key={kind} className="min-w-0 gap-3 rounded-lg py-3"><CardHeader className="px-3"><Skeleton className="h-5 w-24" /></CardHeader><CardContent className="px-3">{kind === "activity" ? <ActivitySkeleton /> : <TypeBreakdownSkeleton />}</CardContent></Card>)}</div>
+      <Card aria-hidden="true" className="min-w-0 gap-3 rounded-lg py-3"><CardHeader className="px-3"><Skeleton className="h-5 w-24" /></CardHeader><CardContent className="px-3"><TypeBreakdownSkeleton /></CardContent></Card>
     </div>
   </ArchivePageShell>;
 }

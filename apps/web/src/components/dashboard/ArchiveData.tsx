@@ -27,12 +27,12 @@ export function useArchiveQuery<T>(apiBaseUrl: string | undefined, path: string)
         if (!response.ok) throw new Error("Archive request failed");
         const payload = await response.json() as T & { ok?: boolean };
         if (payload.ok !== true) throw new Error("Invalid archive response");
-        setResult({ key, data: payload, failed: false });
+        if (!controller.signal.aborted) setResult({ key, data: payload, failed: false });
       })
-      .catch(() => { if (!controller.signal.aborted) setResult({ key, data: null, failed: true }); });
+      .catch(() => { if (!controller.signal.aborted) setResult(previous => ({ key, data: previous.data, failed: true })); });
     return () => controller.abort();
   }, [apiBaseUrl, path, key]);
-  return { data: result.key === key ? result.data : null, previousData: result.data, loading: Boolean(apiBaseUrl) && result.key !== key, failed: result.key === key && result.failed, configured: Boolean(apiBaseUrl), retry: () => setAttempt(value => value + 1) };
+  return { data: result.key === key && !result.failed ? result.data : null, previousData: result.data, loading: Boolean(apiBaseUrl) && result.key !== key, failed: result.key === key && result.failed, configured: Boolean(apiBaseUrl), retry: () => setAttempt(value => value + 1) };
 }
 
 export function QueryStatus({ state, locale }: { state: { loading: boolean; failed: boolean; configured: boolean; retry: () => void }; locale: string }) {

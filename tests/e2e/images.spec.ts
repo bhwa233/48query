@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-test("gallery appends without moving cards, retries its cursor and keeps preview/filter state isolated", async ({ page, request }, testInfo) => {
+test("gallery paginates distinct images, restores URL state and isolates previews and filters", async ({ page, request }, testInfo) => {
   test.setTimeout(90000);
   const api = process.env.STARTER_E2E_API_URL;
   const web = process.env.STARTER_E2E_WEB_URL;
@@ -40,14 +40,14 @@ test("gallery appends without moving cards, retries its cursor and keeps preview
   let release = () => {};
   let releaseFilter = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const requestedCursors: string[] = [];
-  await page.route("**/api/query/messages?**", async route => {
+  const requestedPages: string[] = [];
+  await page.route("**/api/query/image-pages?**", async route => {
     const params = new URL(route.request().url()).searchParams;
-    const cursor = params.get("before");
-    if (params.get("memberId") === "gallery-member" && cursor) {
-      requestedCursors.push(cursor);
-      if (requestedCursors.length === 1) {
-        // A failed append must not advance the cursor or remove the existing wall.
+    const selectedPage = params.get("page");
+    if (params.get("memberId") === "gallery-member" && selectedPage === "2") {
+      requestedPages.push(selectedPage);
+      if (requestedPages.length === 1) {
+        // A failed page request preserves the previous page and retries the same URL.
         await route.fulfill({ json: { ok: false, error: { code: "unavailable", message: "Temporary failure" } } });
         return;
       }
@@ -63,28 +63,31 @@ test("gallery appends without moving cards, retries its cursor and keeps preview
     await page.getByRole("combobox", { name: "全部成员", exact: true }).click();
     await page.getByRole("option", { name: "瀑布流验证成员", exact: true }).click();
     const wall = page.getByRole("list", { name: "图片瀑布流" });
-    const cards = wall.locator(":scope > li");
-    await expect(cards).toHaveCount(31, { timeout: 15000 });
+    const cards = page.locator(".gallery-grid > li[data-image-id]");
+    await expect(cards).toHaveCount(30, { timeout: 15000 });
     await expect.poll(() => cards.first().evaluate(node => getComputedStyle(node).position)).toBe("absolute");
     const positions = () => cards.evaluateAll(nodes => nodes.slice(0, 10).map(node => {
       const rect = node.getBoundingClientRect();
       return { id: node.getAttribute("data-image-id"), x: rect.x, y: rect.y + scrollY, width: rect.width, height: rect.height };
     }));
     const before = await positions();
+    const firstIds = await cards.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-image-id")));
     expect(new Set(before.map(rect => rect.x)).size).toBe(5);
-    await page.getByRole("button", { name: "加载更多图片", exact: true }).scrollIntoViewIfNeeded();
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
     await expect(page.getByRole("button", { name: "重试", exact: true })).toBeVisible();
-    await expect(cards).toHaveCount(31);
+    await expect(cards).toHaveCount(30);
+    expect(new URL(page.url()).searchParams.get("page")).toBe("2");
     await page.getByRole("button", { name: "重试", exact: true }).click();
-    await expect.poll(() => requestedCursors.length).toBe(2);
-    expect(requestedCursors[1]).toBe(requestedCursors[0]);
-    await expect(cards).toHaveCount(31);
+    await expect.poll(() => requestedPages.length).toBe(2);
+    expect(requestedPages[1]).toBe(requestedPages[0]);
+    await expect(cards).toHaveCount(30);
     release();
-    await expect(cards).toHaveCount(45);
-    expect(await positions()).toEqual(before);
-    await expect(wall.locator('[data-image-id="gallery-image-0"]')).toHaveCount(1);
+    await expect(cards).toHaveCount(15);
+    const secondIds = await cards.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-image-id")));
+    expect(new Set([...firstIds, ...secondIds]).size).toBe(45);
+    await expect(page.getByRole("button", { name: "加载更多图片", exact: true })).toHaveCount(0);
 
-    const trigger = cards.nth(20).getByRole("button", { name: "查看原图", exact: true });
+    const trigger = cards.nth(10).getByRole("button", { name: "查看原图", exact: true });
     await trigger.scrollIntoViewIfNeeded();
     const savedY = await page.evaluate(() => scrollY);
     await trigger.click();
@@ -102,6 +105,10 @@ test("gallery appends without moving cards, retries its cursor and keeps preview
     await expect(trigger).toBeFocused();
     expect(await page.evaluate(() => scrollY)).toBeCloseTo(savedY, 0);
 
+    await page.getByRole("button", { name: "上一页", exact: true }).click();
+    await expect(cards).toHaveCount(30);
+    expect(await positions()).toEqual(before);
+    await expect(wall.locator('[data-image-id="gallery-image-0"]')).toHaveCount(1);
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath("gallery-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -110,9 +117,16 @@ test("gallery appends without moving cards, retries its cursor and keeps preview
     expect(await cards.first().locator(".gallery-caption").evaluate(node => getComputedStyle(node).opacity)).toBe("1");
     await page.screenshot({ path: testInfo.outputPath("gallery-mobile.png"), fullPage: true });
 
+    // Deep links request the selected page directly, with no cursor replay.
+    await page.goto("/zh/images?memberId=gallery-member&page=2&pageSize=30");
+    await expect(cards).toHaveCount(15, { timeout: 15000 });
+    await page.reload();
+    await expect(cards).toHaveCount(15, { timeout: 15000 });
+    expect(new URL(page.url()).searchParams.get("page")).toBe("2");
+
     // A new filter must abort the old first page and never revive its images.
     const filterGate = new Promise<void>(resolve => { releaseFilter = resolve; });
-    await page.route("**/api/query/messages?**", async route => {
+    await page.route("**/api/query/image-pages?**", async route => {
       const params = new URL(route.request().url()).searchParams;
       if (params.get("q") === "waterfall-regression" && params.get("memberId") === "gallery-member") {
         await filterGate;

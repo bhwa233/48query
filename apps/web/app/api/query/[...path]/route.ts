@@ -10,7 +10,7 @@ function failure(code: string, message: string, status: number, headers?: Record
 // endpoints cross this binding; client credentials and ingestion never do.
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  if (!/^\/api\/query\/(?:overview|rankings|members(?:\/[A-Za-z0-9_-]{1,100})?|messages|melee|recordings)$/.test(url.pathname))
+  if (!/^\/api\/query\/(?:overview|rankings|members(?:\/[A-Za-z0-9_-]{1,100})?|messages|message-pages|image-pages|content-summary|activity|melee|recordings)$/.test(url.pathname))
     return failure("not_found", "Query endpoint not found.", 404);
   if (!env.QUERY_API) return failure("api_unavailable", "Query API is not configured.", 503);
   const target = new URL(`${url.pathname}${url.search}`, "https://query.internal");

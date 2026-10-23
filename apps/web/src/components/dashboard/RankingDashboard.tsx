@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
 import type { QueryRankings } from "@starter/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -14,7 +15,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { ArchiveDataRegion, archiveLabels, useArchiveQuery } from "./ArchiveData";
-import { ActivitySkeleton, RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
+import { RankingRowsSkeleton, TypeBreakdownSkeleton } from "./ArchiveSkeletons";
+import { DailyActivity } from "./DailyActivity";
+import { archiveDate, updateArchiveUrl } from "./ArchiveUrlState";
 import { MeleeRankingDashboard } from "./MeleeRankingDashboard";
 import { compareColumnValues, nextColumnSort, TableSortButton, TableSortControls, type ColumnSort } from "./TableSort";
 
@@ -27,9 +30,15 @@ const metricIcons = { followers: Users, messages: FileText, images: ImageIcon, r
 
 export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: string; apiBaseUrl?: string; yesterday: string }) {
   const t = archiveLabels(locale);
-  const [period, setPeriod] = useState("yesterday");
-  const [range, setRange] = useState({ from: yesterday, to: yesterday });
+  const searchParams = useSearchParams();
+  const from = archiveDate(searchParams.get("from")), to = archiveDate(searchParams.get("to"));
+  const validRange = from && to && from <= to && to <= yesterday && Date.parse(to) - Date.parse(from) <= 365 * 86400_000;
+  const range = validRange ? { from, to } : { from: yesterday, to: yesterday };
+  const selectedPeriod = searchParams.get("period") ?? (validRange ? "custom" : "yesterday");
+  const period = ["yesterday", "week", "month", "custom"].includes(selectedPeriod) ? selectedPeriod : "yesterday";
   const [draft, setDraft] = useState(range);
+  const [draftRange, setDraftRange] = useState(`${range.from}:${range.to}`);
+  if (draftRange !== `${range.from}:${range.to}`) { setDraftRange(`${range.from}:${range.to}`); setDraft(range); }
   const [rangeError, setRangeError] = useState(false);
   const [group, setGroup] = useState("all");
   const [team, setTeam] = useState("all");
@@ -73,23 +82,15 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
     { key: "images", label: t.summaryImages, icon: ImageIcon },
     { key: "replies", label: t.summaryReplies, icon: MessageCircle },
   ] as const;
-  const calendarDays = Math.round((Date.parse(range.to) - Date.parse(range.from)) / 86400_000) + 1;
-  const daily = new Map(data?.dailyActivity.map(item => [item.date, item.count]));
-  const peak = Math.max(1, ...daily.values());
-  const days = Array.from({ length: calendarDays }, (_, index) => {
-    const date = new Date(Date.parse(range.from) + index * 86400_000).toISOString().slice(0, 10);
-    return { date, count: daily.get(date) };
-  });
   const rangeLabel = range.from === range.to ? range.to : `${range.from} — ${range.to}`;
   const observationTime = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const followerCoverage = data?.followersCoverage;
 
   function choosePeriod(value: string) {
-    setPeriod(value);
     setRangeError(false);
-    if (value === "custom") { setDraft(range); return; }
+    if (value === "custom") { setDraft(range); updateArchiveUrl({ period: value }); return; }
     const length = value === "week" ? 7 : value === "month" ? 30 : 1;
-    setRange({ from: new Date(Date.parse(yesterday) - (length - 1) * 86400_000).toISOString().slice(0, 10), to: yesterday });
+    updateArchiveUrl({ period: value, from: new Date(Date.parse(yesterday) - (length - 1) * 86400_000).toISOString().slice(0, 10), to: yesterday });
     setPage(1);
   }
 
@@ -113,6 +114,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
           </Card>
         ))}
       </section>
+
+      <DailyActivity locale={locale} apiBaseUrl={apiBaseUrl} asOf={yesterday} group={group} team={team} onDateSelect={(date, year) => { updateArchiveUrl({ year, from: date, to: date, period: "custom" }); setPage(1); setRangeError(false); }} onClearDate={() => { updateArchiveUrl({ from: null, to: null, period: null }); setPage(1); setRangeError(false); }} />
 
       <section id="rankings" aria-label={t.rankings} className="flex min-w-0 flex-col rounded-lg border border-border">
         <Tabs value={metric} onValueChange={value => { setMetric(value as Metric); setSort({ key: value as Metric, direction: "descending" }); setPage(1); }} className="flex-col gap-0">
@@ -155,7 +158,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
               <form className="grid grid-cols-2 items-end gap-2 sm:flex sm:flex-wrap" onSubmit={event => {
                 event.preventDefault();
                 if (!draft.from || !draft.to || draft.from > draft.to || draft.to > yesterday || Date.parse(draft.to) - Date.parse(draft.from) > 365 * 86400_000) { setRangeError(true); return; }
-                setRange(draft); setPage(1); setRangeError(false);
+                updateArchiveUrl({ ...draft, period: "custom" }); setPage(1); setRangeError(false);
               }}>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:max-w-44"><Label htmlFor="rank-from">{t.from}</Label><Input required id="rank-from" type="date" className="rank-date h-8" max={draft.to || yesterday} value={draft.from} onChange={event => setDraft(value => ({ ...value, from: event.target.value }))} aria-invalid={rangeError} aria-describedby={rangeError ? "rank-range-help" : undefined} /></div>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:max-w-44"><Label htmlFor="rank-to">{t.to}</Label><Input required id="rank-to" type="date" className="rank-date h-8" min={draft.from} max={yesterday} value={draft.to} onChange={event => setDraft(value => ({ ...value, to: event.target.value }))} aria-invalid={rangeError} aria-describedby={rangeError ? "rank-range-help" : undefined} /></div>
@@ -212,19 +215,10 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
 
       <MeleeRankingDashboard locale={locale} apiBaseUrl={apiBaseUrl} />
 
-      <div className="grid min-w-0 gap-3 lg:grid-cols-[1.5fr_1fr]">
-        <Card className="min-w-0 gap-3 rounded-lg py-3">
-          <CardHeader className="px-3"><CardTitle><h2>{t.activity}</h2></CardTitle></CardHeader>
-          <CardContent className="flex flex-col gap-2 px-3">
-            {pending ? <ActivitySkeleton /> : data?.dailyActivity.length ? <div role="img" aria-label={t.activityDescription} className="flex h-24 items-end justify-around gap-1 overflow-hidden border-b border-border pb-1">{days.map(({ date, count }) => <div key={date} className={cn("min-w-0 max-w-8 flex-1 rounded-t-sm", count ? "bg-brand/80" : "border-b border-dashed border-border")} style={{ height: count ? `${Math.max(2, count / peak * 100)}%` : "3px" }} title={`${date}: ${count === undefined ? t.noActivityDay : number.format(count)}`} />)}</div> : <div className="flex h-24 items-center justify-center border-b border-dashed border-border text-xs text-muted-foreground">{t.noActivity}</div>}
-            <div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span>{range.from}</span><span>{t.beijingTime}</span><span>{range.to}</span></div>
-          </CardContent>
-        </Card>
         <Card className="min-w-0 gap-3 rounded-lg py-3">
           <CardHeader className="px-3"><CardTitle><h2>{t.types}</h2></CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-2 px-3">{pending ? <TypeBreakdownSkeleton /> : data?.typeBreakdown.length ? data.typeBreakdown.map(item => <div key={item.type} className="flex flex-col gap-1.5"><div className="flex justify-between gap-3 text-xs"><span>{t[`type_${item.type}`] ?? item.type}</span><span className="font-mono tabular-nums">{number.format(item.count)}</span></div><div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-brand/70" style={{ width: `${item.count / data.totals.messages * 100}%` }} /></div></div>) : <p className="flex h-24 items-center justify-center text-xs text-muted-foreground">{t.noMessages}</p>}</CardContent>
         </Card>
-      </div>
 
     </div>
   );

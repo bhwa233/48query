@@ -2,12 +2,13 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
-import type { CollectionSource, SourceSync } from "@starter/shared";
+import type { SourceSync } from "@starter/shared";
 import { CollectionSourceSchema, ErrorSchema, QueryMemberDetailSchema, QueryMembersSchema, QueryMessageSearchSchema, QueryOverviewSchema, QueryRankingsSchema, QueryRecordingsSchema, SourceSyncSchema } from "@starter/shared/schemas";
 import type { AppEnv } from "../env";
 import ingest from "./ingest";
 import { readMessages as messages } from "./messages";
 import { registerMeleeQuery } from "./melee";
+import { registerArchivePages, publicMessageFilter, contentSourceFlags } from "./archive-pages";
 
 const DateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() });
 const RankingQuery = z.object({
@@ -36,11 +37,12 @@ app.onError((error, c) => {
 });
 app.route("/ingest", ingest);
 registerMeleeQuery(app);
+registerArchivePages(app);
 function database(env: AppEnv["Bindings"]) { if (!env.APP_DB) throw new Error("APP_DB binding is missing"); return drizzle(env.APP_DB); }
 type Database = ReturnType<typeof database>;
 type Row = Record<string, unknown>;
-const publicKinds = sql`q.kind IN ('text', 'image', 'video', 'reply', 'post') AND q.parse_status = 'parsed'`;
-const sourceBits: Record<CollectionSource, number> = { room: 1, album: 2, essence: 4, posts: 8, post_images: 16, weibo: 32, room_posts: 64 };
+const publicKinds = sql.raw(publicMessageFilter);
+const sourceBits = contentSourceFlags;
 const projection = sql`q.*, m.name AS member_name, owner.name AS room_owner_name`;
 const joins = sql`query_messages q JOIN query_members m ON m.id = q.member_id LEFT JOIN query_members owner ON owner.id = q.room_owner_id`;
 function previousDate() { return new Date(Date.now() + 8 * 3600_000 - 86400_000).toISOString().slice(0, 10); }

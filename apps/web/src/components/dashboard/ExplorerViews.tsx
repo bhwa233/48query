@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ArchiveMemberDetail, ArchiveMembers, ArchiveMessages } from "@starter/shared";
+import type { ArchiveMemberDetail, ArchiveMembers } from "@starter/shared";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { ArchiveFilter, ArchiveMessageFilters, emptyArchiveFilters, type ArchiveFilters } from "./ArchiveMessageFilters";
-import { ArchiveDataRegion, archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
-import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton, MessageListSkeleton } from "./ArchiveSkeletons";
-import { MessageList } from "./MessageList";
+import { ArchiveFilter, ArchiveMessageFilters } from "./ArchiveMessageFilters";
+import { archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
+import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton } from "./ArchiveSkeletons";
+import { PagedMessages } from "./PagedMessages";
+import { useArchiveFilters } from "./ArchiveUrlState";
 import { MemberContentTabs } from "./MemberContentTabs";
 import { compareColumnValues, nextColumnSort, TableSortButton, TableSortControls, type ColumnSort } from "./TableSort";
 
@@ -69,24 +70,10 @@ export function MembersView({ locale, apiBaseUrl }: { locale: string; apiBaseUrl
 }
 
 export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale: string; apiBaseUrl?: string; initialKind?: string }) {
-  const t = archiveLabels(locale);
-  const [filters, setFilters] = useState<ArchiveFilters>({ ...emptyArchiveFilters, kind: initialKind });
-  const [cursors, setCursors] = useState<string[]>([]);
-  const { query, member, kind, source, from, to } = filters;
-  const params = new URLSearchParams({ limit: "30" });
-  for (const [key, value] of Object.entries({ q: query, memberId: member, kind, source, from, to, before: cursors.at(-1) })) if (value) params.set(key, value);
-  const state = useArchiveQuery<ArchiveMessages>(apiBaseUrl, `/api/query/messages?${params}`);
-  const displayed = state.data ?? state.previousData;
-
+  const { filters, setFilters } = useArchiveFilters(undefined, initialKind);
   return <>
-    <ArchiveMessageFilters locale={locale} apiBaseUrl={apiBaseUrl} value={filters} onChange={value => { setFilters(value); setCursors([]); }} />
-    <QueryStatus state={state} locale={locale} />
-    {state.loading || state.data ? <>
-      <ArchiveDataRegion loading={state.loading} fallback={<MessageListSkeleton label={t.loading} images={kind === "image"} rows={state.previousData?.data.length || (kind === "image" ? 2 : 4)} />}>
-        {displayed ? <MessageList messages={displayed.data} locale={locale} emptyText={t.empty} /> : null}
-      </ArchiveDataRegion>
-      <div className="flex items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={state.loading || !cursors.length} onClick={() => setCursors(values => values.slice(0, -1))}>{t.previous}</Button><span className="text-xs text-muted-foreground">{cursors.length + 1} {t.page}</span><Button variant="outline" size="sm" disabled={state.loading || !state.data?.nextCursor} onClick={() => { if (state.data?.nextCursor) setCursors(values => [...values, state.data!.nextCursor!]); }}>{t.next}</Button></div>
-    </> : null}
+    <ArchiveMessageFilters locale={locale} apiBaseUrl={apiBaseUrl} value={filters} onChange={setFilters} />
+    <PagedMessages locale={locale} apiBaseUrl={apiBaseUrl} />
   </>;
 }
 
