@@ -67,7 +67,7 @@ export function MemberDetailSkeleton({ label }: { label?: string }) {
     <LoadingRegion label={label} className="rounded-lg border border-border bg-card px-3 py-2.5">
       <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }, (_, index) => <div key={index} className="flex min-w-0 flex-col gap-0.5"><Skeleton className="h-6 w-12 max-w-full sm:h-7" /><Skeleton className="h-4 w-16 max-w-full" /></div>)}</div>
     </LoadingRegion>
-    <div className="flex flex-col gap-2"><Skeleton aria-hidden="true" className="h-5 w-24" /><MessageListSkeleton /></div>
+    <div className="flex flex-col gap-3"><div aria-hidden="true" className="flex h-10 items-center gap-6 border-b px-3"><Skeleton className="h-4 w-20" /><Skeleton className="h-4 w-20" /></div><MessageListSkeleton /></div>
   </div>;
 }
 

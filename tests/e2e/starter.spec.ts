@@ -323,14 +323,19 @@ test("rankings sort columns and change metric, period and scope while preserving
   await expect(members.locator("tbody tr").first().getByRole("cell").nth(3)).toHaveText("0");
 });
 
-test("member history keeps messages on failure, resumes its cursor and resets for another member", async ({ page, request }) => {
+test("member tabs keep independent history, gallery, URLs and scroll positions", async ({ page, request }, testInfo) => {
+  test.setTimeout(90000);
   const apiOrigin = process.env.STARTER_E2E_API_URL;
-  if (!apiOrigin) throw new Error("Run this test through pnpm test:e2e.");
+  const webOrigin = process.env.STARTER_E2E_WEB_URL;
+  if (!apiOrigin || !webOrigin) throw new Error("Run this test through pnpm test:e2e.");
   const occurredAt = new Date(Date.now() - 86400_000).toISOString();
   // Equal timestamps put the boundary inside an ID tie, where timestamp-only cursors lose rows.
   const messages = Array.from({ length: 43 }, (_, index) => {
     const number = String(index + 1).padStart(3, "0");
-    return { id: `pagination-${number}`, memberId: "e2e-pagination", senderId: "e2e-pagination", type: "TEXT", text: `分页消息${number}`, occurredAt };
+    // Include attachments on TEXT posts: the image tab must use attachments,
+    // rather than dropping pictures whose parent message has another kind.
+    return { id: `pagination-${number}`, memberId: "e2e-pagination", senderId: "e2e-pagination", type: "TEXT", text: `分页消息${number}`, occurredAt,
+      images: [{ id: `pagination-image-${number}`, sourceUrl: `${webOrigin}/favicon.svg`, galleryUrl: `${webOrigin}/favicon.svg`, status: "uploaded", width: 600, height: 800 }] };
   });
   for (let offset = 0; offset < messages.length; offset += 25) {
     const seed = await request.post(`${apiOrigin}/api/query/ingest/unit`, {
@@ -344,9 +349,14 @@ test("member history keeps messages on failure, resumes its cursor and resets fo
     });
     expect(seed.ok(), await seed.text()).toBe(true);
   }
+  const imageRequests: URL[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/query/messages" && url.searchParams.get("kind") === "image") imageRequests.push(url);
+  });
   await page.goto("/zh/members/e2e-pagination");
   const rows = page.locator("article");
-  await expect(rows).toHaveCount(20);
+  await expect(rows).toHaveCount(20, { timeout: 20000 });
   await expect(page.getByText("分页消息001", { exact: true })).toHaveCount(0);
   let rejectNext = true;
   await page.route("**/api/query/messages?**", async route => {
@@ -369,6 +379,50 @@ test("member history keeps messages on failure, resumes its cursor and resets fo
   await expect(page.getByText("分页消息043", { exact: true })).toHaveCount(1);
   await expect(page.getByRole("status")).toHaveText("已加载全部消息。");
   await expect(page.getByRole("button", { name: "加载更早的消息", exact: true })).toHaveCount(0);
+  await expect(page.locator("article img")).toHaveCount(messages.length);
+  expect(imageRequests).toHaveLength(0);
+
+  await page.evaluate(() => scrollTo(0, 700));
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(700);
+  await page.getByRole("tab", { name: /^图片/ }).click();
+  await expect(page).toHaveURL(/\?tab=images$/);
+  const wall = page.getByRole("list", { name: "图片瀑布流", exact: true });
+  const cards = wall.locator(":scope > li");
+  await expect(cards).toHaveCount(30);
+  await page.getByRole("button", { name: "加载更多图片", exact: true }).scrollIntoViewIfNeeded();
+  await expect(cards).toHaveCount(messages.length);
+  const imageRequestCount = imageRequests.length;
+  expect(imageRequestCount).toBe(2);
+  const cutoff = new Date(Date.now() + 8 * 3600_000 - 86400_000).toISOString().slice(0, 10);
+  expect(imageRequests.every(url => url.searchParams.get("memberId") === "e2e-pagination" && url.searchParams.get("to") === cutoff)).toBe(true);
+  await page.evaluate(() => scrollTo(0, 600));
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(600);
+  await page.getByRole("tab", { name: /^消息/ }).click();
+  await expect(page).not.toHaveURL(/tab=images/);
+  await expect(rows).toHaveCount(messages.length);
+  await expect.poll(() => page.evaluate(() => Math.abs(scrollY - 700))).toBeLessThan(2);
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: /^图片/ })).toHaveAttribute("aria-selected", "true");
+  await expect(cards).toHaveCount(messages.length);
+  await expect.poll(() => page.evaluate(() => Math.abs(scrollY - 600))).toBeLessThan(2);
+  expect(imageRequests).toHaveLength(imageRequestCount);
+  await page.goForward();
+  await expect(page.getByRole("tab", { name: /^消息/ })).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => page.evaluate(() => Math.abs(scrollY - 700))).toBeLessThan(2);
+  await page.getByRole("tab", { name: /^图片/ }).click();
+  await cards.first().getByRole("button", { name: "查看原图", exact: true }).click();
+  const preview = page.getByRole("dialog", { name: "图片预览", exact: true });
+  await expect(preview.getByRole("region", { name: "关联消息", exact: true })).toContainText("分页消息");
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("member-images-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => new Set(await cards.evaluateAll(nodes => nodes.slice(0, 6).map(node => node.getBoundingClientRect().x))).size).toBe(2);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("member-images-mobile.png"), fullPage: true });
+  await page.reload();
+  await expect(page.getByRole("tab", { name: /^图片/ })).toHaveAttribute("aria-selected", "true", { timeout: 20000 });
+  await expect(cards.first()).toBeVisible();
   await page.getByRole("link", { name: "成员", exact: true }).click();
   await page.getByRole("link", { name: /验证成员/ }).first().click();
   await expect(page.getByRole("heading", { level: 1, name: "验证成员" })).toBeVisible();

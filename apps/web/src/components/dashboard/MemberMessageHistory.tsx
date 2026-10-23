@@ -6,12 +6,13 @@ import { Button } from "@/components/ui/button";
 import { archiveLabels, useArchiveQuery } from "./ArchiveData";
 import { MessageList } from "./MessageList";
 
-export function MemberMessageHistory({ memberId, initialMessages, totalMessages, locale, apiBaseUrl }: {
+export function MemberMessageHistory({ memberId, initialMessages, totalMessages, locale, apiBaseUrl, to }: {
   memberId: string;
   initialMessages: ArchiveMessage[];
   totalMessages: number;
   locale: string;
   apiBaseUrl?: string;
+  to?: string;
 }) {
   const t = archiveLabels(locale);
   const [history, setHistory] = useState(() => {
@@ -23,6 +24,7 @@ export function MemberMessageHistory({ memberId, initialMessages, totalMessages,
   });
   const [requestedCursor, setRequestedCursor] = useState<string | null>(null);
   const params = new URLSearchParams({ memberId, limit: "20" });
+  if (to) params.set("to", to);
   if (requestedCursor) params.set("before", requestedCursor);
   // Reuse the archive hook's cancellation and retry; only accumulate member history here.
   const page = useArchiveQuery<ArchiveMessages>(requestedCursor ? apiBaseUrl : undefined, `/api/query/messages?${params}`);

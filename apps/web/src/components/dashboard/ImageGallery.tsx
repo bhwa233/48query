@@ -27,11 +27,17 @@ export function ImageGallery({ locale, apiBaseUrl }: { locale: string; apiBaseUr
   </>;
 }
 
-function GalleryResults({ locale, apiBaseUrl, query }: { locale: string; apiBaseUrl?: string; query: string }) {
+export function MemberImageGallery({ memberId, locale, apiBaseUrl, active, to }: { memberId: string; locale: string; apiBaseUrl?: string; active: boolean; to: string }) {
+  const params = new URLSearchParams({ memberId, kind: "image", limit: "30", to });
+  return <GalleryResults locale={locale} apiBaseUrl={apiBaseUrl} query={params.toString()} enabled={active} />;
+}
+
+function GalleryResults({ locale, apiBaseUrl, query, enabled = true }: { locale: string; apiBaseUrl?: string; query: string; enabled?: boolean }) {
   const t = archiveLabels(locale);
   const [history, setHistory] = useState<ArchiveMessage[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  if (!enabled && selected !== null) setSelected(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   const sentinel = useRef<HTMLDivElement>(null);
   const params = new URLSearchParams(query);
@@ -64,13 +70,13 @@ function GalleryResults({ locale, apiBaseUrl, query }: { locale: string; apiBase
 
   useEffect(() => {
     const target = sentinel.current;
-    if (!target || !nextCursor || page.loading || page.failed || selected) return;
+    if (!enabled || !target || !nextCursor || page.loading || page.failed || selected) return;
     const observer = new IntersectionObserver(([entry]) => {
       if (entry?.isIntersecting) loadMore();
     }, { rootMargin: "300px" });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [loadMore, nextCursor, page.loading, page.failed, selected]);
+  }, [enabled, loadMore, nextCursor, page.loading, page.failed, selected]);
 
   const selectedIndex = entries.findIndex(entry => entry.image.id === selected);
   const active = entries[selectedIndex];
@@ -83,7 +89,7 @@ function GalleryResults({ locale, apiBaseUrl, query }: { locale: string; apiBase
     {!entries.length ? <QueryStatus state={page} locale={locale} /> : null}
     {page.loading && !entries.length ? <ImageGallerySkeleton label={t.loading} /> : null}
     {!page.loading && page.data && !entries.length ? <p role="status" className="py-12 text-center text-sm text-muted-foreground">{t.empty}</p> : null}
-    <Dialog open={Boolean(active)} onOpenChange={open => { if (!open) setSelected(null); }}>
+    <Dialog open={enabled && Boolean(active)} onOpenChange={open => { if (!open) setSelected(null); }}>
       <GalleryMasonry entries={entries} locale={locale} onSelect={(entry, button) => {
         opener.current = button;
         setSelected(entry.image.id);

@@ -10,7 +10,7 @@ import { ArchiveFilter, ArchiveMessageFilters, emptyArchiveFilters, type Archive
 import { ArchiveDataRegion, archiveLabels, QueryStatus, useArchiveQuery } from "./ArchiveData";
 import { HeadingSkeleton, MemberDetailSkeleton, MembersTableSkeleton, MessageListSkeleton } from "./ArchiveSkeletons";
 import { MessageList } from "./MessageList";
-import { MemberMessageHistory } from "./MemberMessageHistory";
+import { MemberContentTabs } from "./MemberContentTabs";
 import { compareColumnValues, nextColumnSort, TableSortButton, TableSortControls, type ColumnSort } from "./TableSort";
 
 type MemberSortKey = "name" | "affiliation" | "messages" | "images" | "replies" | "activeDays";
@@ -90,9 +90,9 @@ export function MessagesView({ locale, apiBaseUrl, initialKind = "" }: { locale:
   </>;
 }
 
-export function MemberDetailView({ locale, id, apiBaseUrl }: { locale: string; id: string; apiBaseUrl?: string }) {
+export function MemberDetailView({ locale, id, apiBaseUrl, asOf }: { locale: string; id: string; apiBaseUrl?: string; asOf: string }) {
   const t = archiveLabels(locale);
-  const state = useArchiveQuery<ArchiveMemberDetail>(apiBaseUrl, `/api/query/members/${encodeURIComponent(id)}`);
+  const state = useArchiveQuery<ArchiveMemberDetail>(apiBaseUrl, `/api/query/members/${encodeURIComponent(id)}?date=${asOf}`);
   const data = state.data?.data;
   return <>
     <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -107,7 +107,7 @@ export function MemberDetailView({ locale, id, apiBaseUrl }: { locale: string; i
         <h2 id="member-stats-title" className="sr-only">{t.stats}</h2>
         <div className="grid grid-cols-4 gap-3"><Metric label={t.messages!} value={data.messages} locale={locale} /><Metric label={t.images!} value={data.images} locale={locale} /><Metric label={t.replies!} value={data.replies} locale={locale} /><Metric label={t.activeDays!} value={data.activeDays} locale={locale} /></div>
       </section>
-      <section aria-labelledby="member-messages-title" className="flex min-w-0 flex-col gap-2"><h2 id="member-messages-title" className="text-sm font-medium">{t.latestMessages}</h2><MemberMessageHistory key={`${apiBaseUrl}:${id}`} memberId={id} initialMessages={data.recentMessages} totalMessages={data.messages} locale={locale} apiBaseUrl={apiBaseUrl} /></section>
+      <MemberContentTabs key={`${apiBaseUrl}:${id}:${asOf}`} member={data} locale={locale} apiBaseUrl={apiBaseUrl} asOf={asOf} />
     </> : null}
   </>;
 }
