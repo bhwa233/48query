@@ -11,6 +11,8 @@ Node 与 `@types/node` 均固定在 24 系列；pnpm 保留 12 系列。Drizzle 
 - `@esbuild-kit/core-utils>esbuild`：0.25.12，修复旧 esbuild 开发服务公告；实际使用 Drizzle 生成器验证兼容性。
 - `postcss`：8.5.30，统一直接与间接版本。
 - `fflate@<0.7.5`：0.7.5，修复旧 0.7 系列问题，保持同一小版本系列。
+- `undici@>=7.0.0 <7.30.1`：7.30.1，修复 Cloudflare 本地开发工具链引入的 EventSource 内存耗尽、SRI 校验及多层内容编码拒绝服务漏洞，见 [上游安全发布](https://github.com/nodejs/undici/releases/tag/v7.30.1)。保持 7 系列，不变更 Cloudflare 工具组的直接版本。
+- `fast-uri@>=3.0.0 <3.1.9`：3.1.9，修复 Webpack/Ajv 依赖链的 URI scheme、host 与相对路径规范化漏洞，见 [安全公告](https://github.com/advisories/GHSA-w74x-v6f9-j3xg)。保持 3 系列；2026-10-26 的远程审计暴露了以上两组旧间接依赖。
 
 `braces@3.0.3` 的 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) 在本次核对时没有已发布的上游修复版本。模板通过 `patches/braces@3.0.3.patch` 和 `patchedDependencies` 限制花括号、圆括号及混合嵌套的解析深度，超过 128 层立即抛出 `SyntaxError`，避免进入后续递归处理。普通 glob 的展开行为保持一致。
 
