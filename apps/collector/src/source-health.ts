@@ -60,8 +60,12 @@ export function sourceIsFailed(sync: SourceHealth): boolean {
   return !sync.paused && (sync.failureKind === "protocol" || sync.failureKind === "transient" && (sync.failureCount ?? 0) >= 3);
 }
 
-export function sourceFreshness(sync: SourceHealth, now = Date.now()): "healthy" | "warning" | "failed" | "paused" {
+export function sourceFreshness(sync: SourceHealth, now = Date.now()): "healthy" | "warning" | "failed" | "paused" | "unverified" {
   if (sync.paused) return "paused";
+  // A known access/authorship gap has no verified incremental baseline yet.
+  // Keep it visible without letting its age starve established feeds. Once a
+  // head succeeds, history gaps must never suppress its freshness deadline.
+  if (!sync.lastIncrementalSuccessAt && sync.historyError && !sourceIsFailed(sync)) return "unverified";
   const at = Date.parse(sync.lastIncrementalSuccessAt ?? sync.enabledAt ?? "");
   const emptyAt = Date.parse(sync.emptyCheckedAt ?? "");
   // A scheduled 30-day empty-member interval is not a stale active source.

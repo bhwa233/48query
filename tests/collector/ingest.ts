@@ -134,7 +134,8 @@ try {
   const groupReport = join(progressDirectory, "group-health.json");
   const candidate = { name: "Namesake", officialIds: ["10020"], officialPocketIds: [], candidateIds: ["4", "530431"], groups: ["SNH48"], teams: [], officialStatuses: [] };
   const dueMember = { id: "smoke-group-recovery", name: "Recovery", groupName: "SNH48" };
-  const groupState: GroupProgress = { version: 1, since, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), officialRows: 2, excluded: [], entries: [
+  const groupState: GroupProgress = { version: 1, since, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    rosterRefreshedAt: "2026-10-22T00:43:22.223Z", rosterFailures: 3, officialRows: 2, excluded: [], entries: [
     { candidate, member: null, identity: "pending" },
     { candidate: { ...candidate, name: dueMember.name, candidateIds: [dueMember.id] }, member: dueMember, identity: "verified", scopeComplete: false,
       sources: [{ source: "posts", historyCursor: null, historyDone: false, latestAt: null, latestIds: [], incrementalCursor: null,
@@ -165,15 +166,24 @@ try {
     POCKET48_DIRECTORY_URL: `${pocketUrl}/directory`, POCKET48_HISTORY_DIRECTORY_URL: `${pocketUrl}/directory`,
     COLLECTOR_GROUP_STATE: groupPath, COLLECTOR_REPORT_PATH: groupReport, COLLECTOR_GROUP_LIMIT: "1", COLLECTOR_GROUP_MAX_SECONDS: "15",
     COLLECTOR_GROUP_WEEKLY_RECHECK: "1", GITHUB_STEP_SUMMARY: "", GITHUB_RUN_ID: "smoke-group-cli", GITHUB_RUN_ATTEMPT: "1" };
-  const groupArgs = ["--import", tsx, new URL("../../apps/collector/src/group.ts", import.meta.url).pathname, "--collect"];
+  // Run 40253364027 still committed content, but a persistent roster 502 alone
+  // failed the job. Keep real local HTTP/D1 writes and intercept only that URL.
+  const rosterOutage = `const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input, options) => new URL(String(input)).hostname === "h5.48.cn"
+      ? Promise.resolve(new Response(null, { status: 502 })) : originalFetch(input, options);`;
+  const groupArgs = ["--import", tsx, "--import", `data:text/javascript,${encodeURIComponent(rosterOutage)}`,
+    new URL("../../apps/collector/src/group.ts", import.meta.url).pathname, "--collect", "--update-roster"];
   try {
     await writeFile(groupPath, JSON.stringify(groupState));
     const { stdout } = await promisify(execFile)(process.execPath, groupArgs, { env: groupEnv, timeout: 20000 });
     const health = JSON.parse(await readFile(groupReport, "utf8"));
     const after = JSON.parse(await readFile(groupPath, "utf8")) as GroupProgress;
-    assert.equal(health.execution, "completed");
+    assert.equal(health.execution, "degraded");
     assert.equal(health.runErrors, 0);
     assert.equal(health.sourceFailures, 0);
+    assert.equal(health.rosterStatus, "cached");
+    assert.equal(health.rosterRefreshedAt, groupState.rosterRefreshedAt, "A cached roster must not be reported as freshly fetched");
+    assert.equal(after.rosterFailures, 3);
     assert.equal(health.recoveryProbes, 1);
     assert.equal(after.entries[0]?.identity, "unverified");
     assert.ok(after.entries[0]?.checkedAt);

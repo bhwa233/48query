@@ -138,6 +138,39 @@ test("incremental freshness ages through warning and failure independently of em
   assert.equal(health.paused, 1);
 });
 
+// Run 40253364027 treated never-verified rooms as stale incremental sources
+// after 48 hours, failing batches and putting them ahead of established feeds.
+test("unverified sources stay pending after 48 hours without outranking stale established feeds", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-23T00:00:00Z") });
+  let saved = checkpoint();
+  let unavailable = true;
+  const source = { sources: ["posts"] as const, listMembers: async () => [member], listMessages: async () => {
+    if (unavailable) throw new SourceVerificationPending("No attributable member content; verification required.");
+    return { items: [], nextCursor: null };
+  } };
+  const run = () => runBatch(source, new DryRunStore(), { maxHistoryPagesPerMember: 0,
+    checkpoints: { read: () => [saved], write: async (_id, sync) => { saved = structuredClone(sync); } } });
+  await run();
+  t.mock.timers.tick(72 * 3600_000);
+  assert.equal((await run()).errorCount, 0, "An unresolved identity/access gap is not a failed incremental refresh");
+  assert.equal(saved.lastIncrementalSuccessAt, undefined);
+  const health = collectorHealth([{ memberId: member.id, sources: [saved] }]);
+  assert.equal(health.failures, 0);
+  assert.equal(health.sources[0]?.freshness, "unverified");
+  const candidate = { name: "Owner", officialIds: [], officialPocketIds: [], candidateIds: [], groups: [], teams: [], officialStatuses: [] };
+  const entries: GroupEntry[] = [
+    { candidate, member, identity: "verified", scopeComplete: false, sources: [saved] },
+    { candidate, member: { ...member, id: "established" }, identity: "verified", scopeComplete: false,
+      lastIncrementalAt: "2026-10-23T01:00:00Z", sources: [{ ...checkpoint(), lastIncrementalSuccessAt: "2026-10-23T01:00:00Z" }] },
+  ];
+  assert.equal(groupWork(entries, { collect: true, refresh: true, retryUnverified: false, phase: "incremental" })[0]?.entry.member?.id, "established");
+  unavailable = false;
+  assert.equal((await run()).errorCount, 0);
+  assert.equal(saved.lastIncrementalSuccessAt, new Date().toISOString(), "A verified empty head establishes freshness without claiming the history is complete");
+  t.mock.timers.tick(48 * 3600_000);
+  assert.equal(collectorHealth([{ memberId: member.id, sources: [saved] }]).failures, 1, "Once verified, an overdue head must still fail despite the retained history gap");
+});
+
 // A single source video timeout previously failed the entire media job on the
 // first run. Queue health must persist across runners and observe the same rule.
 test("media timeouts degrade twice then remain failed until a scheduled probe succeeds", async t => {

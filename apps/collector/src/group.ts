@@ -80,7 +80,7 @@ try {
   }
   reportEntries = () => state.entries.flatMap(entry => entry.member && entry.identity === "verified"
     ? [{ memberId: entry.member.id, sources: (dryRun ? entry.inspectionSources ?? [] : entry.sources ?? []).filter(sync => reportSources.includes(sync.source)) }] : []);
-  reportRoster = () => ({ rosterFailures: state.rosterFailures ?? 0, rosterRefreshedAt: state.rosterRefreshedAt ?? null,
+  reportRoster = () => ({ rosterFailures: state.rosterFailures ?? 0, rosterStatus: state.rosterFailures ? "cached" : "fresh", rosterRefreshedAt: state.rosterRefreshedAt ?? null,
     rosterAgeSeconds: Math.round((Date.now() - Date.parse(state.rosterRefreshedAt ?? state.createdAt)) / 1000) });
   reportIdentities = () => ({ identityPending: state.entries.filter(entry => entry.identity !== "verified").length,
     identityIssues: state.entries.filter(entry => entry.identityError).slice(0, 100).map(entry => ({
@@ -107,7 +107,9 @@ try {
       // keep rosterRefreshedAt unchanged so a skipped refresh is not a success.
       console.log(JSON.stringify({ event: "group_roster_skipped", message: error.message, candidates: state.entries.length, rosterRefreshedAt: state.rosterRefreshedAt ?? null }));
       state.rosterFailures = Math.min(3, (state.rosterFailures ?? 0) + 1);
-      if (state.rosterFailures >= 3) failures += 1;
+      // A usable cached roster lets existing sources keep collecting. Report
+      // degraded roster coverage separately from failed collection work; never
+      // advance its freshness timestamp or certify newly discovered members.
     }
   }
   const save = async () => {
