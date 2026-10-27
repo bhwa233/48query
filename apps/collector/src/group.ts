@@ -33,7 +33,7 @@ const statePath = resolve(file);
 let stopping = false;
 const limit = Number(process.env.COLLECTOR_GROUP_LIMIT ?? 20);
 const maxSeconds = Number(process.env.COLLECTOR_GROUP_MAX_SECONDS ?? 0);
-if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 18000) throw new Error("COLLECTOR_GROUP_MAX_SECONDS must be between 0 and 18000.");
+if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 21600) throw new Error("COLLECTOR_GROUP_MAX_SECONDS must be between 0 and 21600.");
 if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("COLLECTOR_GROUP_LIMIT must be between 1 and 1000.");
 if (collect && !dryRun && (!process.env.INGEST_API_URL || !process.env.INGEST_KEY)) throw new Error("Group writes require INGEST_API_URL and INGEST_KEY.");
 const budget = new CollectionBudget(maxSeconds ? Date.now() + maxSeconds * 1000 : Infinity);

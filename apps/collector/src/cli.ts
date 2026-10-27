@@ -22,7 +22,7 @@ const dryRun = process.argv.includes("--dry-run") || process.env.COLLECTOR_DRY_R
 const sourceName = process.env.COLLECTOR_SOURCE ?? (mediaOnly ? "pocket48" : "demo");
 const since = sourceName === "pocket48" ? collectionSince() : undefined;
 const maxSeconds = Number(process.env.COLLECTOR_MAX_SECONDS ?? 0);
-if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 3600) throw new Error("COLLECTOR_MAX_SECONDS must be between 0 and 3600.");
+if (!Number.isInteger(maxSeconds) || maxSeconds < 0 || maxSeconds > 21600) throw new Error("COLLECTOR_MAX_SECONDS must be between 0 and 21600.");
 const budget = new CollectionBudget(maxSeconds ? Date.now() + maxSeconds * 1000 : Infinity);
 let activeBudget = budget;
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => budget.stop());

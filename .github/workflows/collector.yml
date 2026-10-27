@@ -2,8 +2,8 @@ name: Daily collector
 
 on:
   schedule:
-    # Every hour, at :17 to avoid the busiest start-of-hour queue.
-    - cron: "17 * * * *"
+    # Every six hours, at :17 to avoid the busiest start-of-hour queue.
+    - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pages:
@@ -46,9 +46,9 @@ on:
         required: false
         default: ""
       group_minutes:
-        description: "Collection budget in minutes (1-60); checkpoints survive a bounded stop"
+        description: "Collection budget in minutes (1-350); 10 minutes reserved within the six-hour job"
         required: false
-        default: "60"
+        default: "350"
       group_refresh:
         description: "Rotate previously collected group members for incremental updates"
         type: boolean
@@ -66,7 +66,7 @@ jobs:
   collect:
     name: Collect Pocket48 data
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 360
     environment: production
     env:
       POCKET48_LOG_SCHEMA: ${{ inputs.diagnostics && '1' || '0' }}
@@ -93,8 +93,8 @@ jobs:
       INGEST_KEY: ${{ secrets.INGEST_KEY }}
       COLLECTOR_GROUP_ARTIFACT: ${{ inputs.dry_run && 'group-state-2026-dry-run' || 'group-state-2026-live' }}
       COLLECTOR_GROUP_LIMIT: ${{ (inputs.max_members != '0' && inputs.max_members) || vars.COLLECTOR_GROUP_LIMIT || '1000' }}
-      COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || '60' }}
-      COLLECTOR_MAX_SECONDS: "3600"
+      COLLECTOR_GROUP_MINUTES: ${{ inputs.group_minutes || '350' }}
+      COLLECTOR_MAX_SECONDS: "21000"
       COLLECTOR_DEFER_MEDIA: ${{ (inputs.defer_media || ((inputs.member_scope || vars.COLLECTOR_MEMBER_SCOPE || 'followed') == 'all' && !inputs.member_id)) && '1' || '0' }}
       COLLECTOR_GROUP_REFRESH: ${{ (github.event_name == 'schedule' || inputs.group_refresh) && '1' || '0' }}
       # The persisted checkedAt still enforces the seven-day interval. A manual
@@ -133,11 +133,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/restore-group-state.mjs
       - name: Run collector
-        timeout-minutes: 65
+        # Leave time for checkpoint/report uploads before the hosted runner's
+        # six-hour hard limit, even if collection exceeds its soft budget.
+        timeout-minutes: 355
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$COLLECTOR_GROUP_MINUTES" =~ ^[1-9][0-9]?$ ]] && (( COLLECTOR_GROUP_MINUTES <= 60 )) || { echo "Invalid group time budget"; exit 1; }
+          [[ "$COLLECTOR_GROUP_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] && (( COLLECTOR_GROUP_MINUTES <= 350 )) || { echo "Invalid group time budget"; exit 1; }
           if [[ "$COLLECTOR_MEMBER_SCOPE" == "all" && -z "$COLLECTOR_MEMBER_ID" ]]; then
             export COLLECTOR_GROUP_MAX_SECONDS="$((COLLECTOR_GROUP_MINUTES * 60))"
             flags=(--collect --update-roster)
