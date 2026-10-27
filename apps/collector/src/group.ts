@@ -9,7 +9,7 @@ import { createPocket48Pa } from "./pocket48-auth.mjs";
 import { HttpIngestStore } from "./http-store";
 import { DryRunStore } from "./dry-run-store";
 import { runBatch, emptySync } from "./run";
-import { emptyMemberRecheckAt, initializeSourceHealth } from "./source-health";
+import { emptyMemberRecheckAt, initializeSourceHealth, sourceFreshness } from "./source-health";
 import { collectorHealth, writeCollectorReport } from "./collector-report";
 import type { CollectorStore, SourceSync } from "./types";
 import { CollectorStoreError, SourceAuthenticationError, SourceRequestSkipped, SourceVerificationPending } from "./types";
@@ -197,12 +197,16 @@ try {
       const phaseBudget = phase === "recovery" ? budget.slice(recovery.maxMs / 1000)
         : phase === "incremental" && maxSeconds ? budget.slice(Math.max(0, (budget.deadline - Date.now()) / 1000) * 0.75) : budget;
       let phaseProcessed = 0;
-      for (const { entry } of groupWork(state.entries, { collect, refresh,
+      for (const { entry, sources: memberSources } of groupWork(state.entries, { collect, refresh,
         retryUnverified, recheckDue: process.env.COLLECTOR_GROUP_WEEKLY_RECHECK === "1", retrySkipped, phase, sources })) {
         if (phase === "recovery" && (recovery.remaining <= 0 || recovery.spentMs >= recovery.maxMs)) break;
-        if (phaseBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
+        // The 25% history reservation must not cut off established overdue
+        // feeds. Reuse the total budget for their attempts, retaining the same
+        // per-member limit, recovery rules and persisted rotation order.
+        const memberBudget = phase === "incremental" && memberSources.some(sync => sourceFreshness(sync) === "failed") ? budget : phaseBudget;
+        if (memberBudget.stopped || phaseProcessed >= limit) { budgetReached = true; break; }
         phaseProcessed += 1; processed += 1;
-        activeBudget = phaseBudget.slice(300);
+        activeBudget = memberBudget.slice(300);
         const attemptedAt = new Date().toISOString();
         entry.lastAttemptAt = attemptedAt;
         if (phase === "incremental") entry.lastIncrementalAt = attemptedAt;

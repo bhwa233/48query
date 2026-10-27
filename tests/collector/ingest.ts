@@ -207,6 +207,52 @@ try {
     assert.ok(failedHealth.runErrors > 0);
     assert.equal(failedHealth.sourceFailures, 0);
     console.log("PASS group CLI: bounded due recovery, identity gap backoff, D1 persistence and distinct run/source errors");
+
+    // Run 40430758458 reserved history time while 296 sources were overdue.
+    // Cross the normal incremental deadline after a real D1 head commit: the
+    // next overdue member must still refresh before healthy work or history.
+    const freshAt = new Date().toISOString();
+    const staleAt = new Date(Date.now() - 72 * 3600_000).toISOString();
+    const scheduleState: GroupProgress = { ...groupState, entries: ["800001", "800002", "800003"].map((id, index) => ({
+      candidate: { ...candidate, name: `Budget ${id}`, officialIds: [id], candidateIds: [id] },
+      member: { ...dueMember, id, name: `Budget ${id}` }, identity: "verified", scopeComplete: false,
+      lastIncrementalAt: index === 0 ? staleAt : freshAt,
+      sources: [{ source: "posts", historyCursor: "100", historyDone: false, latestAt: freshAt, latestIds: ["latest"],
+        incrementalCursor: null, pendingLatestAt: null, pendingLatestIds: [], status: "ok", lastError: null,
+        lastSuccessAt: staleAt, lastNonemptyAt: staleAt, healthVersion: 1,
+        lastIncrementalSuccessAt: index < 2 ? staleAt : freshAt }],
+    })) };
+    await writeFile(groupPath, JSON.stringify(scheduleState));
+    const crossIncrementalDeadline = `const originalFetch = globalThis.fetch;
+      const realNow = Date.now; let offset = 0;
+      Date.now = () => realNow() + offset;
+      globalThis.fetch = async (input, options) => {
+        const response = await originalFetch(input, options);
+        if (response.ok && options?.method === "POST" && String(input).endsWith("/ingest/progress")) {
+          const progress = JSON.parse(options.body);
+          if (!offset && progress.memberId === "800001" && progress.sources.some(source => source.lastIncrementalSuccessAt !== ${JSON.stringify(staleAt)})) offset = 96000;
+        }
+        return response;
+      };`;
+    const scheduleArgs = ["--import", tsx, "--import", `data:text/javascript,${encodeURIComponent(crossIncrementalDeadline)}`,
+      new URL("../../apps/collector/src/group.ts", import.meta.url).pathname, "--collect", "--refresh"];
+    // Read the report even on failure so the regression identifies the stale
+    // source, rather than just asserting the child process's exit status.
+    const scheduled = await promisify(execFile)(process.execPath, scheduleArgs, { env: { ...groupEnv,
+      COLLECTOR_GROUP_LIMIT: "3", COLLECTOR_GROUP_MAX_SECONDS: "120", COLLECTOR_MAX_PAGES: "1", COLLECTOR_HISTORY_PAGES: "1",
+      GITHUB_RUN_ID: "smoke-group-budget", GITHUB_RUN_ATTEMPT: "1" }, timeout: 20000 }).catch((error: { stdout: string }) => error);
+    const scheduleHealth = JSON.parse(await readFile(groupReport, "utf8"));
+    assert.equal(scheduleHealth.freshnessFailures, 0, "The history reservation must not leave the next overdue source untouched");
+    const work = scheduled.stdout.split("\n").filter(line => line.startsWith('{"event":')).map(line => JSON.parse(line))
+      .filter(event => event.event === "group_member_started");
+    assert.deepEqual(work.filter(event => event.phase === "incremental").map(event => event.memberId), ["800001", "800002"],
+      "Only overdue members may consume the history reservation; healthy incremental work still yields");
+    assert.ok(work.some(event => event.phase === "history"), "Once overdue members have been attempted, history may use the remaining budget");
+    const durableAfter = await scopedStore.collectionProgress();
+    assert.notEqual(durableAfter.get("800002")?.sources[0]?.lastIncrementalSuccessAt, staleAt);
+    assert.equal(durableAfter.get("800003")?.sources[0]?.lastIncrementalSuccessAt, freshAt,
+      "History must not claim an incremental refresh for the healthy member");
+    console.log("PASS group CLI: overdue increments cross the history reservation, healthy work yields and D1 progress persists");
   } finally {
     pocket.closeAllConnections();
     await new Promise<void>((resolve, reject) => pocket.close(error => error ? reject(error) : resolve()));
