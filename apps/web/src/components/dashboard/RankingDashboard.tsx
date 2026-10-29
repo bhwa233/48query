@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { CalendarDays, ChevronLeft, ChevronRight, FileText, ImageIcon, MessageCircle, RefreshCw, Search, ShieldCheck, Trophy, Users } from "lucide-react";
-import type { QueryRankings } from "@starter/shared";
+import type { ArchiveContentTotals, QueryRankings } from "@starter/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +34,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   const from = archiveDate(searchParams.get("from")), to = archiveDate(searchParams.get("to"));
   const validRange = from && to && from <= to && to <= yesterday && Date.parse(to) - Date.parse(from) <= 365 * 86400_000;
   const range = validRange ? { from, to } : { from: yesterday, to: yesterday };
+  const heatmapDate = archiveDate(searchParams.get("heatmapDate"));
+  const selectedDate = validRange && heatmapDate === from && from === to ? heatmapDate : "";
   const selectedPeriod = searchParams.get("period") ?? (validRange ? "custom" : "yesterday");
   const period = ["yesterday", "week", "month", "custom"].includes(selectedPeriod) ? selectedPeriod : "yesterday";
   const [draft, setDraft] = useState(range);
@@ -51,6 +53,8 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   if (group !== "all") params.set("group", group);
   if (team !== "all") params.set("team", team);
   const state = useArchiveQuery<QueryRankings>(apiBaseUrl, `/api/query/rankings?${params}`);
+  const overviewParams = new URLSearchParams(selectedDate ? { from: selectedDate, to: selectedDate } : { to: yesterday });
+  const overview = useArchiveQuery<ArchiveContentTotals>(apiBaseUrl, `/api/query/content-summary?${overviewParams}`);
   const data = state.data?.data;
   // Retain only filter options while a new request loads; never show old totals as current data.
   const directory = data?.directory ?? state.previousData?.data.directory ?? [];
@@ -78,7 +82,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
   const pending = state.loading;
   const summary = [
     { key: "messages", label: t.summaryMessages, icon: FileText },
-    { key: "activeMembers", label: t.summaryActive, icon: Users },
+    { key: "members", label: t.summaryActive, icon: Users },
     { key: "images", label: t.summaryImages, icon: ImageIcon },
     { key: "replies", label: t.summaryReplies, icon: MessageCircle },
   ] as const;
@@ -88,9 +92,9 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
 
   function choosePeriod(value: string) {
     setRangeError(false);
-    if (value === "custom") { setDraft(range); updateArchiveUrl({ period: value }); return; }
+    if (value === "custom") { setDraft(range); updateArchiveUrl({ period: value, heatmapDate: null }); return; }
     const length = value === "week" ? 7 : value === "month" ? 30 : 1;
-    updateArchiveUrl({ period: value, from: new Date(Date.parse(yesterday) - (length - 1) * 86400_000).toISOString().slice(0, 10), to: yesterday });
+    updateArchiveUrl({ period: value, from: new Date(Date.parse(yesterday) - (length - 1) * 86400_000).toISOString().slice(0, 10), to: yesterday, heatmapDate: null });
     setPage(1);
   }
 
@@ -100,7 +104,12 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <section aria-label={t.stats} className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <section aria-label={selectedDate ? t.dailyOverview : t.cumulativeOverview}>
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <h2 className="text-sm font-semibold">{selectedDate ? t.dailyOverview : t.cumulativeOverview}</h2>
+          <p className="text-xs text-muted-foreground">{selectedDate ? selectedDate : `${t.cumulativeThrough} ${yesterday}`} ({t.beijingTime}) · {t.cumulativeCoverage}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {summary.map(({ key, label, icon: Icon }) => (
           <Card key={key} className="gap-1 rounded-lg py-2.5">
             <CardHeader className="flex flex-row items-center justify-between gap-2 px-3">
@@ -108,14 +117,16 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
             </CardHeader>
             <CardContent className="px-3">
               <div className="font-mono text-2xl font-semibold leading-7 tracking-tight tabular-nums">
-                {pending ? <Skeleton className="h-7 w-20" /> : data?.totals.activeMembers ? number.format(data.totals[key]) : <span className="text-muted-foreground">—</span>}
+                {overview.loading ? <Skeleton className="h-7 w-20" /> : overview.data ? number.format(overview.data.data[key]) : <span className="text-muted-foreground">—</span>}
               </div>
             </CardContent>
           </Card>
         ))}
+        </div>
+        {overview.failed ? <p role="alert" className="mt-2 text-xs text-destructive">{t.failure} <button type="button" className="underline" onClick={overview.retry}>{t.retry}</button></p> : null}
       </section>
 
-      <DailyActivity locale={locale} apiBaseUrl={apiBaseUrl} asOf={yesterday} group={group} team={team} onDateSelect={(date, year) => { updateArchiveUrl({ year, from: date, to: date, period: "custom" }); setPage(1); setRangeError(false); }} onClearDate={() => { updateArchiveUrl({ from: null, to: null, period: null }); setPage(1); setRangeError(false); }} />
+      <DailyActivity locale={locale} apiBaseUrl={apiBaseUrl} asOf={yesterday} group={group} team={team} onDateSelect={(date, year) => { updateArchiveUrl({ year, from: date, to: date, period: "custom", heatmapDate: date }); setPage(1); setRangeError(false); }} onClearDate={() => { updateArchiveUrl({ from: null, to: null, period: null, heatmapDate: null }); setPage(1); setRangeError(false); }} />
 
       <section id="rankings" aria-label={t.rankings} className="flex min-w-0 flex-col rounded-lg border border-border">
         <Tabs value={metric} onValueChange={value => { setMetric(value as Metric); setSort({ key: value as Metric, direction: "descending" }); setPage(1); }} className="flex-col gap-0">
@@ -158,7 +169,7 @@ export function RankingDashboard({ locale, apiBaseUrl, yesterday }: { locale: st
               <form className="grid grid-cols-2 items-end gap-2 sm:flex sm:flex-wrap" onSubmit={event => {
                 event.preventDefault();
                 if (!draft.from || !draft.to || draft.from > draft.to || draft.to > yesterday || Date.parse(draft.to) - Date.parse(draft.from) > 365 * 86400_000) { setRangeError(true); return; }
-                updateArchiveUrl({ ...draft, period: "custom" }); setPage(1); setRangeError(false);
+                updateArchiveUrl({ ...draft, period: "custom", heatmapDate: null }); setPage(1); setRangeError(false);
               }}>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:max-w-44"><Label htmlFor="rank-from">{t.from}</Label><Input required id="rank-from" type="date" className="rank-date h-8" max={draft.to || yesterday} value={draft.from} onChange={event => setDraft(value => ({ ...value, from: event.target.value }))} aria-invalid={rangeError} aria-describedby={rangeError ? "rank-range-help" : undefined} /></div>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:max-w-44"><Label htmlFor="rank-to">{t.to}</Label><Input required id="rank-to" type="date" className="rank-date h-8" min={draft.from} max={yesterday} value={draft.to} onChange={event => setDraft(value => ({ ...value, to: event.target.value }))} aria-invalid={rangeError} aria-describedby={rangeError ? "rank-range-help" : undefined} /></div>

@@ -84,8 +84,8 @@ export function registerArchivePages(app: OpenAPIHono<AppEnv>) {
 
   app.openapi(createRoute({ method: "get", path: "/content-summary", request: { query: totalsQuery }, responses: { 200: { description: "Message and distinct-image totals for the selected content filters.", content: { "application/json": { schema: QueryContentTotalsSchema } } }, 400: failure, 503: failure } }), async c => {
     const filter = scope(c.req.valid("query"));
-    const row = await c.env.APP_DB!.prepare(`SELECT COUNT(DISTINCT q.id) AS messages, COUNT(DISTINCT link.image_id) AS images, COUNT(DISTINCT CASE WHEN q.kind = 'reply' THEN q.id END) AS replies FROM ${joins} LEFT JOIN query_message_images link ON link.message_id = q.id WHERE ${filter.where}`).bind(...filter.values).first<{ messages: number; images: number; replies: number }>();
-    return c.json({ ok: true as const, data: row ?? { messages: 0, images: 0, replies: 0 } }, 200);
+    const row = await c.env.APP_DB!.prepare(`SELECT COUNT(DISTINCT q.id) AS messages, COUNT(DISTINCT q.member_id) AS members, COUNT(DISTINCT link.image_id) AS images, COUNT(DISTINCT CASE WHEN q.kind = 'reply' THEN q.id END) AS replies FROM ${joins} LEFT JOIN query_message_images link ON link.message_id = q.id WHERE ${filter.where}`).bind(...filter.values).first<{ messages: number; members: number; images: number; replies: number }>();
+    return c.json({ ok: true as const, data: row ?? { messages: 0, members: 0, images: 0, replies: 0 } }, 200);
   });
 
   app.openapi(createRoute({ method: "get", path: "/activity", request: { query: activityQuery }, responses: { 200: { description: "Full calendar-year archived activity, independent of list pagination.", content: { "application/json": { schema: QueryActivitySchema } } }, 400: failure, 503: failure } }), async c => {

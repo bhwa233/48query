@@ -214,7 +214,7 @@ export const ArchivePaginationSchema = z.object({ page: z.number().int().positiv
 export const ArchiveContentTotalsSchema = z.object({ messages: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() });
 export const QueryMessagePageSchema = z.object({ ok: z.literal(true), data: z.array(QueryMessageSchema), pagination: ArchivePaginationSchema });
 export const QueryImagePageSchema = z.object({ ok: z.literal(true), data: z.array(z.object({ image: ImageAttachmentSchema, message: QueryMessageSchema })), pagination: ArchivePaginationSchema });
-export const QueryContentTotalsSchema = z.object({ ok: z.literal(true), data: ArchiveContentTotalsSchema });
+export const QueryContentTotalsSchema = z.object({ ok: z.literal(true), data: ArchiveContentTotalsSchema.extend({ members: z.number().int().nonnegative() }) });
 export const QueryActivitySchema = z.object({ ok: z.literal(true), data: z.object({
   year: z.number().int(), years: z.array(z.number().int()), asOf: z.string(),
   days: z.array(z.object({ date: z.string(), messages: z.number().int().nonnegative(), images: z.number().int().nonnegative(), replies: z.number().int().nonnegative() })),
