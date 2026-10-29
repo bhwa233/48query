@@ -456,7 +456,7 @@ try {
   assert.equal(picturesOne.pagination.total, 4);
   assert.deepEqual([...picturesOne.data, ...picturesTwo.data].map(entry => entry.image.id), ["page-d", "page-a", "page-c", "page-b"]);
   assert.equal(picturesOne.data[1].message.id, "page-b", "A duplicate picture chooses its newest matching parent");
-  assert.deepEqual((await request(origin, "/api/query/content-summary?memberId=page-member&from=2024-02-29&to=2024-02-29")).json().data, { messages: 2, images: 3, replies: 1 });
+  assert.deepEqual((await request(origin, "/api/query/content-summary?memberId=page-member&from=2024-02-29&to=2024-02-29")).json().data, { messages: 2, members: 1, images: 3, replies: 1 });
   const activity = (await request(origin, "/api/query/activity?memberId=page-member")).json().data;
   assert.equal(activity.year, 2024, "An archived member opens the last year with records");
   assert.deepEqual(activity.days, [{ date: "2024-02-28", messages: 1, images: 2, replies: 0 }, { date: "2024-02-29", messages: 2, images: 3, replies: 1 }]);
